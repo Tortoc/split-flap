@@ -87,11 +87,46 @@ A simple sketch has been written to set the offset. Upload the `EEPROM_Write_Off
 
 #### Set Unit Address
 
-Every units address is set by a DIP switch. They need to be set ascending from zero in binary.
-This is how my 10 units are set, 1 means switch is in the up-position:
-| Unit 1 | Unit 2 | Unit 3 | Unit 4 | Unit 5 | Unit 6 | Unit 7 | Unit 8 | Unit 9 | Unit 10 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0000 | 0001 | 0010 | 0011 | 0100 | 0101 | 0110 | 0111 | 1000 | 1001 |
+Every unit's address is set by a DIP switch. They need to be set ascending from zero in binary.
+
+**DIP Switch Configuration:**
+- The DIP switch has 4 switches (SW1, SW2, SW3, SW4) from left to right
+- **SW1** (leftmost) = bit 3 (value 8)
+- **SW2** = bit 2 (value 4)
+- **SW3** = bit 1 (value 2)
+- **SW4** (rightmost) = bit 0 (value 1)
+- **Switch ON (up position)** = 1 in binary
+- **Switch OFF (down position)** = 0 in binary
+- Address = SW4×1 + SW3×2 + SW2×4 + SW1×8
+
+**Visual Guide for 3 Units:**
+```
+Unit 1 (Address 0):  [DOWN] [DOWN] [DOWN] [DOWN]  = 0000
+Unit 2 (Address 1):  [DOWN] [DOWN] [DOWN] [UP]    = 0001
+Unit 3 (Address 2):  [DOWN] [DOWN] [UP] [DOWN]     = 0010
+```
+
+**Complete Table for up to 10 Units:**
+| Unit | I2C Address | SW1 (left) | SW2 | SW3 | SW4 (right) | Binary | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Unit 1 | 0 | OFF (down) | OFF (down) | OFF (down) | OFF (down) | 0000 | All switches down |
+| Unit 2 | 1 | OFF (down) | OFF (down) | OFF (down) | **ON (up)** | 0001 | Rightmost switch up |
+| Unit 3 | 2 | OFF (down) | OFF (down) | **ON (up)** | OFF (down) | 0010 | Second from right up |
+| Unit 4 | 3 | OFF (down) | OFF (down) | **ON (up)** | **ON (up)** | 0011 | Last two switches up |
+| Unit 5 | 4 | OFF (down) | **ON (up)** | OFF (down) | OFF (down) | 0100 | Second from left up |
+| Unit 6 | 5 | OFF (down) | **ON (up)** | OFF (down) | **ON (up)** | 0101 | |
+| Unit 7 | 6 | OFF (down) | **ON (up)** | **ON (up)** | OFF (down) | 0110 | |
+| Unit 8 | 7 | OFF (down) | **ON (up)** | **ON (up)** | **ON (up)** | 0111 | |
+| Unit 9 | 8 | **ON (up)** | OFF (down) | OFF (down) | OFF (down) | 1000 | Leftmost switch up |
+| Unit 10 | 9 | **ON (up)** | OFF (down) | OFF (down) | **ON (up)** | 1001 | |
+
+**Important Notes:**
+- Each unit must have a **unique address** (0, 1, 2, 3, etc.)
+- Addresses must be **sequential starting from 0**
+- If you have 3 units, use addresses 0, 1, and 2
+- The ESPMaster code expects units to be numbered 0 through (UNITS_AMOUNT - 1)
+- After setting switches, power cycle the unit for the new address to take effect
+- You can verify addresses using the I2C scan feature (see ESPMaster README for diagnostic tools)
 
 ### ESP01/ESP8266
 

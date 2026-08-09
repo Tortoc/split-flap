@@ -4,6 +4,10 @@ const localDevelopment = false;
 //Various variables
 var unitCount = 0;
 var timezoneOffset = 0;
+var fullDebugLogData = null; // Store full debug log for copying
+var fullSerialLogData = null; // Store full serial log for copying
+var isPageLoading = true; // Track if page is still loading
+var pageLoadErrors = []; // Store page load errors and status messages
 
 //Used for submission!
 const form = document.getElementById('form');
@@ -63,8 +67,58 @@ form.onsubmit = function () {
 	}
 }
 
+// Log page load errors and status
+function logPageLoadStatus(message, isError) {
+	var timestamp = new Date().toLocaleTimeString();
+	var logEntry = "[" + timestamp + "] " + message;
+	pageLoadErrors.push(logEntry);
+	
+	var container = document.getElementById("pageLoadErrorContent");
+	if (container) {
+		var color = isError ? "#f48771" : "#4ec9b0";
+		var html = container.innerHTML;
+		html += '<div style="margin-bottom: 2px; padding: 1px 0; color: ' + color + ';">' + escapeHtml(logEntry) + '</div>';
+		container.innerHTML = html;
+		container.scrollTop = container.scrollHeight;
+		
+		// Show the error log if there are errors
+		var errorLogDiv = document.getElementById("pageLoadErrorLog");
+		if (errorLogDiv && (isError || pageLoadErrors.length > 0)) {
+			errorLogDiv.style.display = "block";
+		}
+	}
+	
+	// Also log to console
+	if (isError) {
+		console.error(logEntry);
+	} else {
+		console.log(logEntry);
+	}
+}
+
+// Catch JavaScript errors
+window.addEventListener('error', function(e) {
+	logPageLoadStatus("JavaScript Error: " + e.message + " at " + e.filename + ":" + e.lineno, true);
+});
+
+// Catch unhandled promise rejections
+window.addEventListener('unhandledrejection', function(e) {
+	logPageLoadStatus("Unhandled Promise Rejection: " + e.reason, true);
+});
+
 // Retrieve current Split-Flap settings when the page loads/refreshes
-window.addEventListener('load', loadPage);
+window.addEventListener('load', function() {
+	logPageLoadStatus("Page load event fired", false);
+	loadPage();
+});
+
+// Start loading debug log immediately when page loads
+var debugLogInterval = null;
+window.addEventListener('DOMContentLoaded', function() {
+	logPageLoadStatus("DOMContentLoaded event fired", false);
+	loadDebugLog();
+	debugLogInterval = setInterval(loadDebugLog, 500); // Refresh every 500ms during page load
+});
 
 // Request and retrieve settings from ESP-01s filesystem
 function loadPage() {
@@ -99,6 +153,7 @@ function loadPage() {
 		setVersion("Development")
 		setUnitCount("10");
 		setLastReceivedMessage(new Date().toLocaleString());
+		setWiFiStatus("Connected", -65, "192.168.1.100"); // Mock WiFi status for development
 		setCountdownDate((Date.now() / 1000) + (24 * 60 * 60));
 		showHideResetWifiSettingsAction(false);
 		showHideOtaUpdateAction(false);
@@ -115,33 +170,79 @@ function loadPage() {
 		}, 1000);
 	}
 	else {
+		logPageLoadStatus("Starting /settings request...", false);
+		var settingsRequestStart = Date.now();
+		
 		var xhrRequest = new XMLHttpRequest();
-		xhrRequest.onreadystatechange = function () {
-			if (this.readyState == 4 && this.status == 200) {
-				var responseObject = JSON.parse(this.responseText);
-				
-				timezoneOffset = responseObject.timezoneOffset;
-
-				setSpeed(responseObject.flapSpeed);
-				setSavedMode(responseObject.deviceMode);
-				setAlignment(responseObject.alignment);
-				setVersion(responseObject.version);
-				setUnitCount(responseObject.unitCount);
-				setCountdownDate(responseObject.countdownToDateUnix);
-				setLastReceivedMessage(responseObject.lastTimeReceivedMessageDateTime);
-				showHideResetWifiSettingsAction(responseObject.wifiSettingsResettable);
-				showHideOtaUpdateAction(responseObject.otaEnabled);
-				
-				if (responseObject.scheduledMessages) {
-					showScheduledMessages(responseObject.scheduledMessages);
-				}
-
-				showContent();
+		
+		// Set timeout (30 seconds)
+		var timeoutId = setTimeout(function() {
+			if (xhrRequest.readyState !== 4) {
+				xhrRequest.abort();
+				var elapsed = ((Date.now() - settingsRequestStart) / 1000).toFixed(1);
+				logPageLoadStatus("ERROR: /settings request timed out after " + elapsed + " seconds", true);
+				showContent(); // Show page anyway, even if settings failed
 			}
+		}, 30000);
+		
+		xhrRequest.onreadystatechange = function () {
+			if (this.readyState == 4) {
+				clearTimeout(timeoutId);
+				var elapsed = ((Date.now() - settingsRequestStart) / 1000).toFixed(1);
+				
+				if (this.status == 200) {
+					logPageLoadStatus("/settings request completed successfully in " + elapsed + "s", false);
+					try {
+						var responseObject = JSON.parse(this.responseText);
+						logPageLoadStatus("JSON parsed successfully", false);
+						
+						timezoneOffset = responseObject.timezoneOffset;
+
+						setSpeed(responseObject.flapSpeed);
+						setSavedMode(responseObject.deviceMode);
+						setAlignment(responseObject.alignment);
+						setVersion(responseObject.version);
+						setUnitCount(responseObject.unitCount);
+						setCountdownDate(responseObject.countdownToDateUnix);
+						setLastReceivedMessage(responseObject.lastTimeReceivedMessageDateTime);
+						setWiFiStatus(responseObject.wifiStatus, responseObject.wifiRssi, responseObject.wifiIp);
+						showHideResetWifiSettingsAction(responseObject.wifiSettingsResettable);
+						showHideOtaUpdateAction(responseObject.otaEnabled);
+						
+						if (responseObject.scheduledMessages) {
+							showScheduledMessages(responseObject.scheduledMessages);
+						}
+
+						showContent();
+					} catch (e) {
+						logPageLoadStatus("ERROR: Failed to parse JSON response: " + e.message, true);
+						logPageLoadStatus("Response was: " + this.responseText.substring(0, 200), true);
+						showContent(); // Show page anyway
+					}
+				} else {
+					logPageLoadStatus("ERROR: /settings request failed with status " + this.status + " after " + elapsed + "s", true);
+					logPageLoadStatus("Response: " + (this.responseText || "No response"), true);
+					showContent(); // Show page anyway
+				}
+			} else if (this.readyState == 1) {
+				logPageLoadStatus("/settings request opened, waiting for response...", false);
+			} else if (this.readyState == 2) {
+				logPageLoadStatus("/settings request received headers (status: " + this.status + ")", false);
+			} else if (this.readyState == 3) {
+				logPageLoadStatus("/settings request loading...", false);
+			}
+		};
+		
+		xhrRequest.onerror = function() {
+			clearTimeout(timeoutId);
+			var elapsed = ((Date.now() - settingsRequestStart) / 1000).toFixed(1);
+			logPageLoadStatus("ERROR: Network error on /settings request after " + elapsed + "s", true);
+			showContent(); // Show page anyway
 		};
 
 		xhrRequest.open("GET", "/settings", true);
 		xhrRequest.send();
+		logPageLoadStatus("/settings request sent", false);
 	}
 }
 
@@ -319,6 +420,51 @@ function setLastReceivedMessage(time) {
 	document.getElementById("labelLastMessageReceived").innerHTML = timeMessage;
 }
 
+//Sets the WiFi status with signal strength and qualitative assessment
+function setWiFiStatus(status, rssi, ip) {
+	var labelWiFiStatus = document.getElementById("labelWiFiStatus");
+	var statusText = "";
+	var statusColor = "#888";
+	
+	if (status === "Connected" && rssi !== undefined && rssi !== null) {
+		// Determine qualitative assessment based on RSSI
+		var quality = "";
+		var qualityColor = "";
+		
+		if (rssi >= -50) {
+			quality = "Excellent";
+			qualityColor = "#4caf50"; // Green
+		} else if (rssi >= -60) {
+			quality = "Very Good";
+			qualityColor = "#8bc34a"; // Light green
+		} else if (rssi >= -70) {
+			quality = "Good";
+			qualityColor = "#cddc39"; // Lime
+		} else if (rssi >= -80) {
+			quality = "Fair";
+			qualityColor = "#ffc107"; // Amber
+		} else if (rssi >= -90) {
+			quality = "Weak";
+			qualityColor = "#ff9800"; // Orange
+		} else {
+			quality = "Very Weak";
+			qualityColor = "#f44336"; // Red
+		}
+		
+		statusText = status + " (" + rssi + " dBm) - <span style='color: " + qualityColor + "; font-weight: bold;'>" + quality + "</span>";
+		statusColor = "#4caf50"; // Green for connected
+	} else if (status === "Disconnected") {
+		statusText = "Disconnected";
+		statusColor = "#f44336"; // Red
+	} else {
+		statusText = "Unknown";
+		statusColor = "#888"; // Gray
+	}
+	
+	labelWiFiStatus.innerHTML = statusText;
+	labelWiFiStatus.style.color = statusColor;
+}
+
 //Used for scheduling messages
 function showHideScheduledMessageInput() {
 	var scheduleOptionsElement = document.getElementById("divScheduleOptions");
@@ -401,4 +547,252 @@ function showContent() {
 
 	elementInitialLoading.classList.add("hidden");
 	elementContent.classList.remove("hidden");
+	
+	// Stop the fast debug log refresh, switch to slower refresh
+	if (debugLogInterval) {
+		clearInterval(debugLogInterval);
+		debugLogInterval = null;
+	}
+	
+	isPageLoading = false; // Page has finished loading
+	
+	// Load serial log
+	refreshLog();
+	// Auto-refresh log every 2 seconds
+	setInterval(refreshLog, 2000);
+}
+
+// Fetch and display serial log
+function refreshLog() {
+	var xhrRequest = new XMLHttpRequest();
+	xhrRequest.onreadystatechange = function () {
+		if (this.readyState == 4 && this.status == 200) {
+			var responseObject = JSON.parse(this.responseText);
+			displaySerialLog(responseObject);
+		}
+	};
+
+	xhrRequest.open("GET", "/log", true);
+	xhrRequest.send();
+}
+
+// Display serial log messages
+function displaySerialLog(logData) {
+	var container = document.getElementById("containerSerialLog");
+	var countElement = document.getElementById("spanLogCount");
+	
+	// Store full log data for copying
+	fullSerialLogData = logData;
+	
+	countElement.innerText = logData.count || 0;
+	
+	if (!logData.logs || logData.logs.length === 0) {
+		container.innerHTML = '<div style="color: #888;">No log messages yet.</div>';
+		return;
+	}
+	
+	var html = "";
+	for (var i = 0; i < logData.logs.length; i++) {
+		var logEntry = logData.logs[i];
+		// Timestamp is in milliseconds since boot, format as seconds with 1 decimal
+		var timestampSec = (logEntry.timestamp / 1000).toFixed(1) + "s";
+		var message = logEntry.message || "";
+		
+		// Escape HTML and add some color coding
+		message = escapeHtml(message);
+		if (message.indexOf("DEBUG:") >= 0) {
+			message = '<span style="color: #4ec9b0;">' + message + '</span>';
+		} else if (message.indexOf("ERROR") >= 0 || message.indexOf("Error") >= 0) {
+			message = '<span style="color: #f48771;">' + message + '</span>';
+		} else if (message.indexOf("WARNING") >= 0 || message.indexOf("Warning") >= 0) {
+			message = '<span style="color: #dcdcaa;">' + message + '</span>';
+		}
+		
+		html += '<div style="margin-bottom: 4px; padding: 2px 0; border-bottom: 1px solid #333;">';
+		html += '<span style="color: #808080; margin-right: 10px;">[' + timestampSec + ']</span>';
+		html += message;
+		html += '</div>';
+	}
+	
+	container.innerHTML = html;
+	// Auto-scroll to bottom
+	container.scrollTop = container.scrollHeight;
+}
+
+// Helper function to escape HTML
+function escapeHtml(text) {
+	var map = {
+		'&': '&amp;',
+		'<': '&lt;',
+		'>': '&gt;',
+		'"': '&quot;',
+		"'": '&#039;'
+	};
+	return text.replace(/[&<>"']/g, function(m) { return map[m]; });
+}
+
+// Load and display debug log (for page load debugging)
+function loadDebugLog() {
+	var xhrRequest = new XMLHttpRequest();
+	xhrRequest.onreadystatechange = function () {
+		if (this.readyState == 4) {
+			if (this.status == 200) {
+				try {
+					var responseObject = JSON.parse(this.responseText);
+					displayDebugLog(responseObject);
+				} catch (e) {
+					logPageLoadStatus("ERROR: Failed to parse /log response: " + e.message, true);
+				}
+			} else {
+				logPageLoadStatus("ERROR: /log request failed with status " + this.status, true);
+			}
+		}
+	};
+	
+	xhrRequest.onerror = function() {
+		logPageLoadStatus("ERROR: Network error on /log request", true);
+	};
+
+	xhrRequest.open("GET", "/log", true);
+	xhrRequest.send();
+}
+
+// Display debug log in the top viewer
+function displayDebugLog(logData) {
+	var container = document.getElementById("debugLogContent");
+	
+	// Store full log data for copying
+	fullDebugLogData = logData;
+	
+	if (!logData.logs || logData.logs.length === 0) {
+		container.innerHTML = '<div style="color: #888;">No log messages yet.</div>';
+		return;
+	}
+	
+	// During page load, show full log. After page loads, show only last 15 messages
+	var startIdx = isPageLoading ? 0 : Math.max(0, logData.logs.length - 15);
+	var html = "";
+	for (var i = startIdx; i < logData.logs.length; i++) {
+		var logEntry = logData.logs[i];
+		var timestampSec = (logEntry.timestamp / 1000).toFixed(1) + "s";
+		var message = logEntry.message || "";
+		
+		// Escape HTML and add color coding
+		message = escapeHtml(message);
+		var color = "#d4d4d4"; // default
+		if (message.indexOf("DEBUG:") >= 0) {
+			color = "#4ec9b0";
+		} else if (message.indexOf("ERROR") >= 0 || message.indexOf("Error") >= 0) {
+			color = "#f48771";
+		} else if (message.indexOf("WARNING") >= 0 || message.indexOf("Warning") >= 0) {
+			color = "#dcdcaa";
+		}
+		
+		html += '<div style="margin-bottom: 2px; padding: 1px 0; font-size: 0.9em;">';
+		html += '<span style="color: #808080; margin-right: 8px;">[' + timestampSec + ']</span>';
+		html += '<span style="color: ' + color + ';">' + message + '</span>';
+		html += '</div>';
+	}
+	
+	container.innerHTML = html;
+	// Auto-scroll to bottom
+	container.scrollTop = container.scrollHeight;
+}
+
+// Toggle debug log viewer visibility
+function toggleDebugLog() {
+	var viewer = document.getElementById("debugLogViewer");
+	if (viewer.style.display === "none") {
+		viewer.style.display = "block";
+		loadDebugLog();
+	} else {
+		viewer.style.display = "none";
+	}
+}
+
+// Toggle page load error log visibility
+function togglePageLoadLog() {
+	var viewer = document.getElementById("pageLoadErrorLog");
+	if (viewer.style.display === "none") {
+		viewer.style.display = "block";
+	} else {
+		viewer.style.display = "none";
+	}
+}
+
+// Copy full debug log to clipboard
+function copyDebugLog() {
+	if (!fullDebugLogData || !fullDebugLogData.logs || fullDebugLogData.logs.length === 0) {
+		alert("No log data available to copy.");
+		return;
+	}
+	
+	var logText = "";
+	for (var i = 0; i < fullDebugLogData.logs.length; i++) {
+		var logEntry = fullDebugLogData.logs[i];
+		var timestampSec = (logEntry.timestamp / 1000).toFixed(1) + "s";
+		var message = logEntry.message || "";
+		logText += "[" + timestampSec + "] " + message + "\n";
+	}
+	
+	// Copy to clipboard
+	var textArea = document.createElement("textarea");
+	textArea.value = logText;
+	textArea.style.position = "fixed";
+	textArea.style.opacity = "0";
+	document.body.appendChild(textArea);
+	textArea.select();
+	try {
+		document.execCommand('copy');
+		alert("Debug log copied to clipboard!");
+	} catch (err) {
+		alert("Failed to copy log. Please select and copy manually.");
+	}
+	document.body.removeChild(textArea);
+}
+
+// Toggle serial log visibility
+function toggleSerialLog() {
+	var container = document.getElementById("containerSerialLog");
+	var button = document.getElementById("btnToggleSerialLog");
+	
+	if (container.style.display === "none") {
+		container.style.display = "block";
+		if (button) button.textContent = "Hide";
+		refreshLog(); // Refresh when showing
+	} else {
+		container.style.display = "none";
+		if (button) button.textContent = "Show";
+	}
+}
+
+// Copy full serial log to clipboard
+function copySerialLog() {
+	if (!fullSerialLogData || !fullSerialLogData.logs || fullSerialLogData.logs.length === 0) {
+		alert("No log data available to copy.");
+		return;
+	}
+	
+	var logText = "";
+	for (var i = 0; i < fullSerialLogData.logs.length; i++) {
+		var logEntry = fullSerialLogData.logs[i];
+		var timestampSec = (logEntry.timestamp / 1000).toFixed(1) + "s";
+		var message = logEntry.message || "";
+		logText += "[" + timestampSec + "] " + message + "\n";
+	}
+	
+	// Copy to clipboard
+	var textArea = document.createElement("textarea");
+	textArea.value = logText;
+	textArea.style.position = "fixed";
+	textArea.style.opacity = "0";
+	document.body.appendChild(textArea);
+	textArea.select();
+	try {
+		document.execCommand('copy');
+		alert("Serial log copied to clipboard!");
+	} catch (err) {
+		alert("Failed to copy log. Please select and copy manually.");
+	}
+	document.body.removeChild(textArea);
 }

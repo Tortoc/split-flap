@@ -50,40 +50,119 @@ void initWiFi() {
   SerialPrintln("Setting up WiFi Direct");
 
   if (wifiDirectSsid != "" && wifiDirectPassword != "") {
-    int maxAttemptsCount = 0;
+    // Disconnect any existing connection first
+    WiFi.disconnect(true);
+    delay(100);
+    yield();
+    
+    // Enable auto-reconnect for better reliability
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(true);
+    
+    // Set WiFi power to maximum for better range (ESP01 specific)
+    WiFi.setOutputPower(20.5); // Maximum power (20.5 dBm)
+    
+    SerialPrintln("DEBUG: WiFi disconnected, starting fresh connection");
+    SerialPrintln("DEBUG: SSID: " + String(wifiDirectSsid));
+    SerialPrintln("DEBUG: Attempting connection (timeout: " + String(wifiConnectTimeoutSeconds) + "s)");
     
 #if WIFI_STATIC_IP == true
+    SerialPrintln("DEBUG: Configuring static IP...");
     if (WiFi.config(wifiDeviceStaticIp, wifiRouterGateway, wifiSubnet, wifiPrimaryDns)) {
-      SerialPrintln("WiFi Static IP Configuration Success");
+      SerialPrintln("DEBUG: WiFi Static IP Configuration Success");
+      delay(100);
+      yield();
     }
     else {
-      SerialPrintln("WiFi Static IP Configuration could not take place");
+      SerialPrintln("DEBUG: WiFi Static IP Configuration could not take place");
     }
 #endif
     
+    // Start connection
     WiFi.begin(wifiDirectSsid, wifiDirectPassword);
-    SerialPrint("Connecting");
+    SerialPrint("DEBUG: Connecting");
+    
+    unsigned long connectionStartTime = millis();
+    int maxAttemptsCount = 0;
+    int lastStatus = WL_IDLE_STATUS;
 
-    while (WiFi.status() != WL_CONNECTED && maxAttemptsCount != wifiConnectTimeoutSeconds) {
-      if (maxAttemptsCount % 10 == 0) {
+    while (WiFi.status() != WL_CONNECTED && maxAttemptsCount < wifiConnectTimeoutSeconds) {
+      int currentStatus = WiFi.status();
+      
+      // Log status changes
+      if (currentStatus != lastStatus) {
+        SerialPrintln("");
+        SerialPrint("DEBUG: WiFi status changed: ");
+        switch(currentStatus) {
+          case WL_IDLE_STATUS: SerialPrintln("IDLE"); break;
+          case WL_NO_SSID_AVAIL: SerialPrintln("NO_SSID_AVAIL"); break;
+          case WL_SCAN_COMPLETED: SerialPrintln("SCAN_COMPLETED"); break;
+          case WL_CONNECTED: SerialPrintln("CONNECTED"); break;
+          case WL_CONNECT_FAILED: SerialPrintln("CONNECT_FAILED"); break;
+          case WL_CONNECTION_LOST: SerialPrintln("CONNECTION_LOST"); break;
+          case WL_DISCONNECTED: SerialPrintln("DISCONNECTED"); break;
+          default: SerialPrintln("UNKNOWN (" + String(currentStatus) + ")"); break;
+        }
+        lastStatus = currentStatus;
+      }
+      
+      if (maxAttemptsCount % 10 == 0 && maxAttemptsCount > 0) {
         SerialPrint('\n');
+        SerialPrint("DEBUG: Still connecting... (" + String(maxAttemptsCount) + "s elapsed)");
       }
       else {
         SerialPrint('.');
       }
 
-      delay(1000);
+      // Use smaller delays with yield() to allow WiFi stack to process
+      delay(500);
+      yield();
+      delay(500);
+      yield();
 
-      maxAttemptsCount++;      
+      maxAttemptsCount++;
+      
+      // Check if we've exceeded timeout
+      if ((millis() - connectionStartTime) > (wifiConnectTimeoutSeconds * 1000)) {
+        SerialPrintln("");
+        SerialPrintln("DEBUG: Connection timeout exceeded");
+        break;
+      }
     }
 
-    //If we reached the max timeout
-    if (maxAttemptsCount != wifiConnectTimeoutSeconds) {
-      SerialPrint("Successfully Connected to WiFi. IP Address: ");
+    // Verify connection
+    if (WiFi.status() == WL_CONNECTED) {
+      SerialPrintln("");
+      SerialPrint("DEBUG: Successfully Connected to WiFi. IP Address: ");
       SerialPrintln(WiFi.localIP());
-
-      isWifiConfigured = true;
+      SerialPrintln("DEBUG: Signal Strength (RSSI): " + String(WiFi.RSSI()) + " dBm");
+      SerialPrintln("DEBUG: Connection took " + String(maxAttemptsCount) + " seconds");
+      
+      // Wait a moment for connection to stabilize
+      delay(500);
+      yield();
+      
+      // Double-check connection is still good
+      if (WiFi.status() == WL_CONNECTED) {
+        isWifiConfigured = true;
+      } else {
+        SerialPrintln("DEBUG: WARNING - Connection lost immediately after connect!");
+        isWifiConfigured = false;
+      }
+    } else {
+      SerialPrintln("");
+      SerialPrintln("DEBUG: ERROR - Failed to connect to WiFi after " + String(maxAttemptsCount) + " seconds");
+      SerialPrintln("DEBUG: Final WiFi status: " + String(WiFi.status()));
+      SerialPrintln("DEBUG: Possible causes:");
+      SerialPrintln("DEBUG:   - Incorrect SSID or password");
+      SerialPrintln("DEBUG:   - Router not in range");
+      SerialPrintln("DEBUG:   - Router not allowing new connections");
+      SerialPrintln("DEBUG:   - Power supply issues (ESP01 needs stable 3.3V)");
+      isWifiConfigured = false;
     }
+  } else {
+    SerialPrintln("DEBUG: ERROR - WiFi SSID or password not configured!");
+    isWifiConfigured = false;
   }
 
 #endif

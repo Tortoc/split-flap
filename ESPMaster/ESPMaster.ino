@@ -10,6 +10,8 @@
   None of this would be possible without the brilliant work of David Königsmann: https://github.com/Dave19171/split-flap
 
   Licensed under GNU: https://github.com/JonnyBooker/split-flap/blob/master/LICENSE
+  
+  Modified by Scott - Added LED debug codes and non-blocking operations for better web server responsiveness
 */
 
 /* .--------------------------------------------------------------------------------. */
@@ -25,21 +27,111 @@
 */
 #define SERIAL_ENABLE       false   //Option to enable serial debug messages
 #define UNIT_CALLS_DISABLE  false   //Option to disable the call to the units so can just debug the ESP with no connections
-#define OTA_ENABLE          true    //Option to enable OTA functionality
-#define UNITS_AMOUNT        10      //Amount of connected units !IMPORTANT TO BE SET CORRECTLY!
+#define OTA_ENABLE          false    //Option to enable OTA functionality
+#define UNITS_AMOUNT        3      //Amount of connected units !IMPORTANT TO BE SET CORRECTLY!
 #define SERIAL_BAUDRATE     115200  //Serial debugging BAUD rate
-#define WIFI_USE_DIRECT     false   //Option to either direct connect to a WiFi Network or setup a AP to configure WiFi. Setting to false will setup as a AP.
+#define WIFI_USE_DIRECT     true   //Option to either direct connect to a WiFi Network or setup a AP to configure WiFi. Setting to false will setup as a AP.
+#define LED_ENABLE          true   //Option to enable LED debug blink codes (set to false if not using LED)
+#define DEBUG_ENABLE true  //Enable debug features: startup debug page, error status panel, page load debug log, and serial debug log at bottom of page
 
 /*
   EXPERIMENTAL: Try to use your Router when possible to set a Static IP address for your device to avoid conflicts with other devices
   on your network. This will try and setup your device with a static IP address of your chosing. See below for more details.
 */
-#define WIFI_STATIC_IP      false
+#define WIFI_STATIC_IP      true
 //#define FAE_MOD                   //Option for the modified PCB that includes an ESP-12F module
+
+/*
+  ============================================================================
+  ESP01 PINOUT DIAGRAM (2 rows x 4 pins)
+  ============================================================================
+  
+  ESP01 has 8 pins arranged in 2 rows of 4 pins. Looking at the module with
+  the antenna at the top:
+  
+         [Antenna]
+            |
+      ┌─────┴─────┐
+      │   ESP01   │
+      └─────┬─────┘
+            |
+  
+  Pin Layout (2 rows x 4 pins):
+  
+  TOP ROW (left to right):
+  ┌─────────┬─────────┬─────────┬─────────┐
+  │ Pin 1   │ Pin 2   │ Pin 3   │ Pin 4   │
+  │  GND    │ GPIO 2  │ GPIO 0  │GPIO 1/TX│
+  └─────────┴─────────┴─────────┴─────────┘
+  
+  BOTTOM ROW (left to right):
+  ┌─────────┬─────────┬─────────┬─────────┐
+  │ Pin 5   │ Pin 6   │ Pin 7   │ Pin 8   │
+  │ CH_PD   │  RST    │  VCC    │GPIO 3/RX│
+  └─────────┴─────────┴─────────┴─────────┘
+  
+  Detailed Pin Function Table:
+  ┌─────────┬──────────────┬─────────────────────────────────────────────┐
+  │ Pin #   │ Pin Name     │ Function / Notes                            │
+  ├─────────┼──────────────┼─────────────────────────────────────────────┤
+  │ 1       │ GND         │ Ground reference (0V)                        │
+  │ 2       │ GPIO 2      │ Available for external LED (this code)       │
+  │ 3       │ GPIO 0      │ Boot mode pin (LOW = flash/programming mode)│
+  │ 4       │ GPIO 1 / TX │ Serial TX / Built-in blue LED / I2C SDA      │
+  │         │             │   (Used for I2C in this code: Wire.begin)   │
+  │ 5       │ CH_PD       │ Chip enable (must be HIGH, connect to 3.3V) │
+  │         │             │   Typically via 10kΩ pull-up resistor        │
+  │ 6       │ RST         │ Reset (LOW = reset, HIGH = normal operation)│
+  │         │             │   Typically via 10kΩ pull-up resistor       │
+  │ 7       │ VCC         │ Power input (3.3V ONLY, NOT 5V!)            │
+  │         │             │   ⚠️ WARNING: 5V will damage the module!    │
+  │ 8       │ GPIO 3 / RX │ Serial RX / I2C SCL                         │
+  │         │             │   (Used for I2C in this code: Wire.begin)   │
+  └─────────┴──────────────┴─────────────────────────────────────────────┘
+  
+  Important Notes:
+  - VCC must be 3.3V (NOT 5V - will damage the module!)
+  - GPIO 0 must be HIGH during normal operation (LOW = programming mode)
+  - CH_PD must be HIGH (connect to 3.3V, typically via 10kΩ resistor)
+  - RST must be HIGH (connect to 3.3V, typically via 10kΩ resistor)
+  - GPIO 1 has built-in blue LED (active LOW) but is used for I2C in this code
+  - GPIO 2 is available for external LED connection
+  - GPIO 1 and GPIO 3 are used for I2C communication (Wire.begin(1, 3))
+  
+  ============================================================================
+*/
+
+// LED Debug Pin Configuration for ESP01
+// Since GPIO 1 is used for I2C (Wire.begin(1, 3)), we use GPIO 2 for LED
+// You need to connect an external LED: LED anode -> GPIO 2, LED cathode -> GND
+// Use a 220-470 ohm resistor in series with the LED
+//
+// Alternative: If not using I2C, change to GPIO 1 to use built-in blue LED
+#define LED_DEBUG_PIN 2  // GPIO 2 = external LED (GPIO 1 is used for I2C)
+#define LED_ON HIGH      // External LED: HIGH = ON (opposite of built-in LED)
+#define LED_OFF LOW
+
+/*
+  LED BLINK CODE REFERENCE:
+  The LED on GPIO 2 will blink to indicate system status during initialization:
+  
+  1 blink   = WiFi connecting
+  2 blinks  = WiFi connected successfully
+  3 blinks  = NTP time synchronization starting
+  4 blinks  = NTP sync successful
+  5 blinks  = NTP sync failed or timed out
+  6 blinks  = File system initialization
+  7 blinks  = Web server starting
+  8 blinks  = Web server ready - system operational
+  Continuous = Error detected (WiFi connection failed, etc.)
+  
+  These codes help identify where the system is during startup and can aid in
+  troubleshooting initialization issues.
+*/
 
 /* .--------------------------------------------------------. */
 /* | ___         _               ___       __ _             | */
-/* |/ __|_  _ __| |_ ___ _ __   |   \ ___ / _(_)_ _  ___ ___| */
+/* |/ __|_  _ __|_| ___ _ __   |   \ ___ / _(_)_ _  ___ ___| */
 /* |\__ | || (_-|  _/ -_| '  \  | |) / -_|  _| | ' \/ -_(_-<| */
 /* ||___/\_, /__/\__\___|_|_|_| |___/\___|_| |_|_||_\___/__/| */
 /* |     |__/                                               | */
@@ -87,6 +179,7 @@
 #include <Wire.h>
 #include "Classes.h"
 #include "LittleFS.h"
+
 /* .------------------------------------------------------------------------------------. */
 /* |  ___           __ _                    _    _       ___     _   _   _              | */
 /* | / __|___ _ _  / _(_)__ _ _  _ _ _ __ _| |__| |___  / __|___| |_| |_(_)_ _  __ _ ___| */
@@ -102,11 +195,11 @@ const char* wifiDirectSsid = "";
 const char* wifiDirectPassword = "";
 
 //Change if you want to have an Over The Air (OTA) Password for updates
-const char* otaPassword = "";
+const char* otaPassword = "0424";
 
 //Change this to your timezone, use the TZ database name
 //https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
-const char* timezoneString = "Europe/London";
+const char* timezoneString = "America/Los_Angeles";
 
 //If you want to have a different date or clock format change these two
 //Complete table with every char: https://github.com/ropg/ezTime#getting-date-and-time
@@ -119,10 +212,10 @@ const int scheduledMessageDisplayTimeMillis = 7500;
 #if WIFI_STATIC_IP == true
 //Static IP address for your device. Try take care to not conflict with something else on your network otherwise
 //it is likely to not work
-IPAddress wifiDeviceStaticIp(192, 168, 1, 100);
+IPAddress wifiDeviceStaticIp(192, 168, 0, 111);
 
 //Your router details
-IPAddress wifiRouterGateway(192, 168, 1, 1);
+IPAddress wifiRouterGateway(192, 168, 0, 1);
 IPAddress wifiSubnet(255, 255, 0, 0);
 
 //DNS Entry. Default: Google DNS
@@ -131,7 +224,7 @@ IPAddress wifiPrimaryDns(8, 8, 8, 8);
 
 /* .------------------------------------------------------------. */
 /* | ___         _               ___     _   _   _              | */
-/* |/ __|_  _ __| |_ ___ _ __   / __|___| |_| |_(_)_ _  __ _ ___| */
+/* |/ __|_  _ __|_| ___ _ __   / __|___| |_| |_(_)_ _  __ _ ___| */
 /* |\__ | || (_-|  _/ -_| '  \  \__ / -_|  _|  _| | ' \/ _` (_-<| */
 /* ||___/\_, /__/\__\___|_|_|_| |___\___|\__|\__|_|_||_\__, /__/| */
 /* |     |__/                                          |___/    | */
@@ -141,7 +234,7 @@ IPAddress wifiPrimaryDns(8, 8, 8, 8);
   behave a little strange.
 */
 //The current version of code to display on the UI
-const char* espVersion = "2.3.0";
+const char* espVersion = "2.3.0-Scott";
 
 //All the letters on the units that we have to be displayed. You can change these if it so pleases at your own risk
 const char letters[] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '$', '&', '#', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', '-', '?', '!'};
@@ -176,6 +269,7 @@ const char* flapSpeedPath = "/flapspeed.txt";
 const char* deviceModePath = "/devicemode.txt";
 const char* countdownPath = "/countdown.txt";
 const char* scheduledMessagesPath = "/scheduled-messages.txt";
+const char* debugModePath = "/debugmode.txt";
 
 //Variables for storing things for checking and use in normal running
 String alignment = "";
@@ -189,6 +283,8 @@ bool alignmentUpdated = false;
 bool isPendingReboot = false;
 bool isPendingUnitsReset = false;
 bool isWifiConfigured = false;
+bool showDebugPage = true; // Default to showing debug page on first boot
+volatile bool webRequestActive = false; // Flag to skip display updates during web requests
 LList<ScheduledMessage> scheduledMessages;
 Timezone timezone; 
 
@@ -206,6 +302,38 @@ bool isPendingWifiReset = false;
 bool isInOtaMode = false;
 #endif
 
+// LED Debugging variables
+String debugStatus = "";
+
+// Serial log buffer for web interface (circular buffer, stores last 100 messages)
+#define SERIAL_LOG_SIZE 100
+struct SerialLogEntry {
+  String message;
+  unsigned long timestamp;
+};
+SerialLogEntry serialLog[SERIAL_LOG_SIZE];
+int serialLogIndex = 0;
+int serialLogCount = 0;
+String currentSerialLine = ""; // Buffer for building complete lines
+
+// Function to add message to serial log buffer
+void addToSerialLog(String message) {
+  if (message.length() == 0) return; // Don't log empty messages
+  
+  // Add timestamp
+  unsigned long timestamp = millis();
+  
+  // Store in circular buffer
+  serialLog[serialLogIndex].message = message;
+  serialLog[serialLogIndex].timestamp = timestamp;
+  
+  // Update indices
+  serialLogIndex = (serialLogIndex + 1) % SERIAL_LOG_SIZE;
+  if (serialLogCount < SERIAL_LOG_SIZE) {
+    serialLogCount++;
+  }
+}
+
 /* .-----------------------------------------------. */
 /* | ___          _          ___     _             | */
 /* ||   \ _____ _(_)__ ___  / __|___| |_ _  _ _ __ | */
@@ -213,6 +341,33 @@ bool isInOtaMode = false;
 /* ||___/\___|\_/|_\__\___| |___\___|\__|\_,_| .__/| */
 /* |                                         |_|   | */
 /* '-----------------------------------------------' */
+
+// LED Blink Code Functions
+// See header section for complete blink code reference
+
+void ledOn() {
+#if LED_ENABLE == true
+  digitalWrite(LED_DEBUG_PIN, LED_ON);
+#endif
+}
+
+void ledOff() {
+#if LED_ENABLE == true
+  digitalWrite(LED_DEBUG_PIN, LED_OFF);
+#endif
+}
+
+void blinkLed(int count, int onTime, int offTime) {
+#if LED_ENABLE == true
+  for (int i = 0; i < count; i++) {
+    ledOn();
+    delay(onTime);
+    ledOff();
+    if (i < count - 1) delay(offTime);
+  }
+#endif
+}
+
 void setup() {
 #if SERIAL_ENABLE == true
   //Setup so we can see serial messages
@@ -230,50 +385,367 @@ void setup() {
   Wire.begin(4, 5);
 #endif
 
+  // Initialize LED for debugging
+#if LED_ENABLE == true
+  pinMode(LED_DEBUG_PIN, OUTPUT);
+  ledOff();
+  blinkLed(1, 100, 50); // Quick blink to show startup
+#endif
+
+  // I2C bus scan on startup
+  delay(500); // Give I2C bus time to stabilize
+  SerialPrintln("");
+  SerialPrintln("=== I2C Bus Scan on Startup ===");
+  scanI2CBus();
+  SerialPrintln("");
+
   SerialPrintln("");
   SerialPrintln("#######################################################");
   SerialPrintln("..............Split Flap Display Starting..............");
   SerialPrintln("#######################################################");
+  debugStatus = "Starting";
+  SerialPrintln("DEBUG: Status = " + debugStatus);
 
   //Load and read all the things
+  debugStatus = "WiFi Init";
+  SerialPrintln("DEBUG: Status = " + debugStatus);
+  blinkLed(1, 200, 100); // 1 blink = WiFi connecting
   initWiFi();
   
   //Helpful if want to force reset WiFi settings for testing
   //wifiManager.resetSettings();
 
   if (isWifiConfigured && !isPendingReboot) {
-    //ezTime initialization
-    waitForSync();
+    blinkLed(2, 200, 100); // 2 blinks = WiFi connected
+    debugStatus = "WiFi Connected";
+    SerialPrintln("DEBUG: Status = " + debugStatus);
+    
+    //ezTime initialization - NON-BLOCKING with timeout
+    debugStatus = "NTP Sync Starting";
+    SerialPrintln("DEBUG: Status = " + debugStatus);
+    blinkLed(3, 200, 100); // 3 blinks = NTP syncing
+    
+    // Set sync interval but don't block
+    setInterval(60); // Sync every 60 seconds
+    setDebug(INFO); // Set to INFO level for debugging
+    
+    // Try to sync with timeout (non-blocking)
+    unsigned long ntpStartTime = millis();
+    unsigned long ntpTimeout = 30000; // 30 second timeout
+    
+    SerialPrintln("DEBUG: Starting NTP sync (non-blocking, 30s timeout)");
+    
+    // Wait for sync with timeout and yield
+    while (timeStatus() == timeNotSet && (millis() - ntpStartTime) < ntpTimeout) {
+      events(); // Process ezTime events
+      yield();  // Allow other tasks to run
+      delay(100);
+    }
+    
+    if (timeStatus() == timeSet) {
+      blinkLed(4, 200, 100); // 4 blinks = NTP sync success
+      debugStatus = "NTP Sync Success";
+      SerialPrintln("DEBUG: Status = " + debugStatus);
+      SerialPrintln("DEBUG: NTP sync successful!");
+    } else {
+      blinkLed(5, 200, 100); // 5 blinks = NTP sync failed
+      debugStatus = "NTP Sync Failed";
+      SerialPrintln("DEBUG: Status = " + debugStatus);
+      SerialPrintln("DEBUG: WARNING - NTP sync failed or timed out, continuing anyway");
+    }
+    
     timezone.setLocation(timezoneString);
+    SerialPrintln("DEBUG: Timezone set to: " + String(timezoneString));
     
     //Load various variables
+    debugStatus = "File System Init";
+    SerialPrintln("DEBUG: Status = " + debugStatus);
+    blinkLed(6, 200, 100); // 6 blinks = File system init
     initialiseFileSystem();
     loadValuesFromFileSystem();
+    
+    // Load debug mode setting
+#if DEBUG_ENABLE == true
+    String debugModeSetting = readFile(LittleFS, debugModePath, "true");
+    showDebugPage = (debugModeSetting == "true");
+    SerialPrintln("DEBUG: Debug mode: " + String(showDebugPage ? "enabled" : "disabled") + " (controls startup page, error status, page load log, and serial log)");
+#endif
 
 #if OTA_ENABLE == true
     SerialPrintln("OTA is enabled! Yay!");
 #endif
 
     //Web Server Endpoint configuration
+    debugStatus = "Web Server Setup";
+    SerialPrintln("DEBUG: Status = " + debugStatus);
+    blinkLed(7, 200, 100); // 7 blinks = Web server starting
+    
     webServer.serveStatic("/", LittleFS, "/");
     webServer.on("/", HTTP_GET, [](AsyncWebServerRequest * request) {
-      SerialPrintln("Request Home Page Received");
-
+      unsigned long pageRequestStart = millis();
+      SerialPrintln("DEBUG: Request Home Page Received");
+      
+#if DEBUG_ENABLE == true
+      // If debug mode is enabled and we're still in debug mode, show debug page
+      if (showDebugPage) {
+        // Generate debug HTML page with live log
+        IPAddress ip = WiFi.localIP();
+        String html = "<!DOCTYPE html><html><head>";
+        html += "<title>Split Flap - Debug Mode</title>";
+        html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+        html += "<style>";
+        html += "body { font-family: Arial, sans-serif; margin: 20px; background: #1e1e1e; color: #d4d4d4; }";
+        html += "h1 { color: #4ec9b0; }";
+        html += ".log-container { background: #252526; border: 1px solid #3e3e42; padding: 15px; font-family: 'Courier New', monospace; font-size: 0.9em; white-space: pre-wrap; }";
+        html += ".log-entry { margin: 2px 0; }";
+        html += ".timestamp { color: #808080; margin-right: 10px; }";
+        html += ".debug { color: #4ec9b0; }";
+        html += ".error { color: #f48771; }";
+        html += ".warning { color: #dcdcaa; }";
+        html += "button { background: #0e639c; color: white; border: none; padding: 10px 20px; font-size: 16px; cursor: pointer; border-radius: 4px; margin-bottom: 20px; }";
+        html += "button:hover { background: #1177bb; }";
+        html += ".status { color: #4ec9b0; font-weight: bold; margin: 10px 0; }";
+        html += "</style>";
+        html += "</head><body>";
+        html += "<h1>Split Flap - Debug Mode</h1>";
+        html += "<button onclick='continueToNormal()'>Continue to Normal Mode</button>";
+        html += "<div class='status'>Current Status: " + debugStatus + "</div>";
+        html += "<p>Debug mode is enabled. This page shows the initialization log. When you continue to normal mode, you'll also see error status panel, page load debug log, and serial debug log features.</p>";
+        html += "<div class='log-container' id='logContainer'>";
+        html += "<div style='color: #888;'>Loading log...</div>";
+        html += "</div>";
+        html += "<script>";
+        html += "function loadLog() {";
+        html += "  var xhr = new XMLHttpRequest();";
+        html += "  xhr.onreadystatechange = function() {";
+        html += "    if (this.readyState == 4) {";
+        html += "      var container = document.getElementById('logContainer');";
+        html += "      if (this.status == 200) {";
+        html += "        try {";
+        html += "          var data = JSON.parse(this.responseText);";
+        html += "          var html = '';";
+        html += "          if (data.logs && data.logs.length > 0) {";
+        html += "            for (var i = 0; i < data.logs.length; i++) {";
+        html += "              var entry = data.logs[i];";
+        html += "              var msg = entry.message || '';";
+        html += "              var timestamp = (entry.timestamp / 1000).toFixed(1) + 's';";
+        html += "              var colorClass = '';";
+        html += "              if (msg.indexOf('DEBUG:') >= 0) colorClass = 'debug';";
+        html += "              else if (msg.indexOf('ERROR') >= 0 || msg.indexOf('Error') >= 0) colorClass = 'error';";
+        html += "              else if (msg.indexOf('WARNING') >= 0 || msg.indexOf('Warning') >= 0) colorClass = 'warning';";
+        html += "              html += '<div class=\"log-entry\"><span class=\"timestamp\">[' + timestamp + ']</span><span class=\"' + colorClass + '\">' + escapeHtml(msg) + '</span></div>';";
+        html += "            }";
+        html += "          } else {";
+        html += "            html = '<div style=\"color: #888;\">No log messages yet. (Count: ' + (data.count || 0) + ')</div>';";
+        html += "          }";
+        html += "          container.innerHTML = html;";
+        html += "        } catch (e) {";
+        html += "          container.innerHTML = '<div style=\"color: #f48771;\">Error parsing log: ' + e.message + '<br>Response: ' + escapeHtml(this.responseText.substring(0, 200)) + '</div>';";
+        html += "        }";
+        html += "      } else {";
+        html += "        container.innerHTML = '<div style=\"color: #f48771;\">Error loading log: Status ' + this.status + '</div>';";
+        html += "      }";
+        html += "    }";
+        html += "  };";
+        html += "  xhr.onerror = function() {";
+        html += "    var container = document.getElementById('logContainer');";
+        html += "    container.innerHTML = '<div style=\"color: #f48771;\">Network error loading log</div>';";
+        html += "  };";
+        html += "  xhr.open('GET', '/log', true);";
+        html += "  xhr.send();";
+        html += "}";
+        html += "function escapeHtml(text) {";
+        html += "  var map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#039;' };";
+        html += "  return text.replace(/[&<>\"']/g, function(m) { return map[m]; });";
+        html += "}";
+        html += "function continueToNormal() {";
+        html += "  var xhr = new XMLHttpRequest();";
+        html += "  xhr.onreadystatechange = function() {";
+        html += "    if (this.readyState == 4 && this.status == 200) {";
+        html += "      window.location.href = '/';";
+        html += "    }";
+        html += "  };";
+        html += "  xhr.open('GET', '/exit-debug-mode', true);";
+        html += "  xhr.send();";
+        html += "}";
+        html += "loadLog();";
+        html += "setInterval(loadLog, 1000);"; // Auto-refresh every second
+        html += "</script>";
+        html += "</body></html>";
+        
+        request->send(200, "text/html", html);
+        return;
+      }
+#endif
+      // Normal mode - serve regular index.html
+      unsigned long beforeSend = millis();
+      SerialPrintln("DEBUG: Serving index.html (took " + String(beforeSend - pageRequestStart) + "ms to get here)");
       request->send(LittleFS, "/index.html", "text/html");
+      SerialPrintln("DEBUG: index.html sent (total: " + String(millis() - pageRequestStart) + "ms)");
     });
 
     webServer.on("/settings", HTTP_GET, [](AsyncWebServerRequest * request) {
-      SerialPrintln("Request for Settings Received");
+      unsigned long settingsStart = millis();
+      SerialPrintln("DEBUG: Request for Settings Received at " + String(settingsStart) + "ms");
       
-      String json = getCurrentSettingValues();
-      request->send(200, "application/json", json);
-      json = String();
+      // Set flag to prevent display updates during web request
+      webRequestActive = true;
+      
+      // Build minimal response immediately (fast path)
+      JsonDocument minimalDoc;
+      minimalDoc["timezoneOffset"] = timezone.getOffset();
+      minimalDoc["unitCount"] = UNITS_AMOUNT;
+      minimalDoc["alignment"] = alignment;
+      minimalDoc["flapSpeed"] = flapSpeed;
+      minimalDoc["deviceMode"] = deviceMode;
+      minimalDoc["version"] = espVersion;
+      minimalDoc["lastTimeReceivedMessageDateTime"] = lastReceivedMessageDateTime;
+      minimalDoc["lastWrittenText"] = lastWrittenText;
+      minimalDoc["countdownToDateUnix"] = atol(countdownToDateUnix.c_str());
+      minimalDoc["wifiStatus"] = WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected";
+      minimalDoc["wifiRssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
+      minimalDoc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
+      minimalDoc["scheduledMessages"] = JsonArray();
+      minimalDoc["wifiSettingsResettable"] = true;
+      minimalDoc["otaEnabled"] = false;
+      
+      // Try to get scheduled messages quickly (with timeout)
+      unsigned long beforeScheduled = millis();
+      int scheduledCount = scheduledMessages.size();
+      if (scheduledCount > 0 && (millis() - settingsStart) < 2000) { // Only if we have time
+        for(int i = 0; i < scheduledCount && (millis() - beforeScheduled) < 1000; i++) {
+          ScheduledMessage msg = scheduledMessages[i];
+          minimalDoc["scheduledMessages"][i]["scheduledDateTimeUnix"] = msg.ScheduledDateTimeUnix;
+          minimalDoc["scheduledMessages"][i]["message"] = msg.Message;
+          minimalDoc["scheduledMessages"][i]["showIndefinitely"] = msg.ShowIndefinitely;
+          yield();
+        }
+      }
+      
+      String minimalJson;
+      serializeJson(minimalDoc, minimalJson);
+      
+      unsigned long totalTime = millis() - settingsStart;
+      SerialPrintln("DEBUG: Settings response ready in " + String(totalTime) + "ms, JSON size: " + String(minimalJson.length()) + " bytes");
+      
+      request->send(200, "application/json", minimalJson);
+      minimalJson = String();
+      
+      SerialPrintln("DEBUG: Settings response sent (total: " + String(millis() - settingsStart) + "ms)");
+      
+      // Clear flag after request completes
+      webRequestActive = false;
     });
     
     webServer.on("/health", HTTP_GET, [](AsyncWebServerRequest * request) {
-      SerialPrintln("Request for Health Check Received");
+      SerialPrintln("DEBUG: Request for Health Check Received");
       request->send(200, "text/plain", "Healthy");
     });
+    
+    // Simple test endpoint that responds immediately
+    webServer.on("/test", HTTP_GET, [](AsyncWebServerRequest * request) {
+      SerialPrintln("DEBUG: Test endpoint called");
+      request->send(200, "application/json", "{\"status\":\"ok\",\"time\":" + String(millis()) + "}");
+    });
+    
+    webServer.on("/log", HTTP_GET, [](AsyncWebServerRequest * request) {
+      // Use larger JSON document to handle many log entries (100 entries * ~200 bytes each = ~20KB)
+      StaticJsonDocument<25000> document;
+      document["count"] = serialLogCount;
+      
+      int startIndex = serialLogCount < SERIAL_LOG_SIZE ? 0 : serialLogIndex;
+      int entriesToReturn = serialLogCount < SERIAL_LOG_SIZE ? serialLogCount : SERIAL_LOG_SIZE;
+      
+      // Limit to last 50 entries to prevent JSON buffer overflow
+      int maxEntries = entriesToReturn > 50 ? 50 : entriesToReturn;
+      int actualStart = entriesToReturn > 50 ? (startIndex + entriesToReturn - 50) % SERIAL_LOG_SIZE : startIndex;
+      
+      for (int i = 0; i < maxEntries; i++) {
+        int idx = (actualStart + i) % SERIAL_LOG_SIZE;
+        String msg = serialLog[idx].message;
+        
+        // Truncate very long messages to prevent JSON issues (max 500 chars)
+        if (msg.length() > 500) {
+          msg = msg.substring(0, 497) + "...";
+        }
+        
+        document["logs"][i]["message"] = msg;
+        document["logs"][i]["timestamp"] = serialLog[idx].timestamp;
+      }
+      
+      String jsonString;
+      serializeJson(document, jsonString);
+      
+      // Check if serialization succeeded
+      if (jsonString.length() == 0) {
+        SerialPrintln("ERROR: JSON serialization failed for /log endpoint");
+        request->send(500, "application/json", "{\"error\":\"Serialization failed\"}");
+        return;
+      }
+      
+      request->send(200, "application/json", jsonString);
+    });
+    
+    // I2C bus scanner endpoint for diagnostics
+    webServer.on("/i2c-scan", HTTP_GET, [](AsyncWebServerRequest * request) {
+      SerialPrintln("DEBUG: I2C scan requested");
+      JsonDocument doc;
+      doc["scanTime"] = millis();
+      
+      int foundCount = 0;
+      for (int address = 0; address < 16; address++) {
+        Wire.beginTransmission(address);
+        byte error = Wire.endTransmission();
+        
+        if (error == 0) {
+          doc["devices"][foundCount]["address"] = address;
+          
+          // Try to read status
+          Wire.requestFrom(address, 1, 1);
+          if (Wire.available()) {
+            int status = Wire.read();
+            doc["devices"][foundCount]["status"] = status;
+            if (status == 0) {
+              doc["devices"][foundCount]["statusText"] = "ready";
+            } else if (status == 1) {
+              doc["devices"][foundCount]["statusText"] = "busy";
+            } else {
+              doc["devices"][foundCount]["statusText"] = "unknown";
+            }
+          } else {
+            doc["devices"][foundCount]["status"] = -1;
+            doc["devices"][foundCount]["statusText"] = "no response";
+          }
+          foundCount++;
+        }
+        
+        yield();
+        delay(10);
+      }
+      
+      doc["foundCount"] = foundCount;
+      doc["expectedCount"] = UNITS_AMOUNT;
+      
+      String jsonString;
+      serializeJson(doc, jsonString);
+      request->send(200, "application/json", jsonString);
+    });
+    
+#if DEBUG_ENABLE == true
+    webServer.on("/exit-debug-mode", HTTP_GET, [](AsyncWebServerRequest * request) {
+      SerialPrintln("DEBUG: Request to exit debug mode received");
+      showDebugPage = false;
+      writeFile(LittleFS, debugModePath, "false");
+      request->send(200, "text/plain", "OK - Debug mode disabled. Startup debug page, error status, and debug logs will be hidden.");
+    });
+    
+    webServer.on("/enable-debug-mode", HTTP_GET, [](AsyncWebServerRequest * request) {
+      SerialPrintln("DEBUG: Request to enable debug mode received");
+      showDebugPage = true;
+      writeFile(LittleFS, debugModePath, "true");
+      request->send(200, "text/plain", "OK - Debug mode enabled. This enables: startup debug page, error status panel, page load debug log, and serial debug log. Refresh page to see changes.");
+    });
+#endif
     
     webServer.on("/reboot", HTTP_GET, [](AsyncWebServerRequest * request) {
       SerialPrintln("Request to Reboot Received");
@@ -333,7 +805,7 @@ void setup() {
     });
 
     webServer.on("/", HTTP_POST, [](AsyncWebServerRequest * request) {
-      SerialPrintln("Request Post of Form Received");    
+      SerialPrintln("DEBUG: Request Post of Form Received");    
 
       bool submissionError = false;
       
@@ -587,7 +1059,10 @@ void setup() {
 
     delay(250);
     webServer.begin();
-
+    
+    blinkLed(8, 200, 100); // 8 blinks = Web server ready
+    debugStatus = "Ready";
+    SerialPrintln("DEBUG: Status = " + debugStatus);
     SerialPrintln("Split Flap Ready!");
     SerialPrintln("#######################################################");
   }
@@ -600,6 +1075,13 @@ void setup() {
       SerialPrintln("Unable to connect to WiFi... Not starting web server");
       SerialPrintln("Please hard restart your device to try connect again");
       SerialPrintln("#######################################################");
+      // Continuous blink to indicate error
+      for (int i = 0; i < 10; i++) {
+        ledOn();
+        delay(100);
+        ledOff();
+        delay(100);
+      }
     }
   }
 }
@@ -634,6 +1116,58 @@ void loop() {
   }
 #endif
 
+  // Monitor WiFi connection and attempt reconnection if lost
+  if (isWifiConfigured) {
+    static unsigned long lastWiFiCheck = 0;
+    static int reconnectAttempts = 0;
+    const unsigned long wifiCheckInterval = 10000; // Check every 10 seconds
+    
+    if (millis() - lastWiFiCheck > wifiCheckInterval) {
+      lastWiFiCheck = millis();
+      
+      if (WiFi.status() != WL_CONNECTED) {
+        SerialPrintln("DEBUG: WiFi connection lost! Status: " + String(WiFi.status()));
+        reconnectAttempts++;
+        
+        if (reconnectAttempts <= 3) {
+          SerialPrintln("DEBUG: Attempting to reconnect (attempt " + String(reconnectAttempts) + "/3)...");
+          WiFi.disconnect();
+          delay(100);
+          yield();
+          
+          // Reconnect with stored credentials
+          WiFi.begin(wifiDirectSsid, wifiDirectPassword);
+          
+          int reconnectTimeout = 10; // 10 second timeout for reconnection
+          int reconnectCount = 0;
+          while (WiFi.status() != WL_CONNECTED && reconnectCount < reconnectTimeout) {
+            delay(500);
+            yield();
+            delay(500);
+            yield();
+            reconnectCount++;
+          }
+          
+          if (WiFi.status() == WL_CONNECTED) {
+            SerialPrintln("DEBUG: WiFi reconnected successfully! IP: " + WiFi.localIP().toString());
+            reconnectAttempts = 0;
+          } else {
+            SerialPrintln("DEBUG: Reconnection attempt " + String(reconnectAttempts) + " failed");
+            if (reconnectAttempts >= 3) {
+              SerialPrintln("DEBUG: Max reconnection attempts reached. Marking WiFi as not configured.");
+              isWifiConfigured = false;
+            }
+          }
+        }
+      } else {
+        // Connection is good, reset reconnect counter
+        if (reconnectAttempts > 0) {
+          reconnectAttempts = 0;
+        }
+      }
+    }
+  }
+  
   //Do nothing if WiFi is not configured
   if (!isWifiConfigured) {
     //Show there is an error via text on display
@@ -683,22 +1217,164 @@ void loop() {
     checkScheduledMessages();
     checkCountdown();
 
-    //Mode Selection
-    if (deviceMode == DEVICE_MODE_TEXT || deviceMode == DEVICE_MODE_COUNTDOWN) { 
-      showText(inputText);
-    } 
-    else if (deviceMode == DEVICE_MODE_DATE) {
-      showText(timezone.dateTime(dateFormat));
-    } 
-    else if (deviceMode == DEVICE_MODE_CLOCK) {
-      showText(timezone.dateTime(clockFormat));
-    } 
+    // Skip display updates if a web request is active to prevent blocking
+    if (!webRequestActive) {
+      //Mode Selection
+      if (deviceMode == DEVICE_MODE_TEXT || deviceMode == DEVICE_MODE_COUNTDOWN) { 
+        showText(inputText);
+      } 
+      else if (deviceMode == DEVICE_MODE_DATE) {
+        showText(timezone.dateTime(dateFormat));
+      } 
+      else if (deviceMode == DEVICE_MODE_CLOCK) {
+        showText(timezone.dateTime(clockFormat));
+      }
+    } else {
+      // Web request is active, skip display update to keep web server responsive
+      yield(); // Give web server time to process
+    }
   }
+}
+
+// Scan I2C bus and report all found devices
+void scanI2CBus() {
+  SerialPrintln("========================================");
+  SerialPrintln("I2C Bus Scan - Checking addresses 0-15");
+  SerialPrintln("========================================");
+  
+  int foundCount = 0;
+  bool foundUnits[16] = {false}; // Track which addresses are found
+  int unitStatus[16] = {-2}; // Track status of each address (-2 = not found, -1 = sleeping, 0 = ready, 1 = busy)
+  
+  // Scan all possible I2C addresses (0-15)
+  for (int address = 0; address < 16; address++) {
+    Wire.beginTransmission(address);
+    byte error = Wire.endTransmission();
+    
+    if (error == 0) {
+      foundUnits[address] = true;
+      foundCount++;
+      
+      SerialPrint("✓ Found device at address ");
+      SerialPrint(address);
+      
+      // Try to read status from this address (only for addresses 0-15 which are our units)
+      if (address < 16) {
+        Wire.requestFrom(address, 1, 1);
+        if (Wire.available()) {
+          int status = Wire.read();
+          unitStatus[address] = status;
+          
+          SerialPrint(" - Status: ");
+          SerialPrint(status);
+          
+          if (status == 0) {
+            SerialPrintln(" (READY)");
+          } else if (status == 1) {
+            SerialPrintln(" (BUSY/MOVING)");
+          } else if (status == -1) {
+            SerialPrintln(" (SLEEPING)");
+          } else {
+            SerialPrintln(" (UNKNOWN)");
+          }
+        } else {
+          SerialPrintln(" - No status response");
+          unitStatus[address] = -3; // No response
+        }
+      } else {
+        SerialPrintln(" - Unknown device type");
+      }
+    } else if (error == 2) {
+      // NACK on address - device not found (normal for unused addresses)
+      // Don't log this to reduce noise
+    } else if (error == 4) {
+      SerialPrint("⚠ Unknown I2C error at address ");
+      SerialPrintln(address);
+    }
+    
+    yield();
+    delay(10);
+  }
+  
+  // Summary report
+  SerialPrintln("");
+  SerialPrintln("--- Scan Summary ---");
+  SerialPrint("Total devices found: ");
+  SerialPrintln(foundCount);
+  SerialPrint("Expected units: ");
+  SerialPrintln(UNITS_AMOUNT);
+  SerialPrintln("");
+  
+  // Report which units are connected vs missing
+  SerialPrintln("Unit Status:");
+  bool allUnitsFound = true;
+  for (int i = 0; i < UNITS_AMOUNT; i++) {
+    SerialPrint("  Unit ");
+    SerialPrint(i);
+    SerialPrint(" (address ");
+    SerialPrint(i);
+    SerialPrint("): ");
+    
+    if (foundUnits[i]) {
+      SerialPrint("✓ CONNECTED");
+      if (unitStatus[i] == 0) {
+        SerialPrintln(" - Ready");
+      } else if (unitStatus[i] == 1) {
+        SerialPrintln(" - Busy");
+      } else if (unitStatus[i] == -1) {
+        SerialPrintln(" - Sleeping");
+      } else if (unitStatus[i] == -3) {
+        SerialPrintln(" - No status response");
+      } else {
+        SerialPrint(" - Status code: ");
+        SerialPrintln(unitStatus[i]);
+      }
+    } else {
+      SerialPrintln("✗ MISSING (not responding on I2C)");
+      allUnitsFound = false;
+    }
+  }
+  
+  // Report any extra devices found at addresses beyond expected units
+  if (foundCount > UNITS_AMOUNT) {
+    SerialPrintln("");
+    SerialPrintln("Additional devices found (beyond expected units):");
+    for (int i = UNITS_AMOUNT; i < 16; i++) {
+      if (foundUnits[i]) {
+        SerialPrint("  Address ");
+        SerialPrint(i);
+        SerialPrintln(" - Unknown device");
+      }
+    }
+  }
+  
+  SerialPrintln("");
+  if (allUnitsFound) {
+    SerialPrintln("✓ All expected units are connected!");
+  } else {
+    SerialPrint("⚠ WARNING: Some units are missing! Check:");
+    SerialPrintln("");
+    SerialPrintln("  1. DIP switch settings on missing units");
+    SerialPrintln("  2. I2C wiring (SDA/SCL connections)");
+    SerialPrintln("  3. Power connections to missing units");
+    SerialPrintln("  4. Unit firmware (verify address is correct)");
+  }
+  
+  SerialPrintln("========================================");
 }
 
 //Gets all the currently stored calues from memory in a JSON object
 String getCurrentSettingValues() {
+  unsigned long funcStart = millis();
+  const unsigned long MAX_FUNCTION_TIME = 5000; // 5 second max for this function (reduced from 10s)
+  SerialPrintln("DEBUG: getCurrentSettingValues() - Starting");
+  
+  // Yield immediately to allow web server to process
+  yield();
+  
   JsonDocument document;
+  unsigned long afterDoc = millis();
+  SerialPrintln("DEBUG: getCurrentSettingValues() - JsonDocument created (" + String(afterDoc - funcStart) + "ms)");
 
   document["timezoneOffset"] = timezone.getOffset();
   document["unitCount"] = UNITS_AMOUNT;
@@ -709,14 +1385,56 @@ String getCurrentSettingValues() {
   document["lastTimeReceivedMessageDateTime"] = lastReceivedMessageDateTime;
   document["lastWrittenText"] = lastWrittenText;
   document["countdownToDateUnix"] = atol(countdownToDateUnix.c_str());
+  
+  // WiFi status information - read RSSI quickly (reduced readings for faster response)
+  if (WiFi.status() == WL_CONNECTED) {
+    document["wifiStatus"] = "Connected";
+    // Read RSSI 2 times for faster response (was 5, but adds delay)
+    long rssiSum = 0;
+    int rssiReadings = 2;
+    for (int i = 0; i < rssiReadings; i++) {
+      rssiSum += WiFi.RSSI();
+      if (i < rssiReadings - 1) {
+        delay(5); // Reduced from 10ms
+        yield();
+      }
+    }
+    document["wifiRssi"] = rssiSum / rssiReadings;
+    document["wifiIp"] = WiFi.localIP().toString();
+  } else {
+    document["wifiStatus"] = "Disconnected";
+    document["wifiRssi"] = 0;
+    document["wifiIp"] = "";
+  }
+  unsigned long afterBasicFields = millis();
+  SerialPrintln("DEBUG: getCurrentSettingValues() - Basic fields set (" + String(afterBasicFields - afterDoc) + "ms)");
 
+  int scheduledCount = scheduledMessages.size();
+  SerialPrintln("DEBUG: getCurrentSettingValues() - Processing " + String(scheduledCount) + " scheduled messages");
+  unsigned long beforeScheduled = millis();
+  
+  // Process scheduled messages with yields every few items to keep web server responsive
+  // Also check for timeout to prevent hanging
   for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
+    // Check for timeout - if we're taking too long, skip remaining messages
+    if (millis() - funcStart > MAX_FUNCTION_TIME) {
+      SerialPrintln("DEBUG: WARNING - getCurrentSettingValues() timeout, skipping remaining scheduled messages");
+      break;
+    }
+    
     ScheduledMessage scheduledMessage = scheduledMessages[scheduledMessageIndex];
     
     document["scheduledMessages"][scheduledMessageIndex]["scheduledDateTimeUnix"] = scheduledMessage.ScheduledDateTimeUnix;
     document["scheduledMessages"][scheduledMessageIndex]["message"] = scheduledMessage.Message;
     document["scheduledMessages"][scheduledMessageIndex]["showIndefinitely"] = scheduledMessage.ShowIndefinitely;
+    
+    // Yield every 5 messages to keep web server responsive, or on every message if < 10 total
+    if (scheduledMessageIndex % 5 == 0 || scheduledCount < 10) {
+      yield(); // Allow web server to process requests during loop
+    }
   }
+  unsigned long afterScheduled = millis();
+  SerialPrintln("DEBUG: getCurrentSettingValues() - Scheduled messages processed (" + String(afterScheduled - beforeScheduled) + "ms)");
 
 #if OTA_ENABLE == true
   document["otaEnabled"] = true;
@@ -731,8 +1449,34 @@ String getCurrentSettingValues() {
   document["wifiSettingsResettable"] = false;
 #endif
   
+  unsigned long beforeSerialize = millis();
+  
+  // Check timeout before serialization
+  if (millis() - funcStart > MAX_FUNCTION_TIME) {
+    SerialPrintln("DEBUG: WARNING - getCurrentSettingValues() timeout before serialization, returning minimal response");
+    JsonDocument minimalDoc;
+    minimalDoc["timezoneOffset"] = timezone.getOffset();
+    minimalDoc["unitCount"] = UNITS_AMOUNT;
+    minimalDoc["alignment"] = alignment;
+    minimalDoc["flapSpeed"] = flapSpeed;
+    minimalDoc["deviceMode"] = deviceMode;
+    minimalDoc["version"] = espVersion;
+    minimalDoc["wifiStatus"] = WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected";
+    minimalDoc["wifiRssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
+    minimalDoc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
+    minimalDoc["scheduledMessages"] = JsonArray(); // Empty array
+    String minimalJson;
+    serializeJson(minimalDoc, minimalJson);
+    return minimalJson;
+  }
+  
+  yield(); // Yield before potentially long serialization
   String jsonString;
   serializeJson(document, jsonString);
+  yield(); // Yield after serialization to allow web server to process
+  unsigned long afterSerialize = millis();
+  SerialPrintln("DEBUG: getCurrentSettingValues() - JSON serialized (" + String(afterSerialize - beforeSerialize) + "ms, " + String(jsonString.length()) + " bytes)");
+  SerialPrintln("DEBUG: getCurrentSettingValues() - Total time: " + String(afterSerialize - funcStart) + "ms");
 
   return jsonString;
 }
