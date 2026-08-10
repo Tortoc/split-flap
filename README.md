@@ -1,6 +1,6 @@
 # Split-Flap
 
-[![Build ESP Master Sketch](https://github.com/JonnyBooker/split-flap/actions/workflows/build-esp-master.yml/badge.svg)](https://github.com/JonnyBooker/split-flap/actions/workflows/build-esp-master.yml) [![Build EEPROM Write Sketch](https://github.com/JonnyBooker/split-flap/actions/workflows/build-eeprom-write.yml/badge.svg)](https://github.com/JonnyBooker/split-flap/actions/workflows/build-eeprom-write.yml) [![Build Arduino Unit Sketch](https://github.com/JonnyBooker/split-flap/actions/workflows/build-unit.yml/badge.svg)](https://github.com/JonnyBooker/split-flap/actions/workflows/build-unit.yml)
+[![Build ESP Master Sketch](https://github.com/JonnyBooker/split-flap/actions/workflows/build-esp-master.yml/badge.svg)](https://github.com/JonnyBooker/split-flap/actions/workflows/build-esp-master.yml) [![Build Arduino Unit Sketch](https://github.com/JonnyBooker/split-flap/actions/workflows/build-unit.yml/badge.svg)](https://github.com/JonnyBooker/split-flap/actions/workflows/build-unit.yml)
 
 ![Split Flap Display](./Images/Split-Flap.jpg)
 
@@ -66,7 +66,7 @@ Options to potentially get boards created for you:
 
 Each split-flap unit consists of an Arduino Nano mounted on a custom PCB. It controls a 28BYJ-48 stepper motor via a ULN2003 driver chip. The drum with the flaps is homed with a KY003 hall sensor and a magnet mounted to the drum.
 
-Upload the Arduino sketch `Unit.ino` in the unit folder to each unit's arduino nano. Before that set the offset with the `EEPROM_Write_Offset.ino` sketch.
+Upload the Arduino sketch `Unit.ino` in the unit folder to each unit's arduino nano. The zero position offset (see [Set Zero Position Offset](#set-zero-position-offset) below) is now set afterwards from the ESPMaster web UI, so there is no separate offset sketch to upload first.
 
 Inside `Unit.ino`, there is a setting for testing the units so that a few letters are cycled through to ensure what is shown is what you expect. At the top of the file once you have opened the project, you will find a line that is commented out:
 
@@ -83,7 +83,11 @@ Remove the comment characters to help with your testing for the next step of Set
 
 The zero position (or blank flaps position in this case) is attained by driving the stepper to the hall sensor and step a few steps forward. This offset is individual to every unit and needs to be saved to the arduino nano's EEPROM.
 
-A simple sketch has been written to set the offset. Upload the `EEPROM_Write_Offset.ino` sketch and open the serial monitor with 115200 baudrate. It will tell you the current offset and you can enter a new offset. It should be around 100 but yours may vary. You may need to upload the `Unit.ino` sketch with the `TEST_ENABLE` flag uncommented and see if the offset is correct. Repeat until the blank flap is showing every time the unit homes.
+This used to require a separate `EEPROM_Write_Offset.ino` sketch uploaded over USB per unit. That sketch has been removed - instead, once `Unit.ino` and `ESPMaster.ino` are uploaded and wired up over I2C, open the ESPMaster web UI and go to **Actions > Unit Calibration (Admin)** (`/admin.html`). This page reads the live offset from every connected unit and lets you set a new one per unit directly from the browser.
+
+A good starting value is usually around **100**, but yours may vary. Enter a value and hit "Save & Recalibrate" - the unit will immediately do a full rotation to re-home using the new offset, and the page will show you the confirmed value once it's done. Repeat until the blank flap is showing exactly right every time the unit homes.
+
+> ⚠️ **Breaking change / migration note:** Reading the offset back over I2C required extending the protocol between `Unit.ino` and `ESPMaster.ino`. Because of this, **both** sketches must be upgraded together - a unit still running an older `Unit.ino` will not work correctly with a newer `ESPMaster.ino` (and vice versa). If you already have units built and calibrated with the old `EEPROM_Write_Offset.ino` sketch, don't worry: a normal sketch upload does not erase the Arduino Nano's EEPROM, so your existing offsets are preserved and should show up correctly in the Admin page as soon as `Unit.ino` is reflashed.
 
 #### Set Unit Address
 
@@ -124,9 +128,58 @@ Unit 3 (Address 2):  [DOWN] [DOWN] [UP] [DOWN]     = 0010
 - Each unit must have a **unique address** (0, 1, 2, 3, etc.)
 - Addresses must be **sequential starting from 0**
 - If you have 3 units, use addresses 0, 1, and 2
-- The ESPMaster code expects units to be numbered 0 through (UNITS_AMOUNT - 1)
+- ESPMaster auto-detects how many units are connected at startup - see [Automatic Unit Detection](#automatic-unit-detection) below
 - After setting switches, power cycle the unit for the new address to take effect
 - You can verify addresses using the I2C scan feature (see ESPMaster README for diagnostic tools)
+
+#### Automatic Unit Detection
+
+ESPMaster no longer needs to be told how many units are connected. On every startup it scans I2C
+addresses 0-15 and counts how many respond **sequentially starting from address 0**, stopping at
+the first gap - matching the DIP switch requirement above. That count becomes the number of units
+the rest of the system (display width, message splitting/alignment, the Admin page's unit list,
+etc.) uses.
+
+If you connect or fix a unit after ESPMaster has already booted, you don't need to reboot it: hit
+"Rescan Units" on the ESPMaster Admin page (`/admin.html`) to re-run the scan immediately.
+
+If zero units are detected (wiring issue, or address 0 isn't assigned to anything), the display
+functionality is simply unavailable until that's fixed - the web UI, WiFi and Admin page keep
+working normally so you can diagnose and rescan without needing physical access to the ESP.
+
+#### Update Unit Firmware over I2C (optional)
+
+Once a unit is set up, future `Unit.ino` changes can be pushed to it over I2C from the ESPMaster
+Admin page instead of plugging it into USB every time. This requires a **one-time, physical**
+setup step per unit: flashing a bootloader onto it via an ISP programmer. We use a lightly
+patched fork of [twiboot](https://github.com/orempel/twiboot) (vendored in
+[`Unit/bootloader/twiboot`](./Unit/bootloader/twiboot)) that reads the unit's own DIP switches at
+boot, so the same address jumpers that set a unit's normal I2C address also work for firmware
+updates - one compiled bootloader image for every unit, and moving jumpers later doesn't require
+reflashing the bootloader. Full instructions, including the exact build/flash commands and a
+mandatory bench-test procedure, are in [`Unit/BOOTLOADER_SETUP.md`](./Unit/BOOTLOADER_SETUP.md).
+
+> ⚠️ This touches already-built hardware and needs an ISP programmer (USBasp, AVRISP mkII, or a
+> second Arduino as ISP). It's entirely optional - skip it and keep flashing `Unit.ino` over USB
+> as before if you'd rather not set it up. `UNIT_BOOTLOADER_ENABLE` in `ESPMaster.ino` defaults to
+> `false` for this reason; only enable it once at least one unit has been through the bench-test
+> procedure in `BOOTLOADER_SETUP.md`.
+
+Once a unit has twiboot installed, updating it going forward is done entirely from the browser:
+
+1. In the Arduino IDE, `Sketch > Export compiled Binary` for `Unit.ino` to produce a `.hex` file.
+2. Convert it to a raw binary (twiboot writes raw flash images, not Intel HEX):
+   ```
+   avr-objcopy -I ihex -O binary Unit.ino.hex Unit.ino.bin
+   ```
+   (`avr-objcopy` ships with the Arduino IDE's AVR toolchain.)
+3. On the ESPMaster Admin page (`/admin.html`), under "Unit Firmware Update", upload `Unit.ino.bin`
+   and pick the target unit, then hit "Update starten".
+
+The unit reboots into its bootloader, the new firmware is written and verified page-by-page, and
+only once everything checks out does the unit switch over to running it. If anything goes wrong
+mid-update, the old firmware is left untouched (see `BOOTLOADER_SETUP.md` for why) and you can
+just try again.
 
 ### ESP01/ESP8266
 
@@ -198,6 +251,12 @@ There are several helper `define` variables to help during debugging/running:
 - **OTA_ENABLE**
   - Use this to enable OTA updates from the Arduino IDE
   - Subsequently, you can set a password for OTA via the `otaPassword` variable
+- **WEB_FIRMWARE_UPDATE_ENABLE**
+  - Enabled by default. Adds a browser-based firmware upload to the Admin page (`/admin.html`) - no Arduino IDE or USB cable required
+  - To use it: in the Arduino IDE, `Sketch > Export compiled Binary` to produce a `.bin` file for `ESPMaster.ino`, then upload that file via the "Firmware Update" card on the Admin page
+  - If `otaPassword` is set, the same password is required for the browser upload
+  - Only updates the sketch itself, not the static web files - use the normal `ESP8266 LittleFS Data Upload` step (over USB) whenever `ESPMaster/data/` changes
+  - If the upload fails partway through, the currently running firmware stays active - the device only reboots into the new firmware once the upload has fully succeeded
 - **UNIT_CALLS_DISABLE**
   - Use this to disable the communication with the Arduino Nano Units. This will mean you can check code over function for the ESP module.
 
@@ -231,7 +290,7 @@ So far we've only uploaded static files to the ESP8266. You now need to `Upload`
 
 ### Common Problems
 
-- If the ESP is not talking to the units correctly, check the `UNITSAMOUNT` in the `ESPMaster.ino`. The amount of units connected has to match.
+- If the ESP is not talking to the units correctly, check that unit addresses are sequential starting from 0 with no gaps (see [Automatic Unit Detection](#automatic-unit-detection) - a gap stops the count early) and use "Rescan Units" on the Admin page after fixing anything.
 - Ensure you upload the sketch and the LittleFS sketch upload to the ESP8266.
 - When the system is powered, your Hall Sensor should only light up when a magnet is nearby.
 - Ensure you are running an older version of Arduino IDE to be able to upload static files to the device. You will need a version prior to version 2.x.

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<title>Split-Flap - Admin</title>
+	<meta name="viewport" content="width=device-width, initial-scale=1" charset="utf-8" />
+	<link rel="icon" type="image/png" href="favicon.png" />
+	<link rel="stylesheet" type="text/css" href="style.css" />
+	<style>
+		.unit-row {
+			padding: 5px;
+			margin: 5px;
+			display: flex;
+			flex-wrap: wrap;
+			align-content: center;
+			align-items: center;
+			border-bottom: 1px solid #eee;
+		}
+
+		.unit-row:last-child {
+			border-bottom: none;
+		}
+
+		.unit-row .unit-label {
+			text-align: left;
+			width: 160px;
+			font-weight: bold;
+		}
+
+		.unit-row .unit-status {
+			width: 160px;
+			text-align: left;
+		}
+
+		.unit-row .unit-offset {
+			width: 120px;
+			text-align: left;
+		}
+
+		.unit-row .unit-input {
+			display: flex;
+			align-items: center;
+			gap: 8px;
+		}
+
+		.unit-row input[type=number] {
+			width: 90px;
+			padding: 8px 10px;
+			border: 1px solid #ccc;
+			border-radius: 4px;
+			box-sizing: border-box;
+		}
+
+		.unit-row button,
+		.btn-primary {
+			border: none;
+			color: #FEFCFB;
+			background-color: #F8880E;
+			padding: 8px 15px;
+			text-align: center;
+			border-radius: 4px;
+			cursor: pointer;
+			font-size: 14px;
+			transition-duration: 0.4s;
+		}
+
+		.unit-row button:hover,
+		.btn-primary:hover {
+			background-color: #FFB96D;
+		}
+
+		.unit-row button:disabled,
+		.btn-primary:disabled {
+			background-color: #ccc;
+			cursor: not-allowed;
+		}
+
+		.status-online-ready {
+			color: #2e7d32;
+			font-weight: bold;
+		}
+
+		.status-online-busy {
+			color: #ed6c02;
+			font-weight: bold;
+		}
+
+		.status-offline {
+			color: #c62828;
+			font-weight: bold;
+		}
+
+		.info-box {
+			text-align: left;
+			font-size: 1rem;
+			background-color: #fdf3e5;
+			border: 1px solid #F8880E;
+			border-radius: 4px;
+			padding: 10px 15px;
+			margin: 15px auto 0 auto;
+			max-width: 770px;
+		}
+	</style>
+</head>
+
+<body>
+	<div class="topnav float-container">
+		<h1 class="float-left">Split Flap - Unit Calibration (Admin)</h1>
+		<h4 class="float-right" style="text-align: right;">
+			<a href="/">&laquo; Back to Home</a>
+		</h4>
+	</div>
+	<div class="content">
+		<div id="initialLoading" class="lds-facebook">
+			<div></div>
+			<div></div>
+			<div></div>
+		</div>
+
+		<div id="loadedContent" class="hidden">
+			<div id="bannerMessage" class="banner-message hidden"></div>
+
+			<div class="card-grid">
+				<div class="card card-full">
+					<p class="card-title">
+						Units
+						<button onclick="loadUnits()" style="float: right; padding: 5px 10px; font-size: 0.9em;">Refresh</button>
+						<button onclick="rescanUnits()" style="float: right; padding: 5px 10px; font-size: 0.9em; margin-right: 5px;">Rescan Units</button>
+					</p>
+					<p style="font-size: 0.9rem; color: #666; text-align: left; padding: 0 15px;">
+						Units werden automatisch beim Start von ESPMaster über I2C erkannt (fortlaufend ab Adresse 0).
+						Falls eine Unit erst nachträglich angeschlossen oder repariert wurde, hier "Rescan Units"
+						klicken statt neu zu starten.
+					</p>
+
+					<div id="containerUnits"></div>
+				</div>
+			</div>
+
+			<div class="info-box">
+				<b>Wie funktioniert das?</b> Der Offset ist die Nullposition der Trommel relativ zum
+				Hall-Sensor, in Motorschritten. Ein guter Startwert liegt meist um die <b>100</b>. Nach dem
+				Speichern fährt die Einheit sofort eine komplette Umdrehung, um sich mit dem neuen Offset neu
+				zu kalibrieren - das ist normal und dauert ein paar Sekunden. Prüfe danach, ob die Leerzeichen-Klappe
+				exakt in der Anzeige steht, und passe den Wert bei Bedarf weiter an.
+			</div>
+
+			<div class="card-grid" style="margin-top: 2rem;">
+				<div class="card card-full">
+					<p class="card-title">Firmware Update (ESPMaster)</p>
+
+					<div style="text-align: left; padding: 0 15px 15px 15px;">
+						<p style="font-size: 1rem;">
+							Lädt eine kompilierte <code>.bin</code>-Datei (Sketch, exportiert über
+							<i>Sketch &gt; Export compiled Binary</i> in der Arduino IDE) direkt per Browser
+							auf das ESPMaster-Modul hoch. Kein Arduino IDE oder USB-Kabel nötig.
+						</p>
+						<p style="font-size: 1rem; color: #c62828;">
+							<b>Während des Uploads nicht die Stromversorgung trennen oder die Seite schließen.</b>
+							Schlägt der Upload fehl, bleibt die aktuell laufende Firmware unverändert aktiv.
+						</p>
+
+						<p>
+							<label for="firmwarePassword">OTA-Passwort (falls konfiguriert)</label>
+							<br>
+							<input type="password" id="firmwarePassword" autocomplete="off" style="width: 250px;" />
+						</p>
+
+						<p>
+							<label for="firmwareFile">Firmware-Datei (.bin)</label>
+							<br>
+							<input type="file" id="firmwareFile" accept=".bin" />
+						</p>
+
+						<p>
+							<button id="firmwareUploadButton" class="btn-primary" onclick="uploadFirmware()">Firmware hochladen</button>
+						</p>
+
+						<div id="firmwareProgressContainer" class="hidden" style="margin-top: 10px;">
+							<div style="background: #eee; border-radius: 4px; overflow: hidden; height: 24px; max-width: 400px; margin: 0 auto;">
+								<div id="firmwareProgressBar" style="background: #F8880E; height: 100%; width: 0%; color: white; font-size: 0.85em; line-height: 24px; transition: width 0.2s;"></div>
+							</div>
+						</div>
+
+						<p id="firmwareStatus" style="margin-top: 10px;"></p>
+					</div>
+				</div>
+			</div>
+
+			<div class="card-grid" style="margin-top: 2rem;">
+				<div class="card card-full">
+					<p class="card-title">Unit Firmware Update (I2C / twiboot)</p>
+
+					<div style="text-align: left; padding: 0 15px 15px 15px;">
+						<p style="font-size: 1rem;">
+							Überträgt ein kompiliertes <code>Unit.ino</code>-Firmware-Image (rohes
+							AVR-Flash-<code>.bin</code>, siehe <code>Unit/BOOTLOADER_SETUP.md</code>) über I2C
+							auf eine einzelne Unit. Setzt voraus, dass diese Unit bereits einmalig mit dem
+							twiboot-Bootloader per ISP-Programmer vorbereitet wurde.
+						</p>
+						<p style="font-size: 1rem; color: #c62828;">
+							<b>Immer nur eine Unit gleichzeitig aktualisieren.</b> Während der Übertragung
+							Stromversorgung nicht unterbrechen. Schlägt die Verifikation fehl, bleibt die
+							bisherige Firmware der Unit unangetastet (die kritische erste Seite wird immer
+							zuletzt geschrieben, erst wenn alles andere geprüft ist).
+						</p>
+
+						<p>
+							<label for="unitFirmwareFile">Firmware-Datei (.bin)</label>
+							<br>
+							<input type="file" id="unitFirmwareFile" accept=".bin" />
+							<button id="unitFirmwareUploadButton" class="btn-primary" onclick="uploadUnitFirmware()">Hochladen</button>
+						</p>
+						<p id="unitFirmwareUploadStatus"></p>
+
+						<p style="margin-top: 1.5em;">
+							<label for="unitFirmwareTarget">Ziel-Unit</label>
+							<br>
+							<select id="unitFirmwareTarget" style="padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px;"></select>
+							<button id="unitFirmwarePushButton" class="btn-primary" onclick="pushUnitFirmware()">Update starten</button>
+						</p>
+
+						<div id="unitFirmwareResult" style="margin-top: 10px;"></div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+	<script src="admin.js"></script>
+</body>
+
+</html>

@@ -27,10 +27,14 @@
 */
 #define SERIAL_ENABLE       false   //Option to enable serial debug messages
 #define UNIT_CALLS_DISABLE  false   //Option to disable the call to the units so can just debug the ESP with no connections
-#define OTA_ENABLE          false    //Option to enable OTA functionality
-#define UNITS_AMOUNT        3      //Amount of connected units !IMPORTANT TO BE SET CORRECTLY!
+#define OTA_ENABLE          false    //Option to enable OTA functionality via the Arduino IDE (same WiFi network + IDE required)
+#define WEB_FIRMWARE_UPDATE_ENABLE true //Option to enable browser-based firmware upload from the Admin page, no Arduino IDE required
+#define UNIT_BOOTLOADER_ENABLE true //Option to enable pushing Unit.ino firmware updates to units over I2C via the twiboot bootloader.
+                                     //Requires every unit to first be flashed with twiboot per Unit/BOOTLOADER_SETUP.md - leave false until that's done!
+#define UNITS_AMOUNT_MAX    16     //Maximum possible units (matches the 4-bit DIP switch addressing range 0-15).
+                                    //The actual amount is auto-detected at startup via I2C scan, see scanI2CBus() - no longer set here.
 #define SERIAL_BAUDRATE     115200  //Serial debugging BAUD rate
-#define WIFI_USE_DIRECT     true   //Option to either direct connect to a WiFi Network or setup a AP to configure WiFi. Setting to false will setup as a AP.
+#define WIFI_USE_DIRECT     false  //Option to either direct connect to a WiFi Network or setup a AP to configure WiFi. Setting to false will setup as a AP.
 #define LED_ENABLE          true   //Option to enable LED debug blink codes (set to false if not using LED)
 #define DEBUG_ENABLE true  //Enable debug features: startup debug page, error status panel, page load debug log, and serial debug log at bottom of page
 
@@ -38,8 +42,8 @@
   EXPERIMENTAL: Try to use your Router when possible to set a Static IP address for your device to avoid conflicts with other devices
   on your network. This will try and setup your device with a static IP address of your chosing. See below for more details.
 */
-#define WIFI_STATIC_IP      true
-//#define FAE_MOD                   //Option for the modified PCB that includes an ESP-12F module
+#define WIFI_STATIC_IP      false
+#define FAE_MOD                   //Option for the modified PCB that includes an ESP-12F module
 
 /*
   ============================================================================
@@ -140,10 +144,16 @@
   These are important to maintain normal system behaviour. Only change if you know 
   what your doing.
 */
-#define ANSWER_SIZE         1       //Size of unit's request answer
+#define ANSWER_SIZE         3       //Size of unit's request answer (status byte + 2 offset bytes)
 #define FLAP_AMOUNT         45      //Amount of Flaps in each unit
 #define MIN_SPEED           1       //Min Speed
 #define MAX_SPEED           12      //Max Speed
+#define UNIT_STEPS          2038    //Must match STEPS in Unit.ino - used to validate offset values sent from the Admin UI
+#define UNIT_BOOTLOADER_CMD 255     //Must match CMD_ENTER_BOOTLOADER in Unit.ino
+#define UNIT_BOOTLOADER_BASE_ADDRESS 0x29 //Start of the range scanned for a unit's twiboot bootloader (0x29-0x38).
+                                          //Must match TWI_ADDRESS_BASE in Unit/bootloader/twiboot/main.c - that
+                                          //bootloader reads the unit's own DIP switches and adds them to this base,
+                                          //so it doesn't need to match any particular unitIndex - see BOOTLOADER_SETUP.md
 
 /* .-----------------------------------. */
 /* | _    _ _                 _        | */
@@ -166,6 +176,11 @@
 //OTA Libary if we are into that kind of thing
 #if OTA_ENABLE == true
 #include <ArduinoOTA.h>
+#endif
+
+//Used for the browser-based firmware upload on the Admin page
+#if WEB_FIRMWARE_UPDATE_ENABLE == true
+#include <Updater.h>
 #endif
 
 #include <Arduino.h>
@@ -238,8 +253,11 @@ const char* espVersion = "2.3.0-Scott";
 
 //All the letters on the units that we have to be displayed. You can change these if it so pleases at your own risk
 const char letters[] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '$', '&', '#', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', '-', '?', '!'};
-int displayState[UNITS_AMOUNT];
+int displayState[UNITS_AMOUNT_MAX];
 unsigned long previousMillis = 0;
+int unitsAmount = 0; //Auto-detected at startup by scanning I2C for units 0,1,2,... sequentially
+                      //(stops at the first missing address, same "sequential from 0" requirement
+                      //the DIP switches already have) - see scanI2CBus() in setup().
 
 //Search for parameter in HTTP POST request
 const char* PARAM_ALIGNMENT = "alignment";
@@ -251,6 +269,7 @@ const char* PARAM_SCHEDULE_DATE_TIME = "scheduledDateTimeUnix";
 const char* PARAM_SCHEDULE_SHOW_INDEFINITELY = "scheduleShowIndefinitely";
 const char* PARAM_COUNTDOWN_DATE = "countdownDateTimeUnix";
 const char* PARAM_ID = "id";
+const char* PARAM_UNIT_OFFSET = "offset";
 
 //Device Modes
 const char* DEVICE_MODE_TEXT = "text";
@@ -270,6 +289,7 @@ const char* deviceModePath = "/devicemode.txt";
 const char* countdownPath = "/countdown.txt";
 const char* scheduledMessagesPath = "/scheduled-messages.txt";
 const char* debugModePath = "/debugmode.txt";
+const char* unitFirmwarePath = "/unit-firmware.bin";
 
 //Variables for storing things for checking and use in normal running
 String alignment = "";
@@ -300,6 +320,11 @@ bool isPendingWifiReset = false;
 //Used to denote that the system has gone into OTA mode
 #if OTA_ENABLE == true
 bool isInOtaMode = false;
+#endif
+
+//Used to reject a browser firmware upload part-way through if the password didn't match
+#if WEB_FIRMWARE_UPDATE_ENABLE == true
+bool firmwareUpdateAuthFailed = false;
 #endif
 
 // LED Debugging variables
@@ -385,6 +410,13 @@ void setup() {
   Wire.begin(4, 5);
 #endif
 
+#if UNIT_BOOTLOADER_ENABLE == true
+  //twiboot (compiled with USE_CLOCKSTRETCH=1, see Unit/BOOTLOADER_SETUP.md) holds SCL low
+  //while a flash page write is in progress. Give it comfortably more time than the ATmega328p's
+  //worst-case erase+write duration so a page write never gets misread as a bus error.
+  Wire.setClockStretchLimit(25000);
+#endif
+
   // Initialize LED for debugging
 #if LED_ENABLE == true
   pinMode(LED_DEBUG_PIN, OUTPUT);
@@ -392,11 +424,18 @@ void setup() {
   blinkLed(1, 100, 50); // Quick blink to show startup
 #endif
 
-  // I2C bus scan on startup
+  // I2C bus scan on startup - determines unitsAmount. Retry a few times in case the bus
+  // hasn't fully settled yet (500ms should normally be plenty, this is just extra slack).
   delay(500); // Give I2C bus time to stabilize
   SerialPrintln("");
   SerialPrintln("=== I2C Bus Scan on Startup ===");
-  scanI2CBus();
+  for (int scanAttempt = 0; scanAttempt < 3 && unitsAmount == 0; scanAttempt++) {
+    if (scanAttempt > 0) {
+      SerialPrintln("No units found, retrying scan...");
+      delay(300);
+    }
+    scanI2CBus();
+  }
   SerialPrintln("");
 
   SerialPrintln("");
@@ -594,7 +633,7 @@ void setup() {
       // Build minimal response immediately (fast path)
       JsonDocument minimalDoc;
       minimalDoc["timezoneOffset"] = timezone.getOffset();
-      minimalDoc["unitCount"] = UNITS_AMOUNT;
+      minimalDoc["unitCount"] = unitsAmount;
       minimalDoc["alignment"] = alignment;
       minimalDoc["flapSpeed"] = flapSpeed;
       minimalDoc["deviceMode"] = deviceMode;
@@ -724,13 +763,223 @@ void setup() {
       }
       
       doc["foundCount"] = foundCount;
-      doc["expectedCount"] = UNITS_AMOUNT;
-      
+      doc["expectedCount"] = unitsAmount;
+
       String jsonString;
       serializeJson(doc, jsonString);
       request->send(200, "application/json", jsonString);
     });
-    
+
+    // Admin: read live status + calibration offset for every unit
+    webServer.on("/admin/units", HTTP_GET, [](AsyncWebServerRequest * request) {
+      SerialPrintln("DEBUG: Admin units request received");
+      JsonDocument doc;
+      doc["unitsAmount"] = unitsAmount;
+
+      for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
+        int status = -2;
+        int offset = -1;
+        bool online = readUnitInfo(unitIndex, status, offset);
+
+        doc["units"][unitIndex]["index"] = unitIndex;
+        doc["units"][unitIndex]["online"] = online;
+        doc["units"][unitIndex]["status"] = status;
+        doc["units"][unitIndex]["offset"] = offset;
+
+        yield();
+      }
+
+      String jsonString;
+      serializeJson(doc, jsonString);
+      request->send(200, "application/json", jsonString);
+    });
+
+    // Admin: re-run the I2C scan to pick up units that were connected/fixed after boot,
+    // without needing a full reboot. Updates the global unitsAmount used everywhere else.
+    webServer.on("/admin/rescan-units", HTTP_POST, [](AsyncWebServerRequest * request) {
+      SerialPrintln("DEBUG: Admin rescan-units request received");
+      int detectedAmount = scanI2CBus();
+
+      JsonDocument doc;
+      doc["unitsAmount"] = detectedAmount;
+
+      String jsonString;
+      serializeJson(doc, jsonString);
+      request->send(200, "application/json", jsonString);
+    });
+
+    // Admin: set a new calibration offset on a single unit, unit recalibrates immediately
+    webServer.on("/admin/unit-offset", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (!request->hasParam(PARAM_ID, true) || !request->hasParam(PARAM_UNIT_OFFSET, true)) {
+        SerialPrintln("Admin unit-offset request missing parameters");
+        request->send(400, "text/plain", "Both 'id' and 'offset' are required");
+        return;
+      }
+
+      String idValue = request->getParam(PARAM_ID, true)->value();
+      String offsetValue = request->getParam(PARAM_UNIT_OFFSET, true)->value();
+
+      if (!isNumber(idValue) || !isNumber(offsetValue)) {
+        SerialPrintln("Admin unit-offset request had non-numeric values");
+        request->send(400, "text/plain", "'id' and 'offset' must be numbers");
+        return;
+      }
+
+      int unitId = idValue.toInt();
+      long offset = atol(offsetValue.c_str());
+
+      if (unitId < 0 || unitId >= unitsAmount) {
+        SerialPrintln("Admin unit-offset request had out of range unit id: " + idValue);
+        request->send(400, "text/plain", "Unit id out of range. Valid range: 0 to " + String(unitsAmount - 1));
+        return;
+      }
+
+      if (offset < 0 || offset >= UNIT_STEPS) {
+        SerialPrintln("Admin unit-offset request had out of range offset: " + offsetValue);
+        request->send(400, "text/plain", "Offset out of range. Valid range: 0 to " + String(UNIT_STEPS - 1));
+        return;
+      }
+
+      SerialPrintln("Setting Unit " + String(unitId) + " offset to " + String(offset));
+      writeOffsetToUnit(unitId, (uint16_t)offset);
+
+      request->send(202, "text/plain", "Offset sent. Unit is recalibrating now, this can take a few seconds.");
+    });
+
+#if UNIT_BOOTLOADER_ENABLE == true
+    // Admin: upload a compiled Unit.ino firmware image (raw AVR flash .bin, NOT the ESPMaster's own
+    // .bin) to be pushed to a unit afterwards via /unit-firmware-push. See Unit/BOOTLOADER_SETUP.md.
+    webServer.on("/unit-firmware-upload", HTTP_POST,
+      [](AsyncWebServerRequest * request) {
+        request->send(200, "text/plain", "OK - firmware stored, ready to push to a unit");
+      },
+      [](AsyncWebServerRequest * request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
+        static File unitFirmwareFile;
+
+        if (index == 0) {
+          SerialPrintln("DEBUG: Unit firmware upload starting: " + filename);
+          unitFirmwareFile = LittleFS.open(unitFirmwarePath, "w");
+          if (!unitFirmwareFile) {
+            SerialPrintln("Unit firmware upload: failed to open " + String(unitFirmwarePath) + " for writing");
+          }
+        }
+
+        if (unitFirmwareFile) {
+          unitFirmwareFile.write(data, len);
+        }
+
+        if (final) {
+          if (unitFirmwareFile) {
+            unitFirmwareFile.close();
+          }
+          SerialPrintln("DEBUG: Unit firmware upload finished. Total bytes: " + String(index + len));
+        }
+      }
+    );
+
+    // Admin: push the currently stored unit firmware to a single unit over I2C (twiboot).
+    // Blocking (with yield() between pages, same pattern as showMessage()/isDisplayMoving()
+    // in ServiceFlapFunctions.ino) - a full push only takes a few seconds.
+    webServer.on("/unit-firmware-push", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (!request->hasParam(PARAM_ID, true)) {
+        request->send(400, "text/plain", "'id' is required");
+        return;
+      }
+
+      String idValue = request->getParam(PARAM_ID, true)->value();
+      if (!isNumber(idValue)) {
+        request->send(400, "text/plain", "'id' must be a number");
+        return;
+      }
+
+      int unitId = idValue.toInt();
+      if (unitId < 0 || unitId >= unitsAmount) {
+        request->send(400, "text/plain", "Unit id out of range. Valid range: 0 to " + String(unitsAmount - 1));
+        return;
+      }
+
+      if (!LittleFS.exists(unitFirmwarePath)) {
+        request->send(400, "text/plain", "No firmware uploaded yet. Upload a .bin first.");
+        return;
+      }
+
+      SerialPrintln("Pushing firmware to Unit " + String(unitId) + "...");
+      String resultJson;
+      bool success = pushFirmwareToUnit(unitId, resultJson);
+
+      request->send(success ? 200 : 500, "application/json", resultJson);
+    });
+#endif
+
+#if WEB_FIRMWARE_UPDATE_ENABLE == true
+    // Admin: browser-based firmware upload (no Arduino IDE required).
+    // Password (if otaPassword is set) is passed via the X-OTA-Password header so it's available
+    // before the file data starts streaming in, regardless of multipart field order.
+    webServer.on("/firmware-update", HTTP_POST,
+      [](AsyncWebServerRequest * request) {
+        //Runs once the full upload has been received and handled by the upload callback below
+        if (firmwareUpdateAuthFailed) {
+          firmwareUpdateAuthFailed = false;
+          request->send(401, "text/plain", "Invalid password");
+          return;
+        }
+
+        bool success = !Update.hasError();
+        AsyncWebServerResponse* response = request->beginResponse(success ? 200 : 500, "text/plain",
+          success ? "OK - Firmware written, rebooting now" : "Update failed, check the serial log for details");
+        response->addHeader("Connection", "close");
+        request->send(response);
+
+        if (success) {
+          SerialPrintln("Firmware update successful, rebooting...");
+          isPendingReboot = true;
+        } else {
+          SerialPrintln("Firmware update failed");
+        }
+      },
+      [](AsyncWebServerRequest * request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
+        if (index == 0) {
+          SerialPrintln("DEBUG: Firmware upload starting: " + filename);
+          firmwareUpdateAuthFailed = false;
+
+          //Only enforce the password if one has actually been configured
+          if (String(otaPassword) != "") {
+            String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
+            if (providedPassword != String(otaPassword)) {
+              SerialPrintln("Firmware upload rejected: invalid password");
+              firmwareUpdateAuthFailed = true;
+              return;
+            }
+          }
+
+          uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+          if (!Update.begin(maxSketchSpace, U_FLASH)) {
+            SerialPrintln("Firmware upload: Update.begin() failed");
+            Update.printError(Serial);
+          }
+        }
+
+        if (firmwareUpdateAuthFailed) {
+          return; //Password rejected, ignore the rest of the upload - final response already handled above
+        }
+
+        if (Update.write(data, len) != len) {
+          SerialPrintln("Firmware upload: Update.write() failed");
+          Update.printError(Serial);
+        }
+
+        if (final) {
+          if (Update.end(true)) {
+            SerialPrintln("DEBUG: Firmware upload finished successfully. Total bytes: " + String(index + len));
+          } else {
+            SerialPrintln("Firmware upload: Update.end() failed");
+            Update.printError(Serial);
+          }
+        }
+      }
+    );
+#endif
+
 #if DEBUG_ENABLE == true
     webServer.on("/exit-debug-mode", HTTP_GET, [](AsyncWebServerRequest * request) {
       SerialPrintln("DEBUG: Request to exit debug mode received");
@@ -1180,7 +1429,12 @@ void loop() {
     return;
   }
 
-  if (isPendingUnitsReset) {
+  //If no units have been detected (see scanI2CBus()), there's nothing to display to - skip
+  //anything unit-related below. Web server, OTA and settings all stay fully usable; use the
+  //Admin page's "Rescan Units" once wiring/addressing is fixed, no reboot required.
+  bool unitsAvailable = (unitsAmount > 0);
+
+  if (unitsAvailable && isPendingUnitsReset) {
     SerialPrintln("Reseting Units now...");
 
     //Blank out the message
@@ -1196,6 +1450,8 @@ void loop() {
     isPendingUnitsReset = false;
 
     SerialPrintln("Done Units Reset!");
+  } else if (!unitsAvailable) {
+    isPendingUnitsReset = false; //nothing to reset, don't leave this stuck pending
   }
   
 #if OTA_ENABLE == true
@@ -1217,15 +1473,16 @@ void loop() {
     checkScheduledMessages();
     checkCountdown();
 
-    // Skip display updates if a web request is active to prevent blocking
+    // Skip display updates if a web request is active to prevent blocking.
+    // (showText() itself is a no-op when no units are detected, see scanI2CBus())
     if (!webRequestActive) {
       //Mode Selection
-      if (deviceMode == DEVICE_MODE_TEXT || deviceMode == DEVICE_MODE_COUNTDOWN) { 
+      if (deviceMode == DEVICE_MODE_TEXT || deviceMode == DEVICE_MODE_COUNTDOWN) {
         showText(inputText);
-      } 
+      }
       else if (deviceMode == DEVICE_MODE_DATE) {
         showText(timezone.dateTime(dateFormat));
-      } 
+      }
       else if (deviceMode == DEVICE_MODE_CLOCK) {
         showText(timezone.dateTime(clockFormat));
       }
@@ -1236,53 +1493,52 @@ void loop() {
   }
 }
 
-// Scan I2C bus and report all found devices
-void scanI2CBus() {
+// Scans the I2C bus, reports all found devices, and (re-)determines unitsAmount: the number of
+// units found sequentially starting at address 0, stopping at the first missing address - this
+// mirrors the DIP switches' own "must be sequential from 0" requirement (see README "Set Unit
+// Address"), so a gap here means a wiring/configuration problem, not a legitimately sparse set
+// of units. Sets the global unitsAmount as a side effect and also returns it for convenience.
+int scanI2CBus() {
   SerialPrintln("========================================");
   SerialPrintln("I2C Bus Scan - Checking addresses 0-15");
   SerialPrintln("========================================");
-  
+
   int foundCount = 0;
   bool foundUnits[16] = {false}; // Track which addresses are found
   int unitStatus[16] = {-2}; // Track status of each address (-2 = not found, -1 = sleeping, 0 = ready, 1 = busy)
-  
+
   // Scan all possible I2C addresses (0-15)
   for (int address = 0; address < 16; address++) {
     Wire.beginTransmission(address);
     byte error = Wire.endTransmission();
-    
+
     if (error == 0) {
       foundUnits[address] = true;
       foundCount++;
-      
+
       SerialPrint("✓ Found device at address ");
       SerialPrint(address);
-      
-      // Try to read status from this address (only for addresses 0-15 which are our units)
-      if (address < 16) {
-        Wire.requestFrom(address, 1, 1);
-        if (Wire.available()) {
-          int status = Wire.read();
-          unitStatus[address] = status;
-          
-          SerialPrint(" - Status: ");
-          SerialPrint(status);
-          
-          if (status == 0) {
-            SerialPrintln(" (READY)");
-          } else if (status == 1) {
-            SerialPrintln(" (BUSY/MOVING)");
-          } else if (status == -1) {
-            SerialPrintln(" (SLEEPING)");
-          } else {
-            SerialPrintln(" (UNKNOWN)");
-          }
+
+      Wire.requestFrom(address, 1, 1);
+      if (Wire.available()) {
+        int status = Wire.read();
+        unitStatus[address] = status;
+
+        SerialPrint(" - Status: ");
+        SerialPrint(status);
+
+        if (status == 0) {
+          SerialPrintln(" (READY)");
+        } else if (status == 1) {
+          SerialPrintln(" (BUSY/MOVING)");
+        } else if (status == -1) {
+          SerialPrintln(" (SLEEPING)");
         } else {
-          SerialPrintln(" - No status response");
-          unitStatus[address] = -3; // No response
+          SerialPrintln(" (UNKNOWN)");
         }
       } else {
-        SerialPrintln(" - Unknown device type");
+        SerialPrintln(" - No status response");
+        unitStatus[address] = -3; // No response
       }
     } else if (error == 2) {
       // NACK on address - device not found (normal for unused addresses)
@@ -1291,76 +1547,76 @@ void scanI2CBus() {
       SerialPrint("⚠ Unknown I2C error at address ");
       SerialPrintln(address);
     }
-    
+
     yield();
     delay(10);
   }
-  
+
+  // Determine unitsAmount: count contiguous "found" addresses starting at 0
+  int detectedAmount = 0;
+  while (detectedAmount < 16 && foundUnits[detectedAmount]) {
+    detectedAmount++;
+  }
+  unitsAmount = detectedAmount;
+
   // Summary report
   SerialPrintln("");
   SerialPrintln("--- Scan Summary ---");
   SerialPrint("Total devices found: ");
   SerialPrintln(foundCount);
-  SerialPrint("Expected units: ");
-  SerialPrintln(UNITS_AMOUNT);
+  SerialPrint("Detected unitsAmount (sequential from address 0): ");
+  SerialPrintln(unitsAmount);
   SerialPrintln("");
-  
-  // Report which units are connected vs missing
+
   SerialPrintln("Unit Status:");
-  bool allUnitsFound = true;
-  for (int i = 0; i < UNITS_AMOUNT; i++) {
+  for (int i = 0; i < unitsAmount; i++) {
     SerialPrint("  Unit ");
     SerialPrint(i);
     SerialPrint(" (address ");
     SerialPrint(i);
-    SerialPrint("): ");
-    
-    if (foundUnits[i]) {
-      SerialPrint("✓ CONNECTED");
-      if (unitStatus[i] == 0) {
-        SerialPrintln(" - Ready");
-      } else if (unitStatus[i] == 1) {
-        SerialPrintln(" - Busy");
-      } else if (unitStatus[i] == -1) {
-        SerialPrintln(" - Sleeping");
-      } else if (unitStatus[i] == -3) {
-        SerialPrintln(" - No status response");
-      } else {
-        SerialPrint(" - Status code: ");
-        SerialPrintln(unitStatus[i]);
-      }
+    SerialPrint("): ✓ CONNECTED");
+
+    if (unitStatus[i] == 0) {
+      SerialPrintln(" - Ready");
+    } else if (unitStatus[i] == 1) {
+      SerialPrintln(" - Busy");
+    } else if (unitStatus[i] == -1) {
+      SerialPrintln(" - Sleeping");
+    } else if (unitStatus[i] == -3) {
+      SerialPrintln(" - No status response");
     } else {
-      SerialPrintln("✗ MISSING (not responding on I2C)");
-      allUnitsFound = false;
+      SerialPrint(" - Status code: ");
+      SerialPrintln(unitStatus[i]);
     }
   }
-  
-  // Report any extra devices found at addresses beyond expected units
-  if (foundCount > UNITS_AMOUNT) {
+
+  // Anything found beyond the contiguous run is likely a gap earlier in the sequence
+  // (a missing/misconfigured unit) rather than genuinely "extra" devices
+  if (foundCount > unitsAmount) {
     SerialPrintln("");
-    SerialPrintln("Additional devices found (beyond expected units):");
-    for (int i = UNITS_AMOUNT; i < 16; i++) {
+    SerialPrintln("⚠ Devices found beyond the contiguous 0..N-1 range - check for a gap (a missing/misconfigured unit earlier in the sequence?):");
+    for (int i = unitsAmount; i < 16; i++) {
       if (foundUnits[i]) {
         SerialPrint("  Address ");
         SerialPrint(i);
-        SerialPrintln(" - Unknown device");
+        SerialPrintln(" - responds, but out of sequence");
       }
     }
   }
-  
+
   SerialPrintln("");
-  if (allUnitsFound) {
-    SerialPrintln("✓ All expected units are connected!");
-  } else {
-    SerialPrint("⚠ WARNING: Some units are missing! Check:");
-    SerialPrintln("");
-    SerialPrintln("  1. DIP switch settings on missing units");
+  if (unitsAmount == 0) {
+    SerialPrintln("⚠ WARNING: No units detected at address 0. Display functionality is unavailable until this is fixed. Check:");
+    SerialPrintln("  1. DIP switch settings (address 0 must be assigned to a unit)");
     SerialPrintln("  2. I2C wiring (SDA/SCL connections)");
-    SerialPrintln("  3. Power connections to missing units");
-    SerialPrintln("  4. Unit firmware (verify address is correct)");
+    SerialPrintln("  3. Power connections");
+    SerialPrintln("  Use the Admin page's \"Rescan Units\" button once fixed, no reboot required.");
+  } else {
+    SerialPrintln("✓ " + String(unitsAmount) + " unit(s) detected and ready.");
   }
-  
+
   SerialPrintln("========================================");
+  return unitsAmount;
 }
 
 //Gets all the currently stored calues from memory in a JSON object
@@ -1377,7 +1633,7 @@ String getCurrentSettingValues() {
   SerialPrintln("DEBUG: getCurrentSettingValues() - JsonDocument created (" + String(afterDoc - funcStart) + "ms)");
 
   document["timezoneOffset"] = timezone.getOffset();
-  document["unitCount"] = UNITS_AMOUNT;
+  document["unitCount"] = unitsAmount;
   document["alignment"] = alignment;
   document["flapSpeed"] = flapSpeed;
   document["deviceMode"] = deviceMode;
@@ -1456,7 +1712,7 @@ String getCurrentSettingValues() {
     SerialPrintln("DEBUG: WARNING - getCurrentSettingValues() timeout before serialization, returning minimal response");
     JsonDocument minimalDoc;
     minimalDoc["timezoneOffset"] = timezone.getOffset();
-    minimalDoc["unitCount"] = UNITS_AMOUNT;
+    minimalDoc["unitCount"] = unitsAmount;
     minimalDoc["alignment"] = alignment;
     minimalDoc["flapSpeed"] = flapSpeed;
     minimalDoc["deviceMode"] = deviceMode;

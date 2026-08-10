@@ -1,0 +1,8 @@
+# Build artifacts (see Makefile) - never commit these, only the source
+*.o
+*.lst
+*.elf
+*.map
+*.lss
+*.hex
+*.bin

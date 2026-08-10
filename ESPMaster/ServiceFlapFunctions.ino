@@ -3,8 +3,14 @@ void showText(String message) {
   showText(message, 0);
 }
 
-void showText(String message, int delayMillis) {  
-  if (lastWrittenText != message || alignmentUpdated) { 
+void showText(String message, int delayMillis) {
+  //Nothing to display to - see scanI2CBus(). Guarded here (rather than at every call site)
+  //so scheduled messages, countdown, clock/date modes etc. all stay safe automatically.
+  if (unitsAmount <= 0) {
+    return;
+  }
+
+  if (lastWrittenText != message || alignmentUpdated) {
     String messageDisplay = message == "" ? "<Blank>" : message;
     String alignmentUpdatedDisplay = alignmentUpdated ? "Yes" : "No";
 
@@ -103,7 +109,7 @@ void showMessage(String message, int flapSpeed) {
     SerialPrintln("WARNING: Display wait timeout - continuing anyway");
   }
 
-  for (int unitIndex = 0; unitIndex < UNITS_AMOUNT; unitIndex++) {
+  for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
     char currentLetter = message[unitIndex];
     int currentLetterPosition = translateLettertoInt(currentLetter);
     
@@ -165,10 +171,49 @@ void writeToUnit(int address, int letter, int flapSpeed) {
   Wire.endTransmission(); //send values to unit
 }
 
+//Write a new calibration offset to a single unit. The unit recalibrates immediately upon
+//receiving this and ends up showing letter 0 (blank), so that letter is sent along with it
+//to avoid triggering a second, separate rotation.
+void writeOffsetToUnit(int address, uint16_t offset) {
+  int currentSpeed = convertSpeed(flapSpeed);
+
+  SerialPrint("Writing offset ");
+  SerialPrint(offset);
+  SerialPrint(" to unit ");
+  SerialPrintln(address);
+
+  Wire.beginTransmission(address);
+  Wire.write(0); //letter 0 = blank, matches the position the unit ends up at after recalibrating
+  Wire.write(currentSpeed);
+  Wire.write(lowByte(offset));
+  Wire.write(highByte(offset));
+  Wire.endTransmission();
+}
+
+//Reads status and calibration offset from a single unit in one I2C transaction.
+//Returns true if the unit responded, false otherwise (statusOut/offsetOut are left unchanged on failure).
+bool readUnitInfo(int address, int &statusOut, int &offsetOut) {
+  Wire.requestFrom(address, ANSWER_SIZE, 1);
+
+  if (Wire.available() < ANSWER_SIZE) {
+    SerialPrint("ERROR: Unit ");
+    SerialPrint(address);
+    SerialPrintln(" - No/incomplete response reading status+offset");
+    return false;
+  }
+
+  statusOut = Wire.read();
+  int offsetLow = Wire.read();
+  int offsetHigh = Wire.read();
+  offsetOut = offsetLow + (offsetHigh << 8);
+
+  return true;
+}
+
 //Checks if unit in display is currently moving
 bool isDisplayMoving() {
   //Request all units moving state and write to array
-  for (int unitIndex = 0; unitIndex < UNITS_AMOUNT; unitIndex++) {
+  for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
     displayState[unitIndex] = checkIfMoving(unitIndex);
     if (displayState[unitIndex] == 1) {
       SerialPrint("Unit ");
@@ -191,19 +236,16 @@ bool isDisplayMoving() {
 
 //Checks if single unit is moving
 int checkIfMoving(int address) {
-  Wire.requestFrom(address, ANSWER_SIZE, 1);
-  
-  if (Wire.available() == 0) {
-    SerialPrint("ERROR: Unit ");
-    SerialPrint(address);
-    SerialPrintln(" - No response (no data available)");
-    
+  int active;
+  int offsetUnused;
+
+  if (!readUnitInfo(address, active, offsetUnused)) {
     // Check I2C error
     Wire.beginTransmission(address);
     byte error = Wire.endTransmission();
     SerialPrint("  I2C error code: ");
     SerialPrintln(error);
-    
+
     if (error == 2) {
       SerialPrintln("  -> Address received NACK (device not found)");
     } else if (error == 3) {
@@ -213,11 +255,10 @@ int checkIfMoving(int address) {
     } else if (error == 5) {
       SerialPrintln("  -> Timeout");
     }
-    
+
     return -1;
   }
-  
-  int active = Wire.read();
+
   SerialPrint("Unit ");
   SerialPrint(address);
   SerialPrint(" status: ");

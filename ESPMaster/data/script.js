@@ -269,7 +269,9 @@ function updateCharacterCount() {
 	var labelLineCount = document.getElementById("labelLineCount");
 
 	labelCharacterCount.innerHTML = length;
-	labelLineCount.innerHTML = Math.ceil(length / unitCount) + inputText.split("\\n").length - 1;
+	//unitCount can be 0 if no units were detected on startup - avoid Infinity/NaN in that case
+	var lineWidthEstimate = unitCount > 0 ? Math.ceil(length / unitCount) : 0;
+	labelLineCount.innerHTML = lineWidthEstimate + inputText.split("\\n").length - 1;
 }
 
 //Easy add a newline

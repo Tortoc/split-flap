@@ -10,6 +10,12 @@
 #include <Stepper.h>
 #include <EEPROM.h>
 #include <avr/sleep.h>
+#include <avr/wdt.h>
+
+//sentinel value sent over I2C (in place of a letter) to request a reboot into the twiboot
+//bootloader for a firmware update - see Unit/BOOTLOADER_SETUP.md. Out of range of valid
+//letter indices (0-44), so it can never collide with a normal display request.
+#define CMD_ENTER_BOOTLOADER 255
 
 // Pins of I2C adress switch
 #define ADRESSSW1 6
@@ -55,6 +61,8 @@ int eeAddress = 0;   //EEPROM address for calibration offset
 uint16_t calOffset;       //Offset for calibration in steps, stored in EEPROM, gets read in setup
 int receivedNumber = 0;
 int i2cAddress;
+bool forceRecalibrate = false; //set when a new calibration offset is received via I2C, triggers an immediate recalibration in loop()
+bool enterBootloaderRequested = false; //set when CMD_ENTER_BOOTLOADER is received via I2C, triggers a watchdog reset in loop()
 
 //sleep globals
 const unsigned long WAIT_TIME = 2000;    //wait time before sleep routine gets executed again in milliseconds
@@ -111,6 +119,22 @@ void setup() {
 }
 
 void loop() {
+  //if a firmware update was requested via I2C, cleanly stop the motor and reboot into
+  //the twiboot bootloader (see Unit/BOOTLOADER_SETUP.md). twiboot itself disables the
+  //watchdog again immediately on entry, so this can't trap the unit in a reset loop.
+  if (enterBootloaderRequested) {
+    enterBootloaderRequested = false;
+    stopMotor();
+    wdt_enable(WDTO_15MS);
+    while (1) {} //wait for the watchdog to fire
+  }
+
+  //if a new calibration offset arrived via I2C, recalibrate immediately so the change is visible right away
+  if (forceRecalibrate) {
+    forceRecalibrate = false;
+    calibrate(true);
+  }
+
   unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= WAIT_TIME) {
     byte old_ADCSRA = ADCSRA;
@@ -254,6 +278,13 @@ void receiveLetter(int numBytes) {
   for (int i = 0; i < numBytes && i < 4; i++) {
     receiveArray[i] = Wire.read();
   }
+
+  //firmware update request - don't treat as a letter, just raise the flag and bail out
+  if (receiveArray[0] == CMD_ENTER_BOOTLOADER) {
+    enterBootloaderRequested = true;
+    return;
+  }
+
   //Write received bytes to correct variables
   receivedNumber = receiveArray[0];
   stepperSpeed = receiveArray[1];
@@ -262,12 +293,16 @@ void receiveLetter(int numBytes) {
     if (newCalOffset != calOffset) {
       calOffset = newCalOffset;
       writeToEEPROM(calOffset);
+      forceRecalibrate = true; //apply the new offset right away instead of waiting for the next full rotation
     }
   }
 }
 
 void requestEvent() {
-  Wire.write(currentlyrotating); //send unit status to master
+  //send unit status and current calibration offset to master
+  Wire.write(currentlyrotating);
+  Wire.write(lowByte(calOffset));
+  Wire.write(highByte(calOffset));
   /*
     #ifdef SERIAL_ENABLE
     Serial.print("Status ");
