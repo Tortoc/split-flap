@@ -259,6 +259,21 @@ int unitsAmount = 0; //Auto-detected at startup by scanning I2C for units 0,1,2,
                       //(stops at the first missing address, same "sequential from 0" requirement
                       //the DIP switches already have) - see scanI2CBus() in setup().
 
+//Bench-tested on real hardware (2026-08-11): triggering an I2C bus scan/read directly from
+//inside an AsyncWebServer request callback reliably hangs the ESP for several seconds and then
+//crashes/reboots it - even for a scan that finds zero devices (pure address probes, no actual
+//data read). The *identical* scanI2CBus()/readUnitInfo() calls are rock solid when made from
+//setup() or loop(). Suspected cause: AsyncTCP callbacks run nested inside loop()'s own call
+//stack with much less headroom, and Wire's clock-stretch handling wants more of it than that
+//leaves free. Fix: handlers that need to touch the I2C bus never call Wire themselves - they
+//just remember the pending AsyncWebServerRequest here, and loop() (top-level stack) does the
+//actual bus work and calls request->send() itself once done. Only one of each can be in flight
+//at a time (single-operator admin page); a second request while one is pending gets an
+//immediate 503 rather than silently replacing/dropping the first.
+AsyncWebServerRequest* pendingRescanRequest = nullptr;
+AsyncWebServerRequest* pendingUnitsInfoRequest = nullptr;
+AsyncWebServerRequest* pendingLegacyI2CScanRequest = nullptr;
+
 //Search for parameter in HTTP POST request
 const char* PARAM_ALIGNMENT = "alignment";
 const char* PARAM_FLAP_SPEED = "flapSpeed";
@@ -728,84 +743,35 @@ void setup() {
     // I2C bus scanner endpoint for diagnostics
     webServer.on("/i2c-scan", HTTP_GET, [](AsyncWebServerRequest * request) {
       SerialPrintln("DEBUG: I2C scan requested");
-      JsonDocument doc;
-      doc["scanTime"] = millis();
-      
-      int foundCount = 0;
-      for (int address = 0; address < 16; address++) {
-        Wire.beginTransmission(address);
-        byte error = Wire.endTransmission();
-        
-        if (error == 0) {
-          doc["devices"][foundCount]["address"] = address;
-          
-          // Try to read status
-          Wire.requestFrom(address, 1, 1);
-          if (Wire.available()) {
-            int status = Wire.read();
-            doc["devices"][foundCount]["status"] = status;
-            if (status == 0) {
-              doc["devices"][foundCount]["statusText"] = "ready";
-            } else if (status == 1) {
-              doc["devices"][foundCount]["statusText"] = "busy";
-            } else {
-              doc["devices"][foundCount]["statusText"] = "unknown";
-            }
-          } else {
-            doc["devices"][foundCount]["status"] = -1;
-            doc["devices"][foundCount]["statusText"] = "no response";
-          }
-          foundCount++;
-        }
-        
-        yield();
-        delay(10);
+      //Deferred to loop() - see the comment on pendingLegacyI2CScanRequest near unitsAmount.
+      if (pendingLegacyI2CScanRequest != nullptr) {
+        request->send(503, "text/plain", "Another I2C scan is already in progress, try again shortly");
+        return;
       }
-      
-      doc["foundCount"] = foundCount;
-      doc["expectedCount"] = unitsAmount;
-
-      String jsonString;
-      serializeJson(doc, jsonString);
-      request->send(200, "application/json", jsonString);
+      pendingLegacyI2CScanRequest = request;
     });
 
-    // Admin: read live status + calibration offset for every unit
+    // Admin: read live status + calibration offset for every unit.
+    //Deferred to loop() - see the comment on pendingUnitsInfoRequest near unitsAmount.
     webServer.on("/admin/units", HTTP_GET, [](AsyncWebServerRequest * request) {
       SerialPrintln("DEBUG: Admin units request received");
-      JsonDocument doc;
-      doc["unitsAmount"] = unitsAmount;
-
-      for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
-        int status = -2;
-        int offset = -1;
-        bool online = readUnitInfo(unitIndex, status, offset);
-
-        doc["units"][unitIndex]["index"] = unitIndex;
-        doc["units"][unitIndex]["online"] = online;
-        doc["units"][unitIndex]["status"] = status;
-        doc["units"][unitIndex]["offset"] = offset;
-
-        yield();
+      if (pendingUnitsInfoRequest != nullptr) {
+        request->send(503, "text/plain", "Another units request is already in progress, try again shortly");
+        return;
       }
-
-      String jsonString;
-      serializeJson(doc, jsonString);
-      request->send(200, "application/json", jsonString);
+      pendingUnitsInfoRequest = request;
     });
 
     // Admin: re-run the I2C scan to pick up units that were connected/fixed after boot,
     // without needing a full reboot. Updates the global unitsAmount used everywhere else.
+    //Deferred to loop() - see the comment on pendingRescanRequest near unitsAmount.
     webServer.on("/admin/rescan-units", HTTP_POST, [](AsyncWebServerRequest * request) {
       SerialPrintln("DEBUG: Admin rescan-units request received");
-      int detectedAmount = scanI2CBus();
-
-      JsonDocument doc;
-      doc["unitsAmount"] = detectedAmount;
-
-      String jsonString;
-      serializeJson(doc, jsonString);
-      request->send(200, "application/json", jsonString);
+      if (pendingRescanRequest != nullptr) {
+        request->send(503, "text/plain", "Another rescan is already in progress, try again shortly");
+        return;
+      }
+      pendingRescanRequest = request;
     });
 
     // Admin: set a new calibration offset on a single unit, unit recalibrates immediately
@@ -1343,6 +1309,90 @@ void setup() {
 /* |                          |___/               |_|   | */
 /* '----------------------------------------------------' */
 void loop() {
+  //Handle any I2C admin requests deferred here by the web handlers (see the comment on
+  //pendingRescanRequest near unitsAmount for why this can't just run in the handler itself).
+  //Checked first, before anything else in loop(), so a pending request gets served as soon as
+  //possible.
+  if (pendingRescanRequest != nullptr) {
+    AsyncWebServerRequest* deferredRequest = pendingRescanRequest;
+    pendingRescanRequest = nullptr;
+
+    int detectedAmount = scanI2CBus();
+
+    JsonDocument doc;
+    doc["unitsAmount"] = detectedAmount;
+    String jsonString;
+    serializeJson(doc, jsonString);
+    deferredRequest->send(200, "application/json", jsonString);
+  }
+
+  if (pendingUnitsInfoRequest != nullptr) {
+    AsyncWebServerRequest* deferredRequest = pendingUnitsInfoRequest;
+    pendingUnitsInfoRequest = nullptr;
+
+    JsonDocument doc;
+    doc["unitsAmount"] = unitsAmount;
+    for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
+      int status = -2;
+      int offset = -1;
+      bool online = readUnitInfo(unitIndex, status, offset);
+
+      doc["units"][unitIndex]["index"] = unitIndex;
+      doc["units"][unitIndex]["online"] = online;
+      doc["units"][unitIndex]["status"] = status;
+      doc["units"][unitIndex]["offset"] = offset;
+
+      yield();
+    }
+    String jsonString;
+    serializeJson(doc, jsonString);
+    deferredRequest->send(200, "application/json", jsonString);
+  }
+
+  if (pendingLegacyI2CScanRequest != nullptr) {
+    AsyncWebServerRequest* deferredRequest = pendingLegacyI2CScanRequest;
+    pendingLegacyI2CScanRequest = nullptr;
+
+    JsonDocument doc;
+    doc["scanTime"] = millis();
+
+    int foundCount = 0;
+    for (int address = 0; address < 16; address++) {
+      Wire.beginTransmission(address);
+      byte error = Wire.endTransmission();
+
+      if (error == 0) {
+        doc["devices"][foundCount]["address"] = address;
+
+        Wire.requestFrom(address, 1, 1);
+        if (Wire.available()) {
+          int status = Wire.read();
+          doc["devices"][foundCount]["status"] = status;
+          if (status == 0) {
+            doc["devices"][foundCount]["statusText"] = "ready";
+          } else if (status == 1) {
+            doc["devices"][foundCount]["statusText"] = "busy";
+          } else {
+            doc["devices"][foundCount]["statusText"] = "unknown";
+          }
+        } else {
+          doc["devices"][foundCount]["status"] = -1;
+          doc["devices"][foundCount]["statusText"] = "no response";
+        }
+        foundCount++;
+      }
+
+      yield();
+      delay(10);
+    }
+
+    doc["foundCount"] = foundCount;
+    doc["expectedCount"] = unitsAmount;
+    String jsonString;
+    serializeJson(doc, jsonString);
+    deferredRequest->send(200, "application/json", jsonString);
+  }
+
   //Reboot in here as if we restart within a request handler, no response is returned
   if (isPendingReboot) {
     SerialPrintln("Rebooting Now... Fairwell!");
