@@ -274,6 +274,13 @@ AsyncWebServerRequest* pendingRescanRequest = nullptr;
 AsyncWebServerRequest* pendingUnitsInfoRequest = nullptr;
 AsyncWebServerRequest* pendingLegacyI2CScanRequest = nullptr;
 
+//Same reasoning, for the twiboot/bootloader endpoints (only relevant when
+//UNIT_BOOTLOADER_ENABLE is true - see ServiceUnitFirmwareFunctions.ino).
+AsyncWebServerRequest* pendingFirmwarePushRequest = nullptr;
+int pendingFirmwarePushUnitIndex = -1;
+AsyncWebServerRequest* pendingBootloaderProbeRequest = nullptr;
+int pendingBootloaderProbeUnitIndex = -1;
+
 //Search for parameter in HTTP POST request
 const char* PARAM_ALIGNMENT = "alignment";
 const char* PARAM_FLAP_SPEED = "flapSpeed";
@@ -844,8 +851,9 @@ void setup() {
     );
 
     // Admin: push the currently stored unit firmware to a single unit over I2C (twiboot).
-    // Blocking (with yield() between pages, same pattern as showMessage()/isDisplayMoving()
-    // in ServiceFlapFunctions.ino) - a full push only takes a few seconds.
+    // Deferred to loop() - see the comment on pendingRescanRequest near unitsAmount; this does
+    // I2C reads (verify-after-write) just like the endpoints fixed there, so the same handler-
+    // stack crash applies here too.
     webServer.on("/unit-firmware-push", HTTP_POST, [](AsyncWebServerRequest * request) {
       if (!request->hasParam(PARAM_ID, true)) {
         request->send(400, "text/plain", "'id' is required");
@@ -869,11 +877,44 @@ void setup() {
         return;
       }
 
-      SerialPrintln("Pushing firmware to Unit " + String(unitId) + "...");
-      String resultJson;
-      bool success = pushFirmwareToUnit(unitId, resultJson);
+      if (pendingFirmwarePushRequest != nullptr) {
+        request->send(503, "text/plain", "Another firmware push is already in progress, try again shortly");
+        return;
+      }
 
-      request->send(success ? 200 : 500, "application/json", resultJson);
+      pendingFirmwarePushUnitIndex = unitId;
+      pendingFirmwarePushRequest = request;
+    });
+
+    // Admin/diagnostic: send a unit into bootloader mode and report which I2C address it answers
+    // on, without writing anything to flash. Used to verify the DIP-jumper address is read live
+    // by twiboot (see BOOTLOADER_SETUP.md's jumper-live-test) without risking a real firmware
+    // push. Deferred to loop() for the same reason as /unit-firmware-push above.
+    webServer.on("/admin/unit-bootloader-probe", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (!request->hasParam(PARAM_ID, true)) {
+        request->send(400, "text/plain", "'id' is required");
+        return;
+      }
+
+      String idValue = request->getParam(PARAM_ID, true)->value();
+      if (!isNumber(idValue)) {
+        request->send(400, "text/plain", "'id' must be a number");
+        return;
+      }
+
+      int unitId = idValue.toInt();
+      if (unitId < 0 || unitId >= unitsAmount) {
+        request->send(400, "text/plain", "Unit id out of range. Valid range: 0 to " + String(unitsAmount - 1));
+        return;
+      }
+
+      if (pendingBootloaderProbeRequest != nullptr) {
+        request->send(503, "text/plain", "Another bootloader probe is already in progress, try again shortly");
+        return;
+      }
+
+      pendingBootloaderProbeUnitIndex = unitId;
+      pendingBootloaderProbeRequest = request;
     });
 #endif
 
@@ -1392,6 +1433,64 @@ void loop() {
     serializeJson(doc, jsonString);
     deferredRequest->send(200, "application/json", jsonString);
   }
+
+#if UNIT_BOOTLOADER_ENABLE == true
+  if (pendingFirmwarePushRequest != nullptr) {
+    AsyncWebServerRequest* deferredRequest = pendingFirmwarePushRequest;
+    int unitIndex = pendingFirmwarePushUnitIndex;
+    pendingFirmwarePushRequest = nullptr;
+
+    SerialPrintln("Pushing firmware to Unit " + String(unitIndex) + "...");
+    String resultJson;
+    bool success = pushFirmwareToUnit(unitIndex, resultJson);
+
+    deferredRequest->send(success ? 200 : 500, "application/json", resultJson);
+  }
+
+  if (pendingBootloaderProbeRequest != nullptr) {
+    AsyncWebServerRequest* deferredRequest = pendingBootloaderProbeRequest;
+    int unitIndex = pendingBootloaderProbeUnitIndex;
+    pendingBootloaderProbeRequest = nullptr;
+
+    SerialPrintln("Bootloader probe: requesting Unit " + String(unitIndex) + " to enter bootloader...");
+    requestUnitEnterBootloader(unitIndex);
+
+    //Same retry/backoff as pushFirmwareToUnit() - give the watchdog reset + twiboot startup
+    //time to happen.
+    TwibootChipInfo chipInfo;
+    int bootAddress = -1;
+    for (int attempt = 0; attempt < 5 && bootAddress == -1; attempt++) {
+      delay(attempt == 0 ? 300 : 150);
+      yield();
+      bootAddress = scanForBootloaderAddress(chipInfo);
+    }
+
+    JsonDocument doc;
+    doc["unitIndex"] = unitIndex;
+    if (bootAddress == -2) {
+      doc["success"] = false;
+      doc["error"] = "More than one unit answered as a bootloader right now - refusing to guess which one.";
+    } else if (bootAddress < 0) {
+      doc["success"] = false;
+      doc["error"] = "No unit responded in bootloader mode. Nothing was written.";
+    } else {
+      doc["success"] = true;
+      doc["bootAddress"] = bootAddress;
+      doc["bootAddressHex"] = "0x" + String(bootAddress, HEX);
+      doc["addressOffsetFromBase"] = bootAddress - UNIT_BOOTLOADER_BASE_ADDRESS;
+      char sigBuf[16];
+      snprintf(sigBuf, sizeof(sigBuf), "%02X %02X %02X", chipInfo.signature[0], chipInfo.signature[1], chipInfo.signature[2]);
+      doc["signature"] = sigBuf;
+      doc["pageSize"] = chipInfo.pageSize;
+      doc["bootloaderStart"] = chipInfo.bootloaderStart;
+      doc["note"] = "Nothing was written. The unit returns to its normal app on its own within about a second of being left idle.";
+    }
+
+    String jsonString;
+    serializeJson(doc, jsonString);
+    deferredRequest->send(200, "application/json", jsonString);
+  }
+#endif
 
   //Reboot in here as if we restart within a request handler, no response is returned
   if (isPendingReboot) {
