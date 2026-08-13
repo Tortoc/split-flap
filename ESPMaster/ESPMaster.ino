@@ -278,12 +278,32 @@ AsyncWebServerRequest* pendingRescanRequest = nullptr;
 AsyncWebServerRequest* pendingUnitsInfoRequest = nullptr;
 AsyncWebServerRequest* pendingLegacyI2CScanRequest = nullptr;
 
+//BUG FIX, 2026-08-13: ESPAsyncWebServer deletes the AsyncWebServerRequest object as soon as the
+//underlying client disconnects (AsyncWebServer::_handleDisconnect() in the library's
+//WebServer.cpp calls `delete request` unconditionally, whether or not a response was ever
+//sent) - found while double-checking this exact deferred-request pattern for other bugs. If a
+//client gives up/times out (very plausible now that a wait can legitimately take up to 90s, see
+//waitForAllUnitsReady()) while its request is sitting in one of the pendingXxxRequest globals
+//above, or *while loop() is already in the middle of the I2C work for it*, the request object
+//can be freed out from under us - a use-after-free the moment loop() later calls
+//deferredRequest->send() on it. A plain "null the pointer on disconnect" only covers the first
+//case (still queued); once loop() has taken its own local copy of the pointer and started work,
+//nulling the global doesn't help. So each pendingXxxRequest gets a matching *Disconnected flag:
+//the onDisconnect handler sets both (clearing the global so a still-queued request is skipped
+//entirely, and setting the flag so loop() can tell mid-flight that the object it's holding is
+//no longer safe to call send() on, even though its own local copy of the pointer looks fine).
+bool pendingRescanRequestDisconnected = false;
+bool pendingUnitsInfoRequestDisconnected = false;
+bool pendingLegacyI2CScanRequestDisconnected = false;
+
 //Same reasoning, for the twiboot/bootloader endpoints (only relevant when
 //UNIT_BOOTLOADER_ENABLE is true - see ServiceUnitFirmwareFunctions.ino).
 AsyncWebServerRequest* pendingFirmwarePushRequest = nullptr;
 int pendingFirmwarePushUnitIndex = -1;
+bool pendingFirmwarePushRequestDisconnected = false;
 AsyncWebServerRequest* pendingBootloaderProbeRequest = nullptr;
 int pendingBootloaderProbeUnitIndex = -1;
+bool pendingBootloaderProbeRequestDisconnected = false;
 
 //Search for parameter in HTTP POST request
 const char* PARAM_ALIGNMENT = "alignment";
@@ -776,7 +796,14 @@ void setup() {
         request->send(503, "text/plain", "Another I2C scan is already in progress, try again shortly");
         return;
       }
+      pendingLegacyI2CScanRequestDisconnected = false;
       pendingLegacyI2CScanRequest = request;
+      //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near
+      //unitsAmount - guards against both a still-queued and a mid-flight disconnect.
+      request->onDisconnect([]() {
+        pendingLegacyI2CScanRequest = nullptr;
+        pendingLegacyI2CScanRequestDisconnected = true;
+      });
     });
 
     // Admin: read live status + calibration offset for every unit.
@@ -787,7 +814,14 @@ void setup() {
         request->send(503, "text/plain", "Another units request is already in progress, try again shortly");
         return;
       }
+      pendingUnitsInfoRequestDisconnected = false;
       pendingUnitsInfoRequest = request;
+      //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near
+      //unitsAmount - guards against both a still-queued and a mid-flight disconnect.
+      request->onDisconnect([]() {
+        pendingUnitsInfoRequest = nullptr;
+        pendingUnitsInfoRequestDisconnected = true;
+      });
     });
 
     // Admin: re-run the I2C scan to pick up units that were connected/fixed after boot,
@@ -799,7 +833,14 @@ void setup() {
         request->send(503, "text/plain", "Another rescan is already in progress, try again shortly");
         return;
       }
+      pendingRescanRequestDisconnected = false;
       pendingRescanRequest = request;
+      //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near
+      //unitsAmount - guards against both a still-queued and a mid-flight disconnect.
+      request->onDisconnect([]() {
+        pendingRescanRequest = nullptr;
+        pendingRescanRequestDisconnected = true;
+      });
     });
 
     // Admin: set a new calibration offset on a single unit, unit recalibrates immediately
@@ -937,7 +978,20 @@ void setup() {
       }
 
       pendingFirmwarePushUnitIndex = unitId;
+      pendingFirmwarePushRequestDisconnected = false;
       pendingFirmwarePushRequest = request;
+      //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near
+      //unitsAmount - guards against both a still-queued and (especially likely here, a real
+      //firmware push can take several seconds) a mid-flight disconnect. Note: this only
+      //controls whether we call send() on the (possibly now-freed) request object afterwards -
+      //an in-flight pushFirmwareToUnit() call already running in loop() always finishes what it
+      //started regardless (by design, see the safety property documented on
+      //pushFirmwareToUnit()), it just won't have anywhere to report the result if the client is
+      //already gone.
+      request->onDisconnect([]() {
+        pendingFirmwarePushRequest = nullptr;
+        pendingFirmwarePushRequestDisconnected = true;
+      });
     });
 
     // Admin/diagnostic: send a unit into bootloader mode and report which I2C address it answers
@@ -968,7 +1022,14 @@ void setup() {
       }
 
       pendingBootloaderProbeUnitIndex = unitId;
+      pendingBootloaderProbeRequestDisconnected = false;
       pendingBootloaderProbeRequest = request;
+      //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near
+      //unitsAmount - guards against both a still-queued and a mid-flight disconnect.
+      request->onDisconnect([]() {
+        pendingBootloaderProbeRequest = nullptr;
+        pendingBootloaderProbeRequestDisconnected = true;
+      });
     });
 #endif
 
@@ -1454,19 +1515,26 @@ void loop() {
   if (pendingRescanRequest != nullptr) {
     AsyncWebServerRequest* deferredRequest = pendingRescanRequest;
     pendingRescanRequest = nullptr;
+    pendingRescanRequestDisconnected = false; //this run's flag starts clean - see the comment near unitsAmount
 
     int detectedAmount = scanI2CBus();
 
-    JsonDocument doc;
-    doc["unitsAmount"] = detectedAmount;
-    String jsonString;
-    serializeJson(doc, jsonString);
-    deferredRequest->send(200, "application/json", jsonString);
+    //BUG FIX, 2026-08-13: only call send() if the client is still actually there to receive it -
+    //see the comment on pendingRescanRequestDisconnected near unitsAmount. If it disconnected
+    //while scanI2CBus() was running, deferredRequest now points at freed memory.
+    if (!pendingRescanRequestDisconnected) {
+      JsonDocument doc;
+      doc["unitsAmount"] = detectedAmount;
+      String jsonString;
+      serializeJson(doc, jsonString);
+      deferredRequest->send(200, "application/json", jsonString);
+    }
   }
 
   if (pendingUnitsInfoRequest != nullptr) {
     AsyncWebServerRequest* deferredRequest = pendingUnitsInfoRequest;
     pendingUnitsInfoRequest = nullptr;
+    pendingUnitsInfoRequestDisconnected = false;
 
     JsonDocument doc;
     doc["unitsAmount"] = unitsAmount;
@@ -1488,14 +1556,19 @@ void loop() {
 
       yield();
     }
-    String jsonString;
-    serializeJson(doc, jsonString);
-    deferredRequest->send(200, "application/json", jsonString);
+
+    //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near unitsAmount.
+    if (!pendingUnitsInfoRequestDisconnected) {
+      String jsonString;
+      serializeJson(doc, jsonString);
+      deferredRequest->send(200, "application/json", jsonString);
+    }
   }
 
   if (pendingLegacyI2CScanRequest != nullptr) {
     AsyncWebServerRequest* deferredRequest = pendingLegacyI2CScanRequest;
     pendingLegacyI2CScanRequest = nullptr;
+    pendingLegacyI2CScanRequestDisconnected = false;
 
     JsonDocument doc;
     doc["scanTime"] = millis();
@@ -1532,9 +1605,13 @@ void loop() {
 
     doc["foundCount"] = foundCount;
     doc["expectedCount"] = unitsAmount;
-    String jsonString;
-    serializeJson(doc, jsonString);
-    deferredRequest->send(200, "application/json", jsonString);
+
+    //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near unitsAmount.
+    if (!pendingLegacyI2CScanRequestDisconnected) {
+      String jsonString;
+      serializeJson(doc, jsonString);
+      deferredRequest->send(200, "application/json", jsonString);
+    }
   }
 
 #if UNIT_BOOTLOADER_ENABLE == true
@@ -1542,18 +1619,25 @@ void loop() {
     AsyncWebServerRequest* deferredRequest = pendingFirmwarePushRequest;
     int unitIndex = pendingFirmwarePushUnitIndex;
     pendingFirmwarePushRequest = nullptr;
+    pendingFirmwarePushRequestDisconnected = false;
 
     SerialPrintln("Pushing firmware to Unit " + String(unitIndex) + "...");
     String resultJson;
+    //Always runs to completion regardless of whether the client is still listening - see the
+    //comment on the onDisconnect handler for /unit-firmware-push above.
     bool success = pushFirmwareToUnit(unitIndex, resultJson);
 
-    deferredRequest->send(success ? 200 : 500, "application/json", resultJson);
+    //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near unitsAmount.
+    if (!pendingFirmwarePushRequestDisconnected) {
+      deferredRequest->send(success ? 200 : 500, "application/json", resultJson);
+    }
   }
 
   if (pendingBootloaderProbeRequest != nullptr) {
     AsyncWebServerRequest* deferredRequest = pendingBootloaderProbeRequest;
     int unitIndex = pendingBootloaderProbeUnitIndex;
     pendingBootloaderProbeRequest = nullptr;
+    pendingBootloaderProbeRequestDisconnected = false;
 
     SerialPrintln("Bootloader probe: requesting Unit " + String(unitIndex) + " to enter bootloader...");
     requestUnitEnterBootloader(unitIndex);
@@ -1589,9 +1673,12 @@ void loop() {
       doc["note"] = "Nothing was written. The unit returns to its normal app on its own within about a second of being left idle.";
     }
 
-    String jsonString;
-    serializeJson(doc, jsonString);
-    deferredRequest->send(200, "application/json", jsonString);
+    //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near unitsAmount.
+    if (!pendingBootloaderProbeRequestDisconnected) {
+      String jsonString;
+      serializeJson(doc, jsonString);
+      deferredRequest->send(200, "application/json", jsonString);
+    }
   }
 #endif
 
