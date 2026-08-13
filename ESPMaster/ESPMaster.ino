@@ -1168,13 +1168,38 @@ void setup() {
 
           //HTTP POST Flap Speed Slider value
           if (p->name() == PARAM_FLAP_SPEED) {
-            newFlapSpeedValue = p->value().c_str();
+            //SECURITY/BUG FIX, 2026-08-13: the <input type="range" min="1" max="100"> bound in
+            //index.html is client-side only. convertSpeed() feeds this straight into map(), which
+            //extrapolates rather than clamps outside its input range - a handcrafted request with
+            //e.g. flapSpeed=-1000 produces a negative "speed", which then gets truncated to a
+            //uint8_t when written over I2C (Wire.write()) and wraps around to an arbitrary large
+            //byte value. The unit would call stepper.setSpeed() with that garbage RPM value - a
+            //real (if low-probability) safety concern for the physical motor. Validate server-side.
+            String rawFlapSpeed = p->value();
+            if (!isNumber(rawFlapSpeed) || rawFlapSpeed.toInt() < 1 || rawFlapSpeed.toInt() > 100) {
+              SerialPrintln("flapSpeed provided was invalid (must be a number 1-100): " + rawFlapSpeed);
+              submissionError = true;
+            } else {
+              newFlapSpeedValue = rawFlapSpeed.c_str();
+            }
           }
 
           //HTTP POST inputText value
           if (p->name() == PARAM_INPUT_TEXT) {
-            newInputTextValue = p->value().c_str();
-            hasNewInputTextValue = true;
+            //SECURITY/BUG FIX, 2026-08-13: the <input maxlength="75"> limit in index.html is
+            //client-side only - a request built by hand (or a malicious/broken client) can send
+            //an arbitrarily long value. Nothing downstream (processSentenceToLines(),
+            //centerString() and friends) has an unbounded failure mode anymore after this
+            //session's other fixes, but an unbounded String here is still needless heap
+            //pressure/slowness on a memory-constrained device for no legitimate benefit. Enforce
+            //server-side too, generously above the UI's own limit.
+            if (p->value().length() > 500) {
+              SerialPrintln("inputText provided was too long (" + String(p->value().length()) + " chars, max 500)");
+              submissionError = true;
+            } else {
+              newInputTextValue = p->value().c_str();
+              hasNewInputTextValue = true;
+            }
           }
 
           //HTTP POST Schedule Enabled
