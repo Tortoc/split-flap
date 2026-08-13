@@ -97,23 +97,13 @@ void showMessage(String message, int flapSpeed) {
 #else
   //Wait while display is still moving - ADD YIELD TO PREVENT HANGING
   SerialPrintln("Unit calls are enabled. Will display message");
-  unsigned long waitStart = millis();
-  unsigned long waitTimeout = 30000; // 30 second timeout to prevent infinite hang
-  //DIAGNOSTIC, 2026-08-13: poll interval widened from 500ms to 1000ms (30 -> ~30 I2C reads
-  //over the same timeout, half as many as before). Wire.requestFrom() has a rare but real
-  //chance of hanging outright on this hardware with no way for us to
-  //time it out from the caller side - every extra read here is extra exposure to that for
-  //no benefit, since the unit can't plausibly finish a rotation and report it faster than
-  //once a second anyway.
-  while (isDisplayMoving() && (millis() - waitStart < waitTimeout)) {
-    SerialPrintln("Waiting for display to stop");
-    yield(); // CRITICAL: Allow web server to process requests
-    delay(1000);
-  }
-  
-  if (millis() - waitStart >= waitTimeout) {
-    SerialPrintln("WARNING: Display wait timeout - continuing anyway");
-  }
+  //DIAGNOSTIC, 2026-08-13: was a fixed 30s timeout regardless of what the unit was actually
+  //doing - too short for a legitimate worst-case calibration search + rotation (can add up to
+  //20-30s+ by itself), which made the code give up and send the *next* letter while the unit
+  //was still finishing the current one. Now waits as long as the unit keeps reporting genuine
+  //progress (see waitForAllUnitsReady()), up to a generous 90s hard cap, and only gives up
+  //early if there's truly been no progress for 15s.
+  waitForAllUnitsReady(90000, 15000);
 
   for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
     char currentLetter = message[unitIndex];
@@ -136,20 +126,8 @@ void showMessage(String message, int flapSpeed) {
   }
 
   //Wait for the display to stop moving before exit - ADD YIELD TO PREVENT HANGING
-  waitStart = millis();
-  waitTimeout = 30000; // 30 second timeout
-  //DIAGNOSTIC, 2026-08-13: was delay(100) - up to 300 I2C reads over the full timeout, by
-  //far the single biggest source of exposure to the rare Wire.requestFrom() hang (see the
-  //comment on the wait loop above). Widened to 1000ms, same reasoning.
-  while (isDisplayMoving() && (millis() - waitStart < waitTimeout)) {
-    SerialPrintln("Waiting for display to stop now message is display");
-    yield(); // CRITICAL: Allow web server to process requests
-    delay(1000);
-  }
-  
-  if (millis() - waitStart >= waitTimeout) {
-    SerialPrintln("WARNING: Display wait timeout - continuing anyway");
-  }
+  //DIAGNOSTIC, 2026-08-13: same progress-aware wait as above, same reasoning.
+  waitForAllUnitsReady(90000, 15000);
 #endif
 }
 
@@ -199,9 +177,17 @@ void writeOffsetToUnit(int address, uint16_t offset) {
   Wire.endTransmission();
 }
 
-//Reads status and calibration offset from a single unit in one I2C transaction.
-//Returns true if the unit responded, false otherwise (statusOut/offsetOut are left unchanged on failure).
+//Convenience overload for callers that only care about status/offset, not phase/progress.
 bool readUnitInfo(int address, int &statusOut, int &offsetOut) {
+  int phaseOut, progressOut;
+  return readUnitInfo(address, statusOut, offsetOut, phaseOut, progressOut);
+}
+
+//Reads status, calibration offset, and (DIAGNOSTIC, 2026-08-13) phase/progress from a single
+//unit in one I2C transaction. phaseOut/progressOut let a caller tell "still legitimately busy,
+//making progress" from "actually stuck" - see the comment on currentPhase in Unit.ino.
+//Returns true if the unit responded, false otherwise (out-params are left unchanged on failure).
+bool readUnitInfo(int address, int &statusOut, int &offsetOut, int &phaseOut, int &progressOut) {
   Wire.requestFrom(address, ANSWER_SIZE, 1);
 
   if (Wire.available() < ANSWER_SIZE) {
@@ -215,8 +201,71 @@ bool readUnitInfo(int address, int &statusOut, int &offsetOut) {
   int offsetLow = Wire.read();
   int offsetHigh = Wire.read();
   offsetOut = offsetLow + (offsetHigh << 8);
+  phaseOut = Wire.read();
+  int progressLow = Wire.read();
+  int progressHigh = Wire.read();
+  progressOut = progressLow + (progressHigh << 8);
 
   return true;
+}
+
+//DIAGNOSTIC, 2026-08-13: waits for one unit to report "not moving", but instead of betting on
+//a single guessed timeout, extends the wait as long as we see genuine progress (phase/step
+//count actually changing between polls - see currentPhase/currentPhaseProgress in Unit.ino).
+//Only gives up if there's been no progress at all for stuckTimeoutMs (a real stuck/hung unit),
+//or the hard maxTotalWaitMs safety cap is hit regardless (never wait literally forever).
+//Replaces the old fixed-30s-timeout loops, which turned out to be too short for a legitimate
+//worst-case calibration search + rotation, causing the code to give up and send the *next*
+//letter command while the unit was still finishing the previous one.
+//Returns true if the unit reported idle, false if we gave up.
+bool waitForUnitReady(int unitIndex, unsigned long maxTotalWaitMs, unsigned long stuckTimeoutMs) {
+  unsigned long waitStart = millis();
+  unsigned long lastProgressSeenAt = waitStart;
+  int lastPhase = -1;
+  int lastProgress = -1;
+
+  while (millis() - waitStart < maxTotalWaitMs) {
+    int status, offset, phase, progress;
+    bool ok = readUnitInfo(unitIndex, status, offset, phase, progress);
+
+    if (ok && status != 1) {
+      //0 = ready, -1 = sleeping - either way, not actively moving, nothing to wait for
+      return true;
+    }
+
+    if (ok) {
+      SerialPrintln("Unit " + String(unitIndex) + " busy - phase " + String(phase) + ", progress " + String(progress) +
+        " (" + String((millis() - waitStart) / 1000) + "s waited)");
+
+      if (phase != lastPhase || progress != lastProgress) {
+        lastPhase = phase;
+        lastProgress = progress;
+        lastProgressSeenAt = millis();
+      } else if (millis() - lastProgressSeenAt > stuckTimeoutMs) {
+        SerialPrintln("WARNING: Unit " + String(unitIndex) + " - no progress for " + String(stuckTimeoutMs / 1000) + "s, giving up");
+        return false;
+      }
+    } else {
+      SerialPrintln("Unit " + String(unitIndex) + " - read failed while waiting, retrying");
+    }
+
+    yield(); // CRITICAL: Allow web server to process requests
+    delay(1000);
+  }
+
+  SerialPrintln("WARNING: Unit " + String(unitIndex) + " - hit max wait time (" + String(maxTotalWaitMs / 1000) + "s), giving up");
+  return false;
+}
+
+//Same as waitForUnitReady(), but for every currently-known unit in sequence.
+bool waitForAllUnitsReady(unsigned long maxTotalWaitMs, unsigned long stuckTimeoutMs) {
+  bool allReady = true;
+  for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
+    if (!waitForUnitReady(unitIndex, maxTotalWaitMs, stuckTimeoutMs)) {
+      allReady = false;
+    }
+  }
+  return allReady;
 }
 
 //Checks if unit in display is currently moving

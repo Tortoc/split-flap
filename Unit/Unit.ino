@@ -56,6 +56,16 @@ bool lastInd3 = false; //store last status of phase
 bool lastInd4 = false; //store last status of phase
 float missedSteps = 0; //cummulate steps <1, to compensate via additional step when reaching >1
 int currentlyrotating = 0; // 1 = drum is currently rotating, 0 = drum is standing still
+
+//DIAGNOSTIC, 2026-08-13: extra I2C status byte so ESPMaster can see *what kind* of busy the
+//unit is, not just a plain busy/idle bit - added to investigate whether "busy" waits that
+//exceed showMessage()'s timeout are legitimate (e.g. a full-rotation calibration search, which
+//can legitimately take a while) rather than a stuck/hung unit. See requestEvent().
+#define PHASE_IDLE        0
+#define PHASE_CALIBRATING 1
+#define PHASE_ROTATING    2
+uint8_t currentPhase = PHASE_IDLE;
+uint16_t currentPhaseProgress = 0; //steps done so far in the current phase - lets a watcher tell "still making progress" from "stuck"
 int stepperSpeed = 10; //current speed of stepper, value only for first homing
 int eeAddress = 0;   //EEPROM address for calibration offset
 uint16_t calOffset;       //Offset for calibration in steps, stored in EEPROM, gets read in setup
@@ -250,6 +260,7 @@ void rotateToLetter(int toLetter) {
         stepper.setSpeed(stepperSpeed);
         //doing the rotation letterwise
         for (int i = 0; i < diffPosition; i++) {
+          currentPhaseProgress = (uint16_t)i; //DIAGNOSTIC, 2026-08-13
           float preciseStep = (float)STEPS / (float)AMOUNTFLAPS;
           int roundedStep = (int)preciseStep;
           missedSteps = missedSteps + ((float)preciseStep - (float)roundedStep);
@@ -267,8 +278,10 @@ void rotateToLetter(int toLetter) {
 #endif
         calibrate(false); //calibrate revolver and do not stop motor
         //startMotor();
+        currentPhase = PHASE_ROTATING; //DIAGNOSTIC, 2026-08-13 - calibrate() left it at PHASE_CALIBRATING, we're rotating to the target letter now
         stepper.setSpeed(stepperSpeed);
         for (int i = 0; i < posLetter; i++) {
+          currentPhaseProgress = (uint16_t)i; //DIAGNOSTIC, 2026-08-13
           float preciseStep = (float)STEPS / (float)AMOUNTFLAPS;
           int roundedStep = (int)preciseStep;
           missedSteps = missedSteps + (float)preciseStep - (float)roundedStep;
@@ -335,6 +348,10 @@ void requestEvent() {
   Wire.write(currentlyrotating);
   Wire.write(lowByte(calOffset));
   Wire.write(highByte(calOffset));
+  //DIAGNOSTIC, 2026-08-13: see the comment on currentPhase near currentlyrotating
+  Wire.write(currentPhase);
+  Wire.write(lowByte(currentPhaseProgress));
+  Wire.write(highByte(currentPhaseProgress));
   /*
     #ifdef SERIAL_ENABLE
     Serial.print("Status ");
@@ -370,10 +387,12 @@ int calibrate(bool initialCalibration) {
   Serial.println(F("calibrate revolver"));
 #endif
   currentlyrotating = 1; //set active state to active
+  currentPhase = PHASE_CALIBRATING; //DIAGNOSTIC, 2026-08-13 - see the comment near currentPhase's declaration
   bool reachedMarker = false;
   stepper.setSpeed(stepperSpeed);
   int i = 0;
   while (!reachedMarker) {
+    currentPhaseProgress = (uint16_t)i;
     int currentHallValue = digitalRead(HALLPIN);
     if (currentHallValue == 1 && i == 0) { //already in zero position move out a bit and do the calibration {
       //not reached yet
@@ -430,10 +449,13 @@ void stopMotor() {
   Serial.println(F("Motor Stop"));
 #endif
   currentlyrotating = 0; //set active state to not active
+  currentPhase = PHASE_IDLE; //DIAGNOSTIC, 2026-08-13 - see the comment near currentPhase's declaration
+  currentPhaseProgress = 0;
   delay(100);
 }
 
 void startMotor() {
+  currentPhase = PHASE_ROTATING; //DIAGNOSTIC, 2026-08-13 - see the comment near currentPhase's declaration
 #ifdef SERIAL_ENABLE
   Serial.println(F("Motor Start"));
 #endif

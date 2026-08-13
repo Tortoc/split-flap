@@ -144,7 +144,11 @@
   These are important to maintain normal system behaviour. Only change if you know 
   what your doing.
 */
-#define ANSWER_SIZE         3       //Size of unit's request answer (status byte + 2 offset bytes)
+//DIAGNOSTIC, 2026-08-13: was 3 (status byte + 2 offset bytes). Unit.ino's requestEvent() now
+//also sends a phase byte + 2 progress bytes (see currentPhase there) so we can tell "still
+//legitimately busy, making progress" from "actually stuck" - must match Unit.ino exactly, a
+//unit still running the old 3-byte firmware will fail every read until it's reflashed too.
+#define ANSWER_SIZE         6
 #define FLAP_AMOUNT         45      //Amount of Flaps in each unit
 #define MIN_SPEED           1       //Min Speed
 #define MAX_SPEED           12      //Max Speed
@@ -1396,12 +1400,18 @@ void loop() {
     for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
       int status = -2;
       int offset = -1;
-      bool online = readUnitInfo(unitIndex, status, offset);
+      int phase = -1;
+      int progress = -1;
+      bool online = readUnitInfo(unitIndex, status, offset, phase, progress);
 
       doc["units"][unitIndex]["index"] = unitIndex;
       doc["units"][unitIndex]["online"] = online;
       doc["units"][unitIndex]["status"] = status;
       doc["units"][unitIndex]["offset"] = offset;
+      //DIAGNOSTIC, 2026-08-13: phase (0=idle, 1=calibrating, 2=rotating) + progress (steps done
+      //in the current phase) - see currentPhase in Unit.ino.
+      doc["units"][unitIndex]["phase"] = phase;
+      doc["units"][unitIndex]["progress"] = progress;
 
       yield();
     }
@@ -1552,9 +1562,24 @@ void loop() {
           WiFi.disconnect();
           delay(100);
           yield();
-          
-          // Reconnect with stored credentials
+
+          //BUG FIX, 2026-08-13: this used to unconditionally call
+          //`WiFi.begin(wifiDirectSsid, wifiDirectPassword)` here, regardless of WIFI_USE_DIRECT.
+          //Those two constants are only meant for the WIFI_USE_DIRECT==true code path in
+          //initWiFi() - in the (default, and this project's actual) WIFI_USE_DIRECT==false/
+          //WiFiManager setup, they're just leftover placeholder values for a different network
+          //entirely, so every reconnect attempt was guaranteed to fail. That silently turned
+          //any ordinary transient WiFi drop into a permanent one: 3 doomed attempts (up to ~30s
+          //blocked) followed by isWifiConfigured=false with nothing left to ever retry, until a
+          //manual power cycle - this was very likely responsible for a lot of what looked like
+          //ESP crashes/hangs this session. Use WiFi.begin() with no arguments instead, which
+          //reconnects with the ESP8266 SDK's own persisted last-used credentials (set correctly
+          //by WiFiManager's autoConnect() at boot) - works for both WiFi modes.
+#if WIFI_USE_DIRECT == true
           WiFi.begin(wifiDirectSsid, wifiDirectPassword);
+#else
+          WiFi.begin();
+#endif
           
           int reconnectTimeout = 10; // 10 second timeout for reconnection
           int reconnectCount = 0;
