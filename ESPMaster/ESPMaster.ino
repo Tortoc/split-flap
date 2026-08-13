@@ -1057,7 +1057,14 @@ void setup() {
     });
 #endif
     
-    webServer.on("/reboot", HTTP_GET, [](AsyncWebServerRequest * request) {
+    //SECURITY FIX, 2026-08-13: this and reset-units/ota/reset-wifi below used to be HTTP_GET,
+    //reachable via a plain <a href> link with only a client-side confirm() as a safety net.
+    //That's not real protection - any page loaded in the same browser (e.g. an <img> tag
+    //pointing here on a totally unrelated site) could trigger these state-changing actions
+    //without any user interaction at all (classic CSRF-via-GET). Switched to POST; index.html's
+    //links became small <form method="post"> submissions instead, which browsers still
+    //navigate on submit exactly like the old GET links did, so the response pages are unchanged.
+    webServer.on("/reboot", HTTP_POST, [](AsyncWebServerRequest * request) {
       SerialPrintln("Request to Reboot Received");
       
       //Create HTML page to explain the system is rebooting
@@ -1076,7 +1083,7 @@ void setup() {
       isPendingReboot = true;
     });
     
-    webServer.on("/reset-units", HTTP_GET, [](AsyncWebServerRequest * request) {
+    webServer.on("/reset-units", HTTP_POST, [](AsyncWebServerRequest * request) {
       SerialPrintln("Request to Reset Units Received");
       
       //This will be picked up in the loop
@@ -1274,7 +1281,7 @@ void setup() {
     });
 
 #if OTA_ENABLE == true
-    webServer.on("/ota", HTTP_GET, [](AsyncWebServerRequest * request) {
+    webServer.on("/ota", HTTP_POST, [](AsyncWebServerRequest * request) {
       SerialPrintln("Request to start OTA mode received");
       
       //Create HTML page to explain OTA
@@ -1285,9 +1292,13 @@ void setup() {
       html += "<p>OTA mode has been started. You can now update your module via WiFI. Open your Arduino IDE and select the new port in \"Tools\" menu and upload the your sketch as normal!<p>";
       html += "<p>Open your Arduino IDE and select the new port in \"Tools\" menu and upload the your sketch as normal!</p>";
       html += "<p>After you have carried out your update, the system will automatically be rebooted. You can go to the main home page after this time by clicking the button below or going to '/'.</p>";
-      html += "<p>You can take the system out of this mode by clicking the button to reboot below or going to '/reboot'.</p>";
-      html += "<p><a href=\"http://" + ip.toString() + "\")\">Home</a></p>";
-      html += "<p><a href=\"http://" + ip.toString() + "/reboot\")\">Reboot</a></p>";
+      html += "<p>You can take the system out of this mode by clicking the button to reboot below.</p>";
+      //BUG FIX, 2026-08-13: both links here used to end with a stray `\")\"` before the closing
+      //quote (e.g. href="http://<ip>")" ) - a malformed URL with a literal trailing `")`. Also,
+      ///reboot is POST-only now (see the comment on that handler) so a plain <a href> link to it
+      //would just get a 404 - using a tiny inline form instead, same pattern as index.html.
+      html += "<p><a href=\"http://" + ip.toString() + "\">Home</a></p>";
+      html += "<form action=\"/reboot\" method=\"post\" style=\"display:inline\"><button type=\"submit\">Reboot</button></form>";
       html += "</font>";
       html += "</div>";
 
@@ -1355,7 +1366,7 @@ void setup() {
 #endif
 
 #if WIFI_USE_DIRECT == false
-    webServer.on("/reset-wifi", HTTP_GET, [](AsyncWebServerRequest * request) {
+    webServer.on("/reset-wifi", HTTP_POST, [](AsyncWebServerRequest * request) {
       SerialPrintln("Request to Reset WiFi Received");
       
       IPAddress ip = WiFi.localIP();

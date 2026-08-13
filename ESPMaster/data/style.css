@@ -26,7 +26,8 @@ label {
 }
 
 input[type=submit],
-a {
+a,
+.action-link {
 	border: none;
 	color: #FEFCFB;
 	background-color: #F8880E;
@@ -39,22 +40,35 @@ a {
 	margin-right: 10px;
 	border-radius: 4px;
 	transition-duration: 0.4s;
+	font-family: inherit;
 }
 
-a {
+a,
+.action-link {
 	padding: 5px;
 	background-color: #F8880E;
 }
 
 input[type=submit]:hover,
-a:hover {
+a:hover,
+.action-link:hover {
 	background-color: #FFB96D;
 	cursor: pointer;
 }
 
 input[type=submit]:last-child,
-a:last-child {
+a:last-child,
+.action-form:last-child .action-link {
 	margin-right: 0;
+}
+
+/* SECURITY FIX, 2026-08-13: the Reboot/Reset Units/OTA/Reset WiFi actions moved from plain
+   <a href> GET links to <form method="post"><button> (see index.html) so they can no longer be
+   triggered cross-site with just a GET request. `display: contents` makes the wrapping <form>
+   invisible to layout, so .actions' flex row keeps behaving exactly like it did with bare <a>
+   children - only .action-link needs the button-as-link visual treatment above. */
+.actions form {
+	display: contents;
 }
 
 input[type=text],
@@ -265,7 +279,8 @@ input[type=datetime-local] {
 	padding: 0 10px 10px 10px;
 }
 
-.actions a {
+.actions a,
+.actions .action-link {
 	display: flex;
 	justify-content: center;
 	align-items: center;

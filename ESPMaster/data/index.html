@@ -159,21 +159,25 @@
 					<p class="card-title">Actions</p>
 
 					<div class="actions">
-						<a id="linkActionOtaUpdate" href="/ota" onclick="return confirm('Are you sure you want to put device in OTA mode?')">
-							OTA Update
-						</a>
-						<a id="linkActionReboot" href="/reboot" onclick="return confirm('Are you sure you want reboot device?')">
-							Reboot
-						</a>
-						<a id="linkActionUnitCalibration" href="/reset-units" onclick="return confirm('Are you sure you want to Reset Units?')">
-							Reset Unit Calibration
-						</a>
+						<!-- SECURITY FIX, 2026-08-13: these used to be plain GET <a href> links - any page
+						     loaded in the same browser could trigger them with no user interaction at all
+						     (CSRF via GET). Small POST forms instead; the browser still navigates on submit
+						     exactly like the old links did, so the resulting pages are unchanged. -->
+						<form action="/ota" method="post" class="action-form" onsubmit="return confirm('Are you sure you want to put device in OTA mode?')">
+							<button type="submit" id="linkActionOtaUpdate" class="action-link">OTA Update</button>
+						</form>
+						<form action="/reboot" method="post" class="action-form" onsubmit="return confirm('Are you sure you want reboot device?')">
+							<button type="submit" id="linkActionReboot" class="action-link">Reboot</button>
+						</form>
+						<form action="/reset-units" method="post" class="action-form" onsubmit="return confirm('Are you sure you want to Reset Units?')">
+							<button type="submit" id="linkActionUnitCalibration" class="action-link">Reset Unit Calibration</button>
+						</form>
 						<a id="linkActionAdmin" href="/admin.html">
 							Unit Calibration (Admin)
 						</a>
-						<a id="linkActionResetWifi" href="/reset-wifi" onclick="return confirm('Are you sure you want to Reset WiFi settings?')">
-							Reset WiFi
-						</a>
+						<form action="/reset-wifi" method="post" class="action-form" onsubmit="return confirm('Are you sure you want to Reset WiFi settings?')">
+							<button type="submit" id="linkActionResetWifi" class="action-link">Reset WiFi</button>
+						</form>
 					</div>
 				</div>
 			</div>
