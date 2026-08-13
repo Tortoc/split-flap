@@ -155,6 +155,7 @@
 #define UNIT_STEPS          2038    //Must match STEPS in Unit.ino - used to validate offset values sent from the Admin UI
 #define UNIT_BOOTLOADER_CMD 255     //Must match CMD_ENTER_BOOTLOADER in Unit.ino
 #define UNIT_BOOTLOADER_BASE_ADDRESS 0x29 //Start of the range scanned for a unit's twiboot bootloader (0x29-0x38).
+#define CRASH_LOG_PATH "/crash-log.jsonl" //See ServiceCrashLogFunctions.ino
                                           //Must match TWI_ADDRESS_BASE in Unit/bootloader/twiboot/main.c - that
                                           //bootloader reads the unit's own DIP switches and adds them to this base,
                                           //so it doesn't need to match any particular unitIndex - see BOOTLOADER_SETUP.md
@@ -196,6 +197,7 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <Wire.h>
+#include <user_interface.h> // struct rst_info, for the on-device crash reporter (ServiceCrashLogFunctions.ino)
 #include "Classes.h"
 #include "LittleFS.h"
 
@@ -563,6 +565,7 @@ void setup() {
     blinkLed(6, 200, 100); // 6 blinks = File system init
     initialiseFileSystem();
     loadValuesFromFileSystem();
+    checkAndPersistCrashLog(); // see ServiceCrashLogFunctions.ino - must run after LittleFS mounts
     
     // Load debug mode setting
 #if DEBUG_ENABLE == true
@@ -787,7 +790,27 @@ void setup() {
       
       request->send(200, "application/json", jsonString);
     });
-    
+
+    // On-device crash log (added 2026-08-13, see ServiceCrashLogFunctions.ino) - survives
+    // even if the live serial connection wasn't available/reliable at the moment of a
+    // crash. One JSON object per line (JSON Lines), oldest first, newest last.
+    webServer.on("/crash-log", HTTP_GET, [](AsyncWebServerRequest * request) {
+      if (!LittleFS.exists(CRASH_LOG_PATH)) {
+        request->send(200, "application/jsonl", "");
+        return;
+      }
+      request->send(LittleFS, CRASH_LOG_PATH, "application/jsonl");
+    });
+
+    // Clears the persisted crash log. POST (not GET) per this project's CSRF-hardening
+    // convention (see the 2026-08-13 BUGFIX_LOG entry on GET-triggered state changes).
+    webServer.on("/crash-log/clear", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (LittleFS.exists(CRASH_LOG_PATH)) {
+        LittleFS.remove(CRASH_LOG_PATH);
+      }
+      request->send(200, "text/plain", "Crash log cleared");
+    });
+
     // I2C bus scanner endpoint for diagnostics
     webServer.on("/i2c-scan", HTTP_GET, [](AsyncWebServerRequest * request) {
       SerialPrintln("DEBUG: I2C scan requested");

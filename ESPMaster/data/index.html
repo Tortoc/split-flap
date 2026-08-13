@@ -195,7 +195,8 @@
 
 			<div class="card-grid">
 				<div class="card card-full">
-					<p class="card-title">Serial Log (<span id="spanLogCount">0</span> messages) 
+					<p class="card-title">Serial Log (<span id="spanLogCount">0</span> messages)
+						<a href="/crash-log" target="_blank" style="float: right; padding: 5px 10px; font-size: 0.9em; margin-right: 5px;" title="Crash details captured on-device just before the last automatic reset - survives even if serial wasn't connected/reliable at the time">Crash Log</a>
 						<button id="btnToggleSerialLog" onclick="toggleSerialLog()" style="float: right; padding: 5px 10px; font-size: 0.9em; margin-right: 5px;">Hide</button>
 						<button onclick="copySerialLog()" style="float: right; padding: 5px 10px; font-size: 0.9em; margin-right: 5px;">Copy Full Log</button>
 						<button onclick="refreshLog()" style="float: right; padding: 5px 10px; font-size: 0.9em; margin-right: 5px;">Refresh</button>
