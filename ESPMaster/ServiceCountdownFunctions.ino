@@ -16,9 +16,13 @@ void checkCountdown() {
     days = days > 0 ? days : 0;
     
     String daysText = String(days) + (days == 1 ? " day" : " days");
-    if (daysText.length() > unitsAmount) {
+    if ((int)daysText.length() > unitsAmount) {
       SerialPrintln("Days Text was too long, cutting down to just the number...");
-      daysText = "" + days;
+      //BUG FIX, 2026-08-13: this used to be `daysText = "" + days;` - "" is a const char*, so
+      //`+ days` did pointer arithmetic on it (offsetting the pointer by `days` bytes) instead of
+      //string concatenation, then handed that garbage pointer to String's constructor. Undefined
+      //behavior - reads whatever memory the offset pointer happens to land on, readily a crash.
+      daysText = String(days);
     }
 
     if (inputText != daysText) {

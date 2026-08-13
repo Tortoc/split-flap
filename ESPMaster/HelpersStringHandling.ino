@@ -1,18 +1,32 @@
 //Aligns string on center of array and fills empty chars with spaces
 String centerString(String message) {
-  //Takes care of the left side
-  int leftSpaceAmount = (unitsAmount -  message.length()) / 2;
-  for (int spaceIndex = 0; spaceIndex < leftSpaceAmount; spaceIndex++) {
-    message = " " + message;
-  }
+  //BUG FIX, 2026-08-13: message.length() returns an unsigned int; `unitsAmount - message.length()`
+  //used to do that subtraction in unsigned arithmetic (the int operand gets promoted), so a
+  //message longer than unitsAmount wrapped around to a huge positive number instead of going
+  //negative. Divided by 2 for the padding loop below, that landed well within positive int
+  //range for very common length differences - the loop below would then try to run roughly a
+  //billion iterations, each concatenating onto the String (reallocating every time), which in
+  //practice means an out-of-memory crash/hang, not a clean failure. Reachable via completely
+  //normal use: the very first bytes of showText("OFFLINE") on WiFi disconnect force
+  //ALIGNMENT_MODE_CENTER, and "OFFLINE" (7 chars) is already longer than a lot of real-world
+  //unit counts. Casting to int first makes the subtraction happen in signed arithmetic, so a
+  //too-long message correctly produces a negative/zero pad amount instead of wrapping.
+  int padTotal = unitsAmount - (int)message.length();
+  if (padTotal > 0) {
+    //Takes care of the left side
+    int leftSpaceAmount = padTotal / 2;
+    for (int spaceIndex = 0; spaceIndex < leftSpaceAmount; spaceIndex++) {
+      message = " " + message;
+    }
 
-  //Take care of the right side
-  for(int spaceIndex = message.length(); spaceIndex < unitsAmount; spaceIndex++) {
-    message = message + " ";
+    //Take care of the right side
+    for (int spaceIndex = message.length(); spaceIndex < unitsAmount; spaceIndex++) {
+      message = message + " ";
+    }
   }
 
   message = cleanString(message);
-  
+
   return message;
 }
 
@@ -27,7 +41,10 @@ String createRepeatingString(char character) {
 
 //Aligns string on right side of array and fills empty chars with spaces
 String rightString(String message) {
-  int rightSpaceAmount = (unitsAmount - message.length());
+  //BUG FIX, 2026-08-13: same unsigned-underflow issue as centerString() above - cast to int
+  //first so a too-long message gives a (harmless, skips the loop) negative pad amount instead
+  //of an unsigned wraparound.
+  int rightSpaceAmount = unitsAmount - (int)message.length();
   for (int spaceIndex = 0; spaceIndex < rightSpaceAmount; spaceIndex++) {
     message = " " + message;
   }
@@ -39,7 +56,8 @@ String rightString(String message) {
 
 //Aligns string on left side of array and fills empty chars with spaces
 String leftString(String message) {
-  int leftSpaceAmount = (unitsAmount - message.length());
+  //BUG FIX, 2026-08-13: same unsigned-underflow issue as centerString() above.
+  int leftSpaceAmount = unitsAmount - (int)message.length();
   for (int spaceIndex = 0; spaceIndex < leftSpaceAmount; spaceIndex++) {
     message = message + " ";
   }

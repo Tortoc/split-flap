@@ -62,6 +62,7 @@ uint16_t calOffset;       //Offset for calibration in steps, stored in EEPROM, g
 int receivedNumber = 0;
 int i2cAddress;
 bool forceRecalibrate = false; //set when a new calibration offset is received via I2C, triggers an immediate recalibration in loop()
+bool pendingEepromWrite = false; //set when a new calibration offset arrives via I2C - see the comment on receiveLetter() for why the actual EEPROM.put() must happen in loop(), not there
 bool enterBootloaderRequested = false; //set when CMD_ENTER_BOOTLOADER is received via I2C, triggers a watchdog reset in loop()
 
 //sleep globals
@@ -133,6 +134,13 @@ void loop() {
     stopMotor();
     wdt_enable(WDTO_15MS);
     while (1) {} //wait for the watchdog to fire
+  }
+
+  //if a new calibration offset arrived via I2C, write it to EEPROM here (not in receiveLetter()/
+  //the ISR - see the comment there) before recalibrating.
+  if (pendingEepromWrite) {
+    pendingEepromWrite = false;
+    writeToEEPROM(calOffset);
   }
 
   //if a new calibration offset arrived via I2C, recalibrate immediately so the change is visible right away
@@ -307,7 +315,16 @@ void receiveLetter(int numBytes) {
     newCalOffset = receiveArray[2] + (receiveArray[3] << 8);
     if (newCalOffset != calOffset) {
       calOffset = newCalOffset;
-      writeToEEPROM(calOffset);
+      //DIAGNOSTIC FIX, 2026-08-13: this used to call writeToEEPROM(calOffset) directly, right
+      //here. receiveLetter() is Wire's onReceive callback, which on AVR runs *inside the TWI
+      //interrupt handler itself* - global interrupts are disabled for its entire duration.
+      //EEPROM.put() is a blocking, multi-millisecond-per-changed-byte operation (busy-waits on
+      //the EEPROM hardware). Running that inside an ISR blocks all other interrupts (including
+      //further I2C activity, and the millis()/micros() timer tick) for that whole time - a
+      //plausible contributor to this project's rare, hard-to-pin-down I2C read hangs,
+      //especially right after an offset write. Deferred to loop() instead, same pattern as
+      //forceRecalibrate below.
+      pendingEepromWrite = true;
       forceRecalibrate = true; //apply the new offset right away instead of waiting for the next full rotation
     }
   }
