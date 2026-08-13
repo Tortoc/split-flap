@@ -1,5 +1,5 @@
 // Function to add message to serial log buffer (declared in ESPMaster.ino)
-extern void addToSerialLog(String message);
+extern void addToSerialLog(const String &message);
 extern String currentSerialLine;
 
 //Offers option to call these methods to do serial output and not have to do 

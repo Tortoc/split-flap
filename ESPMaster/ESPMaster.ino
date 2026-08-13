@@ -352,10 +352,20 @@ bool firmwareUpdateAuthFailed = false;
 // LED Debugging variables
 String debugStatus = "";
 
-// Serial log buffer for web interface (circular buffer, stores last 100 messages)
+// Serial log buffer for web interface (circular buffer, stores last 100 messages).
+// DIAGNOSTIC FIX, 2026-08-13: message used to be a String. addToSerialLog() runs on
+// *every single* SerialPrint()/SerialPrintln() call (regardless of SERIAL_ENABLE - see
+// HelpersSerialHandling.ino), cycling through 100 slots with wildly varying message
+// lengths - a textbook heap-fragmentation pattern on the ESP8266's small heap, and the
+// leading remaining suspect for this session's "crashes eventually, at a seemingly
+// random point" bug (after the /log stack-overflow fix in 1483f66 measurably improved
+// but didn't fully eliminate it). Switched to a fixed-size char buffer: no allocation,
+// no fragmentation, at the cost of a flat ~15KB of static RAM (100 * 150 bytes) instead
+// of scattered heap churn. Longer messages are truncated, not an error for a debug log.
 #define SERIAL_LOG_SIZE 100
+#define SERIAL_LOG_MESSAGE_MAX 150
 struct SerialLogEntry {
-  String message;
+  char message[SERIAL_LOG_MESSAGE_MAX];
   unsigned long timestamp;
 };
 SerialLogEntry serialLog[SERIAL_LOG_SIZE];
@@ -364,16 +374,17 @@ int serialLogCount = 0;
 String currentSerialLine = ""; // Buffer for building complete lines
 
 // Function to add message to serial log buffer
-void addToSerialLog(String message) {
+void addToSerialLog(const String &message) {
   if (message.length() == 0) return; // Don't log empty messages
-  
+
   // Add timestamp
   unsigned long timestamp = millis();
-  
-  // Store in circular buffer
-  serialLog[serialLogIndex].message = message;
+
+  // Store in circular buffer (fixed-size copy, see the comment on SerialLogEntry above)
+  strncpy(serialLog[serialLogIndex].message, message.c_str(), SERIAL_LOG_MESSAGE_MAX - 1);
+  serialLog[serialLogIndex].message[SERIAL_LOG_MESSAGE_MAX - 1] = '\0';
   serialLog[serialLogIndex].timestamp = timestamp;
-  
+
   // Update indices
   serialLogIndex = (serialLogIndex + 1) % SERIAL_LOG_SIZE;
   if (serialLogCount < SERIAL_LOG_SIZE) {
@@ -730,14 +741,9 @@ void setup() {
       
       for (int i = 0; i < maxEntries; i++) {
         int idx = (actualStart + i) % SERIAL_LOG_SIZE;
-        String msg = serialLog[idx].message;
-        
-        // Truncate very long messages to prevent JSON issues (max 500 chars)
-        if (msg.length() > 500) {
-          msg = msg.substring(0, 497) + "...";
-        }
-        
-        document["logs"][i]["message"] = msg;
+        // serialLog[idx].message is already a bounded, null-terminated char buffer
+        // (SERIAL_LOG_MESSAGE_MAX) - no further truncation/String copy needed here.
+        document["logs"][i]["message"] = serialLog[idx].message;
         document["logs"][i]["timestamp"] = serialLog[idx].timestamp;
       }
       
