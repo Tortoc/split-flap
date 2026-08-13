@@ -1078,7 +1078,14 @@ void setup() {
 
       bool submissionError = false;
       
-      bool newMessageScheduleEnabledValue, newMessageScheduleShowIndefinitely = false;
+      //DIAGNOSTIC FIX, 2026-08-13: this used to be
+      //`bool newMessageScheduleEnabledValue, newMessageScheduleShowIndefinitely = false;` -
+      //in C++ that only initializes the *second* variable; newMessageScheduleEnabledValue was
+      //left as uninitialized stack garbage, so `if (newMessageScheduleEnabledValue)` further
+      //down could unpredictably take the "it's a scheduled message" branch on a plain text
+      //update, depending on whatever was previously on this handler's stack frame.
+      bool newMessageScheduleEnabledValue = false;
+      bool newMessageScheduleShowIndefinitely = false;
       long newMessageScheduleDateTimeUnixValue = -1;
       String newAlignmentValue, newDeviceModeValue, newFlapSpeedValue, newInputTextValue, newCountdownToDateUnixValue = "";
       bool hasNewInputTextValue = false;

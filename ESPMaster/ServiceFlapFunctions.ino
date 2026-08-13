@@ -99,10 +99,16 @@ void showMessage(String message, int flapSpeed) {
   SerialPrintln("Unit calls are enabled. Will display message");
   unsigned long waitStart = millis();
   unsigned long waitTimeout = 30000; // 30 second timeout to prevent infinite hang
+  //DIAGNOSTIC, 2026-08-13: poll interval widened from 500ms to 1000ms (30 -> ~30 I2C reads
+  //over the same timeout, half as many as before). Wire.requestFrom() has a rare but real
+  //chance of hanging outright on this hardware with no way for us to
+  //time it out from the caller side - every extra read here is extra exposure to that for
+  //no benefit, since the unit can't plausibly finish a rotation and report it faster than
+  //once a second anyway.
   while (isDisplayMoving() && (millis() - waitStart < waitTimeout)) {
     SerialPrintln("Waiting for display to stop");
     yield(); // CRITICAL: Allow web server to process requests
-    delay(500);
+    delay(1000);
   }
   
   if (millis() - waitStart >= waitTimeout) {
@@ -132,10 +138,13 @@ void showMessage(String message, int flapSpeed) {
   //Wait for the display to stop moving before exit - ADD YIELD TO PREVENT HANGING
   waitStart = millis();
   waitTimeout = 30000; // 30 second timeout
+  //DIAGNOSTIC, 2026-08-13: was delay(100) - up to 300 I2C reads over the full timeout, by
+  //far the single biggest source of exposure to the rare Wire.requestFrom() hang (see the
+  //comment on the wait loop above). Widened to 1000ms, same reasoning.
   while (isDisplayMoving() && (millis() - waitStart < waitTimeout)) {
     SerialPrintln("Waiting for display to stop now message is display");
     yield(); // CRITICAL: Allow web server to process requests
-    delay(100);
+    delay(1000);
   }
   
   if (millis() - waitStart >= waitTimeout) {
