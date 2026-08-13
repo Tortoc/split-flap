@@ -239,7 +239,16 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   for (int page = 1; page < pageCount && allOk; page++) {
     uint16_t flashAddress = page * pageSize;
 
-    firmwareFile.seek(flashAddress);
+    //BUG FIX, 2026-08-13: seek()'s return value used to be ignored. If it ever failed (unlikely
+    //on LittleFS for an in-bounds position, but not impossible), read() would silently continue
+    //from wherever the file cursor already was instead of `flashAddress` - writing the wrong
+    //bytes to this flash page while still reporting a clean verify (the verify-read would just
+    //match the same wrong data). Bail out cleanly instead of writing bad data.
+    if (!firmwareFile.seek(flashAddress)) {
+      allOk = false;
+      failureReason = "Failed to seek to offset " + String(flashAddress) + " in the stored firmware file (page " + String(page) + ")";
+      break;
+    }
     size_t bytesRead = firmwareFile.read(writeBuffer, pageSize);
     for (size_t i = bytesRead; i < pageSize; i++) {
       writeBuffer[i] = 0xFF; //pad the final, partial page with the erased-flash value
@@ -263,8 +272,11 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   }
 
   //Only now write page 0 (the vector table) - this is the point of no return for the old firmware
+  if (allOk && !firmwareFile.seek(0)) {
+    allOk = false;
+    failureReason = "Failed to seek to offset 0 in the stored firmware file (page 0)";
+  }
   if (allOk) {
-    firmwareFile.seek(0);
     size_t bytesRead = firmwareFile.read(writeBuffer, pageSize);
     for (size_t i = bytesRead; i < pageSize; i++) {
       writeBuffer[i] = 0xFF;

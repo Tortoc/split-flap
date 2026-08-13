@@ -241,12 +241,19 @@ bool waitForUnitReady(int unitIndex, unsigned long maxTotalWaitMs, unsigned long
         lastPhase = phase;
         lastProgress = progress;
         lastProgressSeenAt = millis();
-      } else if (millis() - lastProgressSeenAt > stuckTimeoutMs) {
-        SerialPrintln("WARNING: Unit " + String(unitIndex) + " - no progress for " + String(stuckTimeoutMs / 1000) + "s, giving up");
-        return false;
       }
+      //BUG FIX, 2026-08-13: the stuck-timeout check used to live inside this `if (ok)` branch,
+      //so it only ever fired when reads were succeeding but showing static phase/progress. A
+      //unit whose reads keep failing outright (not hanging, just erroring - a real, previously
+      //observed failure mode) never hit this check at all, and would only be caught by the much
+      //slower maxTotalWaitMs cap. Moved out so read failures count the same as "no progress".
     } else {
       SerialPrintln("Unit " + String(unitIndex) + " - read failed while waiting, retrying");
+    }
+
+    if (millis() - lastProgressSeenAt > stuckTimeoutMs) {
+      SerialPrintln("WARNING: Unit " + String(unitIndex) + " - no progress for " + String(stuckTimeoutMs / 1000) + "s, giving up");
+      return false;
     }
 
     yield(); // CRITICAL: Allow web server to process requests
