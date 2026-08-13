@@ -710,8 +710,15 @@ void setup() {
     });
     
     webServer.on("/log", HTTP_GET, [](AsyncWebServerRequest * request) {
-      // Use larger JSON document to handle many log entries (100 entries * ~200 bytes each = ~20KB)
-      StaticJsonDocument<25000> document;
+      // DIAGNOSTIC FIX, 2026-08-13: this used to be `StaticJsonDocument<25000> document;` -
+      // as a *local* variable, that puts a 25000-byte buffer on the stack of this very
+      // AsyncWebServer callback, which (see the pendingRescanRequest comment near unitsAmount)
+      // has much less stack headroom than loop() - a near-guaranteed stack overflow on every
+      // single /log call, unlike everywhere else in this file which already uses the
+      // heap-backed JsonDocument (ArduinoJson v7) exactly to avoid this. This endpoint was
+      // called very frequently while debugging tonight's other issues, and is the leading
+      // suspect for this session's "crashes eventually, at a seemingly random point" bug.
+      JsonDocument document;
       document["count"] = serialLogCount;
       
       int startIndex = serialLogCount < SERIAL_LOG_SIZE ? 0 : serialLogIndex;
