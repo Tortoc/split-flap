@@ -92,7 +92,13 @@ void setup() {
   pinMode(ADRESSSW4, INPUT_PULLUP);
 
   //hall sensor
-  pinMode(HALLPIN, INPUT);
+  //DIAGNOSTIC, 2026-08-13: was plain INPUT (no pull-up). If this sensor has an open-collector/
+  //open-drain output and the board doesn't provide its own pull-up, the pin could float and
+  //give noisy/unreliable readings - a very plausible explanation for calibrate() never
+  //reliably detecting the marker, leaving the motor energized (and warm) indefinitely instead
+  //of reaching stopMotor(). Testing with the internal pull-up enabled; revert if this doesn't
+  //help or makes homing worse (would suggest a push-pull sensor where this fights the signal).
+  pinMode(HALLPIN, INPUT_PULLUP);
 
   i2cAddress = getaddress(); //get I2C Address and save in variable
 
@@ -136,7 +142,16 @@ void loop() {
   }
 
   unsigned long currentMillis = millis();
-  if (currentMillis - previousMillis >= WAIT_TIME) {
+  //DIAGNOSTIC, 2026-08-13: sleep block disabled to test a suspected root cause of the
+  //long-standing intermittent I2C-read-hang bug (see
+  //ESPMaster.ino's async-handler fix commit history). Theory: SLEEP_MODE_PWR_DOWN stops
+  //nearly everything and relies on the TWI hardware's "address match" wake source to bring
+  //the chip back up in time to answer the ESP's request - if the ESP's read lands right as
+  //the unit is entering/deep in this sleep, the oscillator startup delay can make it miss or
+  //badly delay the ACK, which on the ESP8266 master side has been observed to hang
+  //Wire.requestFrom() indefinitely rather than time out. Re-enable (restore the block below)
+  //once this is confirmed/ruled out - it exists for power savings, not correctness.
+  if (false && currentMillis - previousMillis >= WAIT_TIME) {
     byte old_ADCSRA = ADCSRA;
     // disable ADC
     ADCSRA = 0;

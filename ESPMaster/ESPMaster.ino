@@ -25,7 +25,7 @@
   These define statements can be changed as you desire for changing the functionality and
   behaviour of your device.
 */
-#define SERIAL_ENABLE       false   //Option to enable serial debug messages
+#define SERIAL_ENABLE       true   //Option to enable serial debug messages
 #define UNIT_CALLS_DISABLE  false   //Option to disable the call to the units so can just debug the ESP with no connections
 #define OTA_ENABLE          false    //Option to enable OTA functionality via the Arduino IDE (same WiFi network + IDE required)
 #define WEB_FIRMWARE_UPDATE_ENABLE true //Option to enable browser-based firmware upload from the Admin page, no Arduino IDE required
