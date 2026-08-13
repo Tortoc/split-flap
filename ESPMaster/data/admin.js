@@ -416,6 +416,9 @@ function uploadUnitFirmware() {
 			if (this.status == 200) {
 				statusEl.innerText = "Firmware '" + file.name + "' hochgeladen und bereit zum Übertragen.";
 				statusEl.className = "status-online-ready";
+			} else if (this.status == 401) {
+				statusEl.innerText = "Upload abgelehnt: falsches OTA-Passwort (siehe Feld oben beim ESPMaster-Update).";
+				statusEl.className = "status-offline";
 			} else {
 				statusEl.innerText = "Upload fehlgeschlagen: " + (this.responseText || ("Status " + this.status));
 				statusEl.className = "status-offline";
@@ -430,6 +433,10 @@ function uploadUnitFirmware() {
 	};
 
 	xhr.open("POST", "/unit-firmware-upload", true);
+	//SECURITY FIX, 2026-08-13: this endpoint now requires the same OTA password as the
+	//ESPMaster firmware update above (see ESPMaster.ino) - reuses that same input field.
+	var passwordInput = document.getElementById("firmwarePassword");
+	xhr.setRequestHeader("X-OTA-Password", passwordInput ? passwordInput.value : "");
 	xhr.send(formData);
 }
 
@@ -461,6 +468,11 @@ function pushUnitFirmware() {
 		if (this.readyState == 4) {
 			button.disabled = false;
 
+			if (this.status == 401) {
+				resultEl.innerHTML = '<p class="status-offline">Abgelehnt: falsches OTA-Passwort (siehe Feld oben beim ESPMaster-Update).</p>';
+				return;
+			}
+
 			try {
 				var responseObject = JSON.parse(this.responseText);
 				renderUnitFirmwareResult(responseObject);
@@ -479,6 +491,9 @@ function pushUnitFirmware() {
 
 	xhr.open("POST", "/unit-firmware-push", true);
 	xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+	//SECURITY FIX, 2026-08-13: same OTA password as the upload above and the ESPMaster update.
+	var passwordInput = document.getElementById("firmwarePassword");
+	xhr.setRequestHeader("X-OTA-Password", passwordInput ? passwordInput.value : "");
 	xhr.send("id=" + encodeURIComponent(select.value));
 }
 

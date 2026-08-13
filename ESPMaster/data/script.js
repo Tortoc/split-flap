@@ -515,7 +515,11 @@ function showScheduledMessages(scheduledMessages) {
 		timeElement.innerText = new Date((scheduledMessage.scheduledDateTimeUnix * 1000) + (timezoneOffset * 60000)).toString().slice(0, -34);
 		
 		//Create a element to show the indefinite...ness...
-		var message = `<b>Message:</b> ${scheduledMessage.message.trim() == "" ? "<Blank>" : scheduledMessage.message}` 
+		//SECURITY FIX, 2026-08-13: scheduledMessage.message is user-supplied text (via the
+		//normal "schedule a message" form) and used to go straight into innerHTML unescaped -
+		//a message like "<img src=x onerror=alert(1)>" would execute in anyone's browser who
+		//later loaded this page. Escaped here now.
+		var message = `<b>Message:</b> ${scheduledMessage.message.trim() == "" ? "<Blank>" : escapeHtml(scheduledMessage.message)}`
 		var isIndefinitely = `<b>Shown Indefinitely:</b> ${scheduledMessage.showIndefinitely ? "Yes" : "No"}`;
 
 		//Create a element to show the text
@@ -529,7 +533,16 @@ function showScheduledMessages(scheduledMessages) {
 		actionElement.className = "action";
 		actionButtonElement.className = "remove-button";
 		actionButtonElement.innerText = "Remove";
-		actionButtonElement.setAttribute('onclick', `deleteScheduledMessage(${scheduledMessage.scheduledDateTimeUnix}, '${scheduledMessage.message}')`);
+		//SECURITY FIX, 2026-08-13: this used to build the handler as
+		//`onclick="deleteScheduledMessage(..., '${scheduledMessage.message}')"` - splicing
+		//unescaped user text directly into a JS string literal inside an HTML attribute. A
+		//message containing a single quote (e.g. "test'); alert('xss") would break out of the
+		//string and inject arbitrary JavaScript that runs for anyone viewing this page - a
+		//classic attribute-injection XSS. addEventListener with a closure sidesteps the whole
+		//class of bug: the message never passes through any string/HTML parsing at all.
+		actionButtonElement.addEventListener('click', (function (dateTimeUnix, messageText) {
+			return function () { deleteScheduledMessage(dateTimeUnix, messageText); };
+		})(scheduledMessage.scheduledDateTimeUnix, scheduledMessage.message));
 		actionElement.appendChild(actionButtonElement);
 
 		//Add all the elements to the message

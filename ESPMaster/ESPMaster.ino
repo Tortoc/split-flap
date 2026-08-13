@@ -352,6 +352,10 @@ bool isInOtaMode = false;
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
 bool firmwareUpdateAuthFailed = false;
 #endif
+//SECURITY FIX, 2026-08-13: same reasoning, for /unit-firmware-upload - see the comment there.
+#if UNIT_BOOTLOADER_ENABLE == true
+bool unitFirmwareUploadAuthFailed = false;
+#endif
 
 // LED Debugging variables
 String debugStatus = "";
@@ -839,19 +843,42 @@ void setup() {
 #if UNIT_BOOTLOADER_ENABLE == true
     // Admin: upload a compiled Unit.ino firmware image (raw AVR flash .bin, NOT the ESPMaster's own
     // .bin) to be pushed to a unit afterwards via /unit-firmware-push. See Unit/BOOTLOADER_SETUP.md.
+    //SECURITY FIX, 2026-08-13: this (and /unit-firmware-push below) had no access control at all,
+    //unlike /firmware-update (the ESPMaster's own OTA endpoint), which already requires
+    //X-OTA-Password when one is configured. Anyone on the LAN could push arbitrary code to run on
+    //the Unit's AVR - now gated the same way, reusing the same password/header for consistency.
     webServer.on("/unit-firmware-upload", HTTP_POST,
       [](AsyncWebServerRequest * request) {
+        if (unitFirmwareUploadAuthFailed) {
+          unitFirmwareUploadAuthFailed = false;
+          request->send(401, "text/plain", "Invalid password");
+          return;
+        }
         request->send(200, "text/plain", "OK - firmware stored, ready to push to a unit");
       },
       [](AsyncWebServerRequest * request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
         static File unitFirmwareFile;
 
         if (index == 0) {
+          unitFirmwareUploadAuthFailed = false;
+          if (String(otaPassword) != "") {
+            String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
+            if (providedPassword != String(otaPassword)) {
+              SerialPrintln("Unit firmware upload rejected: invalid password");
+              unitFirmwareUploadAuthFailed = true;
+              return;
+            }
+          }
+
           SerialPrintln("DEBUG: Unit firmware upload starting: " + filename);
           unitFirmwareFile = LittleFS.open(unitFirmwarePath, "w");
           if (!unitFirmwareFile) {
             SerialPrintln("Unit firmware upload: failed to open " + String(unitFirmwarePath) + " for writing");
           }
+        }
+
+        if (unitFirmwareUploadAuthFailed) {
+          return; //Password rejected, ignore the rest of the upload - final response already handled above
         }
 
         if (unitFirmwareFile) {
@@ -871,7 +898,17 @@ void setup() {
     // Deferred to loop() - see the comment on pendingRescanRequest near unitsAmount; this does
     // I2C reads (verify-after-write) just like the endpoints fixed there, so the same handler-
     // stack crash applies here too.
+    //SECURITY FIX, 2026-08-13: was unauthenticated - see the comment on /unit-firmware-upload.
     webServer.on("/unit-firmware-push", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (String(otaPassword) != "") {
+        String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
+        if (providedPassword != String(otaPassword)) {
+          SerialPrintln("Unit firmware push rejected: invalid password");
+          request->send(401, "text/plain", "Invalid password");
+          return;
+        }
+      }
+
       if (!request->hasParam(PARAM_ID, true)) {
         request->send(400, "text/plain", "'id' is required");
         return;
