@@ -831,6 +831,20 @@ void setup() {
       // which lets ArduinoJson serialize directly into small (~1460 byte) chunks as TCP send
       // buffer space becomes available - no large contiguous buffer ever needed for the JSON
       // body itself.
+      //
+      // BUG FIX, 2026-08-14 (follow-up, BUGFIX_LOG.md #44): the heap-budget fix (#43) made this
+      // crash far rarer, but not impossible - live-caught again, same site, after ~75 minutes of
+      // otherwise idle uptime (presumably a browser tab left open with the Serial Log panel
+      // auto-polling /log, occasionally landing on a moment when 1460 contiguous bytes genuinely
+      // weren't available, e.g. mid WiFi/TCP activity). ESP8266's operator new aborts outright on
+      // failure rather than returning null, so there's no way to catch this after the fact -
+      // check free heap defensively *before* attempting the allocation instead, and degrade to a
+      // clean error response rather than risking a crash.
+      if (ESP.getFreeHeap() < 4000) {
+        SerialPrintln("WARNING: /log skipped building response - free heap too low (" + String(ESP.getFreeHeap()) + " bytes)");
+        request->send(503, "text/plain", "Too little free heap right now to safely build the log response - try again shortly");
+        return;
+      }
       AsyncResponseStream *response = request->beginResponseStream("application/json");
       serializeJson(document, *response);
       request->send(response);
