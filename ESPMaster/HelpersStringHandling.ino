@@ -78,7 +78,21 @@ int convertSpeed(String flapSpeed) {
   int flapSpeedInt;
   flapSpeedInt = flapSpeed.toInt();
   flapSpeedInt = map(flapSpeedInt, 1, 100, MIN_SPEED, MAX_SPEED);
-  
+
+  //BUG FIX, 2026-08-14: map() extrapolates rather than clamps for inputs outside [1,100] -
+  //the "/" POST handler validates *new* submissions (see the 2026-08-13 flapSpeed fix in
+  //BUGFIX_LOG.md), but that doesn't retroactively clean up a bad value already sitting in
+  //LittleFS from before that validation existed, and this function has other callers besides
+  //that handler. A stored value in roughly [-17,-9] maps to exactly 0 here, which becomes
+  //stepperSpeed=0 on the Unit - Stepper::setSpeed(0) divides by zero, leaving step_delay
+  //effectively infinite, so Stepper::step() spins forever waiting for a delay that never
+  //elapses: the motor never physically moves, phase/progress freeze mid-value, I2C keeps
+  //responding fine (a separate interrupt-driven path), and the unit needs a full power cycle
+  //to recover - a real, live-observed failure mode this was traced back to. Clamp
+  //defensively here so this function can never hand back anything outside the intended range,
+  //regardless of what's stored or who calls it.
+  flapSpeedInt = constrain(flapSpeedInt, MIN_SPEED, MAX_SPEED);
+
   return flapSpeedInt;
 }
 

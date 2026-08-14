@@ -323,7 +323,12 @@ void receiveLetter(int numBytes) {
 
   //Write received bytes to correct variables
   receivedNumber = receiveArray[0];
-  stepperSpeed = receiveArray[1];
+  //BUG FIX, 2026-08-14: stepperSpeed=0 makes Stepper::setSpeed(0) divide by zero, leaving
+  //step_delay effectively infinite - Stepper::step() then spins forever waiting for a delay
+  //that never elapses, a real, live-observed hang with no recovery except a power cycle (see
+  //convertSpeed() in HelpersStringHandling.ino on the ESP side for the primary fix and full
+  //writeup). Defensive floor here too, independent of what the master actually sends.
+  stepperSpeed = receiveArray[1] > 0 ? receiveArray[1] : 1;
   if (numBytes >= 4) {
     newCalOffset = receiveArray[2] + (receiveArray[3] << 8);
     if (newCalOffset != calOffset) {
