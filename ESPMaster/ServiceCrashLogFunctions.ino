@@ -23,66 +23,38 @@
 
 // CRASH_LOG_PATH is defined in ESPMaster.ino (needed there too, and .ino files are
 // concatenated alphabetically - ESPMaster.ino comes first).
-#define CRASH_LOG_MAGIC 0xC5A5FEEDu
-#define CRASH_LOG_MAX_STACK_WORDS 32
-#define CRASH_LOG_MAX_ENTRIES 5
+//
+// custom_crash_callback() itself lives in ServiceCrashLogFunctions.cpp, not here - see the
+// long comment at the top of that file for why (Arduino's .ino auto-prototyping conflicts
+// with the extern "C" linkage the core requires for this specific weak-symbol override).
+#include "CrashLog.h"
 
-struct CrashDump {
-  uint32_t magic;
-  uint32_t reason;
-  uint32_t exccause;
-  uint32_t epc1;
-  uint32_t epc2;
-  uint32_t epc3;
-  uint32_t excvaddr;
-  uint32_t depc;
-  uint32_t stackWordCount;
-  uint32_t stackWords[CRASH_LOG_MAX_STACK_WORDS];
-};
-
-// Called by the ESP8266 core directly from its fatal-exception handler, just before the
-// automatic reset (weak symbol override, see file header). Must stay minimal: only RTC
-// memory access, no flash/heap/Serial - the system may not be in a safe state for those
-// here.
-void custom_crash_callback(struct rst_info *rstInfo, uint32_t stack, uint32_t stackEnd) {
-  CrashDump dump;
-  memset(&dump, 0, sizeof(dump));
-  dump.magic = CRASH_LOG_MAGIC;
-  dump.reason = rstInfo->reason;
-  dump.exccause = rstInfo->exccause;
-  dump.epc1 = rstInfo->epc1;
-  dump.epc2 = rstInfo->epc2;
-  dump.epc3 = rstInfo->epc3;
-  dump.excvaddr = rstInfo->excvaddr;
-  dump.depc = rstInfo->depc;
-
-  uint32_t count = 0;
-  for (uint32_t addr = stack; addr < stackEnd && count < CRASH_LOG_MAX_STACK_WORDS; addr += 4) {
-    dump.stackWords[count++] = *reinterpret_cast<uint32_t*>(addr);
-  }
-  dump.stackWordCount = count;
-
-  ESP.rtcUserMemoryWrite(0, reinterpret_cast<uint32_t*>(&dump), sizeof(dump));
-}
-
-// Human-readable struct rst_info.reason values (from the ESP8266 SDK's user_interface.h).
+// Human-readable struct rst_info.reason values. 0-6 are the ESP8266 SDK's own
+// user_interface.h values; 253/254 are core_esp8266_postmortem.cpp's own software-only
+// values (REASON_USER_STACK_SMASH / REASON_USER_SWEXCEPTION_RST) for abort()/panic()/
+// assert() - not a real SDK reset reason, but reported the same way via custom_crash_callback.
 const char* crashResetReasonText(uint32_t reason) {
   switch (reason) {
-    case 0: return "power-on";
-    case 1: return "hardware watchdog";
-    case 2: return "exception";
-    case 3: return "software watchdog";
-    case 4: return "software restart";
-    case 5: return "deep sleep wake";
-    case 6: return "external system reset";
-    default: return "unknown";
+    case 0:   return "power-on";
+    case 1:   return "hardware watchdog";
+    case 2:   return "exception";
+    case 3:   return "software watchdog";
+    case 4:   return "software restart";
+    case 5:   return "deep sleep wake";
+    case 6:   return "external system reset";
+    case 253: return "stack smashing detected";
+    case 254: return "user exception (panic/abort/assert)";
+    default:  return "unknown";
   }
 }
 
 // Only the handful of Xtensa exception causes most commonly seen in practice - falls back
 // to an empty string (caller still has the raw number) rather than enumerating all ~40
-// possible values.
-const char* crashExceptionCauseText(uint32_t exccause) {
+// possible values. Only meaningful when reason==2 (REASON_EXCEPTION_RST) - for every other
+// reason (including the abort()/panic() path, reason 254), rst_info.exccause is just left at
+// its memset-to-0 default by the core and doesn't actually mean "IllegalInstruction".
+const char* crashExceptionCauseText(uint32_t reason, uint32_t exccause) {
+  if (reason != 2) return "";
   switch (exccause) {
     case 0:  return "IllegalInstruction";
     case 6:  return "IntegerDivideByZero";
@@ -114,7 +86,7 @@ void checkAndPersistCrashLog() {
   entryDoc["reason"] = dump.reason;
   entryDoc["reasonText"] = crashResetReasonText(dump.reason);
   entryDoc["exccause"] = dump.exccause;
-  entryDoc["exccauseText"] = crashExceptionCauseText(dump.exccause);
+  entryDoc["exccauseText"] = crashExceptionCauseText(dump.reason, dump.exccause);
   entryDoc["epc1"] = dump.epc1;
   entryDoc["epc2"] = dump.epc2;
   entryDoc["epc3"] = dump.epc3;
