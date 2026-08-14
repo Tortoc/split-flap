@@ -1796,97 +1796,27 @@ void loop() {
   }
 #endif
 
-  // Monitor WiFi connection and attempt reconnection if lost.
+  // BUG FIX, 2026-08-14: removed loop()'s entire custom WiFi reconnect-monitoring block
+  // (an addition on top of the original upstream project, not present in the "stable" baseline
+  // the user started from - github.com/scientress/split-flap - verified directly by fetching
+  // its ESPMaster.ino/loop(): it contains *no* WiFi.status()/disconnect()/begin() calls at all,
+  // relying entirely on wifiManager.setWiFiAutoReconnect(true) set once in initWiFi() and the
+  // ESP8266 SDK's own background auto-reconnect from then on).
   //
-  // BUG FIX, 2026-08-14: this whole block used to be gated behind `if (isWifiConfigured)`, and
-  // after 3 failed reconnect attempts, isWifiConfigured was set false *permanently* - nothing
-  // anywhere else in loop() ever set it back true again, even if WiFi.status() later reported
-  // WL_CONNECTED on its own (the ESP8266 SDK's own background auto-reconnect, enabled via
-  // WiFiManager's setWiFiAutoReconnect(true)/WiFi.setAutoReconnect(true), keeps trying
-  // independently of this code). That permanently stuck the device in the `!isWifiConfigured`
-  // fallback path below (deviceMode forced to TEXT, "OFFLINE" shown) even after the network had
-  // genuinely recovered - live-observed today as unprompted, repeated multi-letter display
-  // activity (7-letter "OFFLINE" cycling letter-by-letter, exactly matching what looked like
-  // spontaneous unexplained motion) on any boot with even a slightly rocky WiFi startup, since
-  // isWifiConfigured starts false on every fresh boot until a connection succeeds. Removed the
-  // outer gate so this check always runs regardless of the current isWifiConfigured value, and
-  // stopped permanently giving up - a failed round just resets the counter and tries again next
-  // cycle, and isWifiConfigured is explicitly (re)synced to true any time the connection is
-  // actually up.
-  {
-    static unsigned long lastWiFiCheck = 0;
-    static int reconnectAttempts = 0;
-    const unsigned long wifiCheckInterval = 10000; // Check every 10 seconds
-
-    if (millis() - lastWiFiCheck > wifiCheckInterval) {
-      lastWiFiCheck = millis();
-
-      if (WiFi.status() != WL_CONNECTED) {
-        SerialPrintln("DEBUG: WiFi connection lost! Status: " + String(WiFi.status()));
-        reconnectAttempts++;
-
-        SerialPrintln("DEBUG: Attempting to reconnect (attempt " + String(reconnectAttempts) + ")...");
-        WiFi.disconnect();
-        delay(100);
-        yield();
-
-        //BUG FIX, 2026-08-14: live-verified today (per user request, researched online) that a
-        //plain disconnect()+begin() cycle often isn't enough to actually recover the radio once
-        //it's truly stuck - observed 49+ consecutive failed reconnect attempts (~8 minutes)
-        //that never resolved on their own, matching a documented ESP8266/lwIP2 pattern (see
-        //esp8266/Arduino issue #4101: "WiFi not reconnecting after connection lost in lwip 2").
-        //The confirmed community workaround is a force-sleep/force-wake cycle right before
-        //reconnecting - a more thorough reset of the radio hardware state than disconnect()
-        //alone provides. See BUGFIX_LOG.md #47 for the full research writeup.
-        WiFi.forceSleepBegin();
-        delay(100);
-        yield();
-        WiFi.forceSleepWake();
-        delay(100);
-        yield();
-
-        //BUG FIX, 2026-08-13: this used to unconditionally call
-        //`WiFi.begin(wifiDirectSsid, wifiDirectPassword)` here, regardless of WIFI_USE_DIRECT.
-        //Those two constants are only meant for the WIFI_USE_DIRECT==true code path in
-        //initWiFi() - in the (default, and this project's actual) WIFI_USE_DIRECT==false/
-        //WiFiManager setup, they're just leftover placeholder values for a different network
-        //entirely, so every reconnect attempt was guaranteed to fail. Use WiFi.begin() with no
-        //arguments instead, which reconnects with the ESP8266 SDK's own persisted last-used
-        //credentials (set correctly by WiFiManager's autoConnect() at boot) - works for both
-        //WiFi modes.
-#if WIFI_USE_DIRECT == true
-        WiFi.begin(wifiDirectSsid, wifiDirectPassword);
-#else
-        WiFi.begin();
-#endif
-
-        int reconnectTimeout = 10; // 10 second timeout for reconnection
-        int reconnectCount = 0;
-        while (WiFi.status() != WL_CONNECTED && reconnectCount < reconnectTimeout) {
-          delay(500);
-          yield();
-          delay(500);
-          yield();
-          reconnectCount++;
-        }
-
-        if (WiFi.status() == WL_CONNECTED) {
-          SerialPrintln("DEBUG: WiFi reconnected successfully! IP: " + WiFi.localIP().toString());
-          reconnectAttempts = 0;
-          isWifiConfigured = true;
-        } else {
-          SerialPrintln("DEBUG: Reconnection attempt " + String(reconnectAttempts) + " failed - will keep retrying every " + String(wifiCheckInterval / 1000) + "s");
-        }
-      } else {
-        // Connection is good - make sure our own tracking agrees (recovers from a previously
-        // stuck-false state too), and reset the counter.
-        isWifiConfigured = true;
-        if (reconnectAttempts > 0) {
-          reconnectAttempts = 0;
-        }
-      }
-    }
-  }
+  // Today's session spent a long time fixing bugs *within* that added block (wrong hardcoded
+  // credentials, permanently giving up after 3 failures, insufficient radio reset before
+  // retrying) and it kept resurfacing new failure modes each time (most recently: 90+
+  // consecutive failed reconnect attempts over 18+ minutes even with all those fixes applied).
+  // Stepping back per the user's direct suggestion: this custom block calls WiFi.disconnect()
+  // and WiFi.begin() *on top of* the SDK's own already-running background auto-reconnect - a
+  // very plausible mechanism for actively fighting/interrupting that background process rather
+  // than helping it, which would explain why patching the block's *details* never fully
+  // resolved the underlying instability. Removed entirely rather than patched further -
+  // isWifiConfigured is now purely a boot-time flag again (set once in initWiFi() on success,
+  // exactly as in the original), matching the simpler, previously-stable design. The
+  // WIFI_NONE_SLEEP fix (see ServiceWifiFunctions.ino) is kept - it's an independent radio
+  // power-mode setting, not something that can conflict with the SDK's own reconnect logic, and
+  // is a genuine improvement over both the original and this project's prior state.
 
   //Do nothing if WiFi is not configured
   if (!isWifiConfigured) {
