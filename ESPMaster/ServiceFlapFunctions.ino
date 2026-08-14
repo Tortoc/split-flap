@@ -194,6 +194,13 @@ bool readUnitInfo(int address, int &statusOut, int &offsetOut, int &phaseOut, in
     SerialPrint("ERROR: Unit ");
     SerialPrint(address);
     SerialPrintln(" - No/incomplete response reading status+offset");
+
+    // CREATIVE FIX, 2026-08-14: right at the point of failure, try an I2C bus recovery (see
+    // recoverI2CBus() in ServiceI2CRecoveryFunctions.ino) - cheap, and gives the *next* read
+    // attempt (by whichever caller retries) a real chance of succeeding instead of hitting the
+    // same stuck bus again. See BUGFIX_LOG.md #45 for the research behind this approach.
+    recoverI2CBus();
+
     return false;
   }
 
@@ -253,6 +260,7 @@ bool waitForUnitReady(int unitIndex, unsigned long maxTotalWaitMs, unsigned long
 
     if (millis() - lastProgressSeenAt > stuckTimeoutMs) {
       SerialPrintln("WARNING: Unit " + String(unitIndex) + " - no progress for " + String(stuckTimeoutMs / 1000) + "s, giving up");
+      forceUnitRecoveryReset(unitIndex);
       return false;
     }
 
@@ -261,6 +269,7 @@ bool waitForUnitReady(int unitIndex, unsigned long maxTotalWaitMs, unsigned long
   }
 
   SerialPrintln("WARNING: Unit " + String(unitIndex) + " - hit max wait time (" + String(maxTotalWaitMs / 1000) + "s), giving up");
+  forceUnitRecoveryReset(unitIndex);
   return false;
 }
 

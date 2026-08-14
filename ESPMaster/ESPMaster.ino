@@ -156,6 +156,16 @@
 #define UNIT_BOOTLOADER_CMD 255     //Must match CMD_ENTER_BOOTLOADER in Unit.ino
 #define UNIT_BOOTLOADER_BASE_ADDRESS 0x29 //Start of the range scanned for a unit's twiboot bootloader (0x29-0x38).
 #define CRASH_LOG_PATH "/crash-log.jsonl" //See ServiceCrashLogFunctions.ino
+
+//I2C pins, named so ServiceI2CRecoveryFunctions.ino's bus-recovery routine can reuse the exact
+//same pins Wire.begin() is called with below, instead of duplicating the FAE_MOD #ifdef there.
+#ifdef FAE_MOD
+#define I2C_SDA_PIN 4
+#define I2C_SCL_PIN 5
+#else
+#define I2C_SDA_PIN 1
+#define I2C_SCL_PIN 3
+#endif
                                           //Must match TWI_ADDRESS_BASE in Unit/bootloader/twiboot/main.c - that
                                           //bootloader reads the unit's own DIP switches and adds them to this base,
                                           //so it doesn't need to match any particular unitIndex - see BOOTLOADER_SETUP.md
@@ -489,15 +499,15 @@ void setup() {
   Serial.begin(SERIAL_BAUDRATE);
 #elif !defined(FAE_MOD)
   //For ESP01 only
-  Wire.begin(1, 3); 
-  
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+
   //De-activate I2C if debugging the ESP, otherwise serial does not work
   //Wire.begin(D1, D2); //For NodeMCU testing only SDA=D1 and SCL=D2
 #endif
 
 #ifdef FAE_MOD
   //Fae Mod
-  Wire.begin(4, 5);
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
 #endif
 
 #if UNIT_BOOTLOADER_ENABLE == true
