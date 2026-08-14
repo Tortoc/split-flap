@@ -1830,6 +1830,21 @@ void loop() {
         delay(100);
         yield();
 
+        //BUG FIX, 2026-08-14: live-verified today (per user request, researched online) that a
+        //plain disconnect()+begin() cycle often isn't enough to actually recover the radio once
+        //it's truly stuck - observed 49+ consecutive failed reconnect attempts (~8 minutes)
+        //that never resolved on their own, matching a documented ESP8266/lwIP2 pattern (see
+        //esp8266/Arduino issue #4101: "WiFi not reconnecting after connection lost in lwip 2").
+        //The confirmed community workaround is a force-sleep/force-wake cycle right before
+        //reconnecting - a more thorough reset of the radio hardware state than disconnect()
+        //alone provides. See BUGFIX_LOG.md #47 for the full research writeup.
+        WiFi.forceSleepBegin();
+        delay(100);
+        yield();
+        WiFi.forceSleepWake();
+        delay(100);
+        yield();
+
         //BUG FIX, 2026-08-13: this used to unconditionally call
         //`WiFi.begin(wifiDirectSsid, wifiDirectPassword)` here, regardless of WIFI_USE_DIRECT.
         //Those two constants are only meant for the WIFI_USE_DIRECT==true code path in

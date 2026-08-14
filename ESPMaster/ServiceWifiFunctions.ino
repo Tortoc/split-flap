@@ -4,6 +4,18 @@ void initWiFi() {
 
   WiFi.mode(WIFI_STA);
 
+  //BUG FIX, 2026-08-14: researched live (per user request) why WiFi kept disconnecting and
+  //then failing to reconnect even with the loop()-side fix that stops giving up permanently
+  //(see BUGFIX_LOG.md #46) - repeated "Reconnection attempt N failed" every ~10s for many
+  //minutes straight, never recovering on its own. This is a well-documented ESP8266 pattern:
+  //the default WiFi modem-sleep power-saving mode periodically sleeps the radio between beacon
+  //intervals, which some routers/environments turn into missed beacons ("bcn_timeout") and
+  //disconnects that the radio then recovers from poorly. WIFI_NONE_SLEEP is the standard,
+  //widely-confirmed preventive fix (see esp8266/Arduino issues #5998, #5083) - addresses *why*
+  //it disconnects in the first place, not just recovery after the fact. Set as early as
+  //possible, before any connection attempt.
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+
 #if WIFI_USE_DIRECT == false
   SerialPrintln("Setting up WiFi AP Setup Mode");
 
@@ -44,6 +56,10 @@ void initWiFi() {
     SerialPrintln(WiFi.localIP());
 
     isWifiConfigured = true;
+
+    //Re-assert this after autoConnect() - WiFiManager does its own WiFi.begin()/mode calls
+    //internally, so set it again here in case any of that reset it back to a sleep mode.
+    WiFi.setSleepMode(WIFI_NONE_SLEEP);
   }
   
 #else
@@ -145,6 +161,7 @@ void initWiFi() {
       // Double-check connection is still good
       if (WiFi.status() == WL_CONNECTED) {
         isWifiConfigured = true;
+        WiFi.setSleepMode(WIFI_NONE_SLEEP);
       } else {
         SerialPrintln("DEBUG: WARNING - Connection lost immediately after connect!");
         isWifiConfigured = false;
