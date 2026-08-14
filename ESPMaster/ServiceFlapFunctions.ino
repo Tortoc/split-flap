@@ -38,11 +38,6 @@ void showText(String message, int delayMillis) {
           unsigned long delayStart = millis();
           while (millis() - delayStart < 3000) {
             yield(); // Allow web server to process requests
-            //DIAGNOSTIC FIX, 2026-08-14: also service the lightweight deferred admin
-            //requests here - see the comment on processLightweightDeferredRequests() in
-            //ESPMaster.ino. This is a pure delay loop (no I2C transaction in flight), safe
-            //to interleave.
-            processLightweightDeferredRequests();
             delay(100);
           }
         }
@@ -61,8 +56,6 @@ void showText(String message, int delayMillis) {
       unsigned long delayStart = millis();
       while (millis() - delayStart < delayMillis) {
         yield(); // Allow web server to process requests
-        //DIAGNOSTIC FIX, 2026-08-14: see the comment on the identical addition above.
-        processLightweightDeferredRequests();
         delay(100);
       }
     }
@@ -264,10 +257,6 @@ bool waitForUnitReady(int unitIndex, unsigned long maxTotalWaitMs, unsigned long
     }
 
     yield(); // CRITICAL: Allow web server to process requests
-    //DIAGNOSTIC FIX, 2026-08-14: see the comment on processLightweightDeferredRequests() in
-    //ESPMaster.ino - this is right after readUnitInfo() completed for this iteration and
-    //before the next one starts, a safe point with no I2C transaction in flight.
-    processLightweightDeferredRequests();
     delay(1000);
   }
 

@@ -1530,25 +1530,11 @@ void setup() {
 /* ||_|_\\_,_|_||_|_||_|_|_||_\__, | |____\___\___| .__/| */
 /* |                          |___/               |_|   | */
 /* '----------------------------------------------------' */
-//DIAGNOSTIC FIX, 2026-08-14: the three *lightweight, read-only* deferred admin requests
-//(rescan, units-info, legacy i2c-scan) used to only be processed at the very top of loop().
-//That's a problem because showText() (called synchronously from loop(), see the call site
-//below) can legitimately run for several seconds to tens of seconds during a real
-//calibration search/full rotation - loop() doesn't return to its top level for that whole
-//time, so these deferred requests just sat unanswered until the display update finished,
-//making the web server look "hung" or "crashed" for perfectly healthy reasons. Likely
-//explains a chunk of this whole project's earlier "ESP crashed" reports - see BUGFIX_LOG.md's
-//Offene Punkte for 2026-08-14.
-//
-//Fix: pulled these three into their own function, called both from loop()'s top level (as
-//before) AND from the existing yield() checkpoints inside showText()'s inter-line/end delays
-//and waitForUnitReady()'s poll loop - all points already known to be I2C-transaction-safe
-//(no Wire.beginTransmission()/endTransmission() pair is ever left open across a yield() call
-//in this codebase). Deliberately NOT extended to the firmware-push/bootloader-probe blocks
-//below - those are rare, sensitive operations where letting them interleave with an
-//in-progress display update isn't worth the added risk for what's fundamentally a
-//responsiveness improvement, not a correctness fix.
-void processLightweightDeferredRequests() {
+void loop() {
+  //Handle any I2C admin requests deferred here by the web handlers (see the comment on
+  //pendingRescanRequest near unitsAmount for why this can't just run in the handler itself).
+  //Checked first, before anything else in loop(), so a pending request gets served as soon as
+  //possible.
   if (pendingRescanRequest != nullptr) {
     AsyncWebServerRequest* deferredRequest = pendingRescanRequest;
     pendingRescanRequest = nullptr;
@@ -1650,15 +1636,6 @@ void processLightweightDeferredRequests() {
       deferredRequest->send(200, "application/json", jsonString);
     }
   }
-}
-
-void loop() {
-  //Handle any I2C admin requests deferred here by the web handlers (see the comment on
-  //pendingRescanRequest near unitsAmount for why this can't just run in the handler itself).
-  //Checked first, before anything else in loop(), so a pending request gets served as soon as
-  //possible. Also called from inside showText()/waitForUnitReady()'s own wait loops - see the
-  //comment on processLightweightDeferredRequests() above.
-  processLightweightDeferredRequests();
 
 #if UNIT_BOOTLOADER_ENABLE == true
   if (pendingFirmwarePushRequest != nullptr) {
