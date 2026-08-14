@@ -1796,73 +1796,83 @@ void loop() {
   }
 #endif
 
-  // Monitor WiFi connection and attempt reconnection if lost
-  if (isWifiConfigured) {
+  // Monitor WiFi connection and attempt reconnection if lost.
+  //
+  // BUG FIX, 2026-08-14: this whole block used to be gated behind `if (isWifiConfigured)`, and
+  // after 3 failed reconnect attempts, isWifiConfigured was set false *permanently* - nothing
+  // anywhere else in loop() ever set it back true again, even if WiFi.status() later reported
+  // WL_CONNECTED on its own (the ESP8266 SDK's own background auto-reconnect, enabled via
+  // WiFiManager's setWiFiAutoReconnect(true)/WiFi.setAutoReconnect(true), keeps trying
+  // independently of this code). That permanently stuck the device in the `!isWifiConfigured`
+  // fallback path below (deviceMode forced to TEXT, "OFFLINE" shown) even after the network had
+  // genuinely recovered - live-observed today as unprompted, repeated multi-letter display
+  // activity (7-letter "OFFLINE" cycling letter-by-letter, exactly matching what looked like
+  // spontaneous unexplained motion) on any boot with even a slightly rocky WiFi startup, since
+  // isWifiConfigured starts false on every fresh boot until a connection succeeds. Removed the
+  // outer gate so this check always runs regardless of the current isWifiConfigured value, and
+  // stopped permanently giving up - a failed round just resets the counter and tries again next
+  // cycle, and isWifiConfigured is explicitly (re)synced to true any time the connection is
+  // actually up.
+  {
     static unsigned long lastWiFiCheck = 0;
     static int reconnectAttempts = 0;
     const unsigned long wifiCheckInterval = 10000; // Check every 10 seconds
-    
+
     if (millis() - lastWiFiCheck > wifiCheckInterval) {
       lastWiFiCheck = millis();
-      
+
       if (WiFi.status() != WL_CONNECTED) {
         SerialPrintln("DEBUG: WiFi connection lost! Status: " + String(WiFi.status()));
         reconnectAttempts++;
-        
-        if (reconnectAttempts <= 3) {
-          SerialPrintln("DEBUG: Attempting to reconnect (attempt " + String(reconnectAttempts) + "/3)...");
-          WiFi.disconnect();
-          delay(100);
-          yield();
 
-          //BUG FIX, 2026-08-13: this used to unconditionally call
-          //`WiFi.begin(wifiDirectSsid, wifiDirectPassword)` here, regardless of WIFI_USE_DIRECT.
-          //Those two constants are only meant for the WIFI_USE_DIRECT==true code path in
-          //initWiFi() - in the (default, and this project's actual) WIFI_USE_DIRECT==false/
-          //WiFiManager setup, they're just leftover placeholder values for a different network
-          //entirely, so every reconnect attempt was guaranteed to fail. That silently turned
-          //any ordinary transient WiFi drop into a permanent one: 3 doomed attempts (up to ~30s
-          //blocked) followed by isWifiConfigured=false with nothing left to ever retry, until a
-          //manual power cycle - this was very likely responsible for a lot of what looked like
-          //ESP crashes/hangs this session. Use WiFi.begin() with no arguments instead, which
-          //reconnects with the ESP8266 SDK's own persisted last-used credentials (set correctly
-          //by WiFiManager's autoConnect() at boot) - works for both WiFi modes.
+        SerialPrintln("DEBUG: Attempting to reconnect (attempt " + String(reconnectAttempts) + ")...");
+        WiFi.disconnect();
+        delay(100);
+        yield();
+
+        //BUG FIX, 2026-08-13: this used to unconditionally call
+        //`WiFi.begin(wifiDirectSsid, wifiDirectPassword)` here, regardless of WIFI_USE_DIRECT.
+        //Those two constants are only meant for the WIFI_USE_DIRECT==true code path in
+        //initWiFi() - in the (default, and this project's actual) WIFI_USE_DIRECT==false/
+        //WiFiManager setup, they're just leftover placeholder values for a different network
+        //entirely, so every reconnect attempt was guaranteed to fail. Use WiFi.begin() with no
+        //arguments instead, which reconnects with the ESP8266 SDK's own persisted last-used
+        //credentials (set correctly by WiFiManager's autoConnect() at boot) - works for both
+        //WiFi modes.
 #if WIFI_USE_DIRECT == true
-          WiFi.begin(wifiDirectSsid, wifiDirectPassword);
+        WiFi.begin(wifiDirectSsid, wifiDirectPassword);
 #else
-          WiFi.begin();
+        WiFi.begin();
 #endif
-          
-          int reconnectTimeout = 10; // 10 second timeout for reconnection
-          int reconnectCount = 0;
-          while (WiFi.status() != WL_CONNECTED && reconnectCount < reconnectTimeout) {
-            delay(500);
-            yield();
-            delay(500);
-            yield();
-            reconnectCount++;
-          }
-          
-          if (WiFi.status() == WL_CONNECTED) {
-            SerialPrintln("DEBUG: WiFi reconnected successfully! IP: " + WiFi.localIP().toString());
-            reconnectAttempts = 0;
-          } else {
-            SerialPrintln("DEBUG: Reconnection attempt " + String(reconnectAttempts) + " failed");
-            if (reconnectAttempts >= 3) {
-              SerialPrintln("DEBUG: Max reconnection attempts reached. Marking WiFi as not configured.");
-              isWifiConfigured = false;
-            }
-          }
+
+        int reconnectTimeout = 10; // 10 second timeout for reconnection
+        int reconnectCount = 0;
+        while (WiFi.status() != WL_CONNECTED && reconnectCount < reconnectTimeout) {
+          delay(500);
+          yield();
+          delay(500);
+          yield();
+          reconnectCount++;
+        }
+
+        if (WiFi.status() == WL_CONNECTED) {
+          SerialPrintln("DEBUG: WiFi reconnected successfully! IP: " + WiFi.localIP().toString());
+          reconnectAttempts = 0;
+          isWifiConfigured = true;
+        } else {
+          SerialPrintln("DEBUG: Reconnection attempt " + String(reconnectAttempts) + " failed - will keep retrying every " + String(wifiCheckInterval / 1000) + "s");
         }
       } else {
-        // Connection is good, reset reconnect counter
+        // Connection is good - make sure our own tracking agrees (recovers from a previously
+        // stuck-false state too), and reset the counter.
+        isWifiConfigured = true;
         if (reconnectAttempts > 0) {
           reconnectAttempts = 0;
         }
       }
     }
   }
-  
+
   //Do nothing if WiFi is not configured
   if (!isWifiConfigured) {
     //Show there is an error via text on display
