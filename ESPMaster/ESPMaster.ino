@@ -351,7 +351,22 @@ bool alignmentUpdated = false;
 bool isPendingReboot = false;
 bool isPendingUnitsReset = false;
 bool isWifiConfigured = false;
-bool showDebugPage = true; // Default to showing debug page on first boot
+//BUG FIX, 2026-08-14: was `true` by default. That startup debug page is built via ~60
+//sequential String `+=` concatenations into one large (~3-4KB) heap-allocated String, then
+//sent via request->send(200, "text/html", html) - live-observed today serving genuinely
+//corrupted/binary content instead of valid HTML (confirmed: /index.html served directly via
+//request->send(LittleFS, ...) was always fine; only this dynamically-built debug page was
+//broken), most likely ESP8266 heap fragmentation from the large number of small, repeated
+//reallocations this concatenation pattern causes - not conclusively root-caused (would need
+//live serial access at the exact moment of corruption, unreliable all session - see
+//BUGFIX_LOG.md). Since debugModePath defaults to "true" whenever it doesn't exist yet
+//(readFile()'s fallback), *every* fresh boot/reflash was hitting this broken page first,
+//showing the user a blank white page at "/" until they happened to already know to visit
+///exit-debug-mode. The regular UI's own Serial Log panel already covers ordinary debugging
+//needs, so defaulting this off is a safe, low-risk fix even without a fully isolated root
+//cause - regular diagnostics aren't lost, just this specific fragile code path is no longer
+//exercised by default.
+bool showDebugPage = false;
 volatile bool webRequestActive = false; // Flag to skip display updates during web requests
 LList<ScheduledMessage> scheduledMessages;
 Timezone timezone; 
@@ -382,7 +397,7 @@ bool unitFirmwareUploadAuthFailed = false;
 // LED Debugging variables
 String debugStatus = "";
 
-// Serial log buffer for web interface (circular buffer, stores last 100 messages).
+// Serial log buffer for web interface (circular buffer, stores last N messages).
 // DIAGNOSTIC FIX, 2026-08-13: message used to be a String. addToSerialLog() runs on
 // *every single* SerialPrint()/SerialPrintln() call (regardless of SERIAL_ENABLE - see
 // HelpersSerialHandling.ino), cycling through 100 slots with wildly varying message
@@ -390,10 +405,22 @@ String debugStatus = "";
 // leading remaining suspect for this session's "crashes eventually, at a seemingly
 // random point" bug (after the /log stack-overflow fix in 1483f66 measurably improved
 // but didn't fully eliminate it). Switched to a fixed-size char buffer: no allocation,
-// no fragmentation, at the cost of a flat ~15KB of static RAM (100 * 150 bytes) instead
-// of scattered heap churn. Longer messages are truncated, not an error for a debug log.
-#define SERIAL_LOG_SIZE 100
-#define SERIAL_LOG_MESSAGE_MAX 150
+// no fragmentation, at the cost of a flat chunk of static RAM instead of scattered heap
+// churn. Longer messages are truncated, not an error for a debug log.
+//
+// BUG FIX, 2026-08-14: the original 100*150=15000 bytes for this buffer, on top of
+// everything else already static in this sketch, left only ~8KB of free heap on a
+// *freshly booted* device (measured live via the new /heap diagnostic endpoint) - out of
+// a total ~80KB RAM budget, over 80% was already claimed by static/global variables before
+// a single dynamic allocation happened. That's this session's real root cause for a whole
+// separate class of crash (reason 254 "user exception (panic/abort)", live-caught via the
+// crash reporter - see BUGFIX_LOG.md #38/#41): with that little heap margin, ordinary
+// allocations (a JSON response String, even a mere 1460-byte AsyncResponseStream buffer)
+// can fail outright, and this core's `operator new` aborts rather than gracefully
+// returning null. Shrunk to 40*120=4800 bytes (a >10KB heap-budget win) - still a useful
+// rolling debug window, just no longer eating the majority of available RAM by itself.
+#define SERIAL_LOG_SIZE 40
+#define SERIAL_LOG_MESSAGE_MAX 120
 struct SerialLogEntry {
   char message[SERIAL_LOG_MESSAGE_MAX];
   unsigned long timestamp;
@@ -569,7 +596,9 @@ void setup() {
     
     // Load debug mode setting
 #if DEBUG_ENABLE == true
-    String debugModeSetting = readFile(LittleFS, debugModePath, "true");
+    //BUG FIX, 2026-08-14: default changed from "true" to "false" - see the comment on the
+    //showDebugPage declaration above.
+    String debugModeSetting = readFile(LittleFS, debugModePath, "false");
     showDebugPage = (debugModeSetting == "true");
     SerialPrintln("DEBUG: Debug mode: " + String(showDebugPage ? "enabled" : "disabled") + " (controls startup page, error status, page load log, and serial log)");
 #endif
@@ -744,6 +773,17 @@ void setup() {
       SerialPrintln("DEBUG: Request for Health Check Received");
       request->send(200, "text/plain", "Healthy");
     });
+
+    // Heap health check (added 2026-08-14 while chasing a live OOM-abort() crash - see
+    // BUGFIX_LOG.md #42/#43, directly led to finding the low-free-heap root cause). Kept
+    // permanently, unlike the one-off /debug/trigger-crash endpoint from #38 - this one is
+    // read-only, has no allocation/crash risk of its own (plain text, stack-only char buffer),
+    // and is cheap, ongoing insight worth having if heap pressure ever creeps back up.
+    webServer.on("/heap", HTTP_GET, [](AsyncWebServerRequest * request) {
+      char buf[96];
+      snprintf(buf, sizeof(buf), "free=%u frag=%u%% maxBlock=%u", ESP.getFreeHeap(), ESP.getHeapFragmentation(), ESP.getMaxFreeBlockSize());
+      request->send(200, "text/plain", buf);
+    });
     
     // Simple test endpoint that responds immediately
     webServer.on("/test", HTTP_GET, [](AsyncWebServerRequest * request) {
@@ -778,17 +818,22 @@ void setup() {
         document["logs"][i]["timestamp"] = serialLog[idx].timestamp;
       }
       
-      String jsonString;
-      serializeJson(document, jsonString);
-      
-      // Check if serialization succeeded
-      if (jsonString.length() == 0) {
-        SerialPrintln("ERROR: JSON serialization failed for /log endpoint");
-        request->send(500, "application/json", "{\"error\":\"Serialization failed\"}");
-        return;
-      }
-      
-      request->send(200, "application/json", jsonString);
+      // BUG FIX, 2026-08-14: this used to build the whole response into one contiguous
+      // `String jsonString`, then hand it to request->send(200, ..., jsonString), which copies
+      // it again internally (AsyncBasicResponse::_content = content). With up to 50 entries at
+      // up to 150 bytes each, that's two back-to-back multi-KB contiguous allocations - live-
+      // reproduced today via the crash reporter (finally working, see BUGFIX_LOG.md #38): a
+      // real abort()/panic crash with a stack trace pointing exactly here (operator new ->
+      // String::reserve() -> AsyncWebServerRequest::send() -> this line), most likely an
+      // allocation failing against a heap fragmented by many hours of uptime - exactly the kind
+      // of large contiguous allocation that's hardest to satisfy on a fragmented ESP8266 heap,
+      // even when total free heap would otherwise be enough. Switched to beginResponseStream(),
+      // which lets ArduinoJson serialize directly into small (~1460 byte) chunks as TCP send
+      // buffer space becomes available - no large contiguous buffer ever needed for the JSON
+      // body itself.
+      AsyncResponseStream *response = request->beginResponseStream("application/json");
+      serializeJson(document, *response);
+      request->send(response);
     });
 
     // On-device crash log (added 2026-08-13, see ServiceCrashLogFunctions.ino) - survives
