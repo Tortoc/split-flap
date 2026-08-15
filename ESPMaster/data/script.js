@@ -8,6 +8,9 @@ var fullDebugLogData = null; // Store full debug log for copying
 var fullSerialLogData = null; // Store full serial log for copying
 var isPageLoading = true; // Track if page is still loading
 var pageLoadErrors = []; // Store page load errors and status messages
+//BUG FIX, 2026-08-15: holds the /log auto-refresh setInterval's id so it can actually be
+//stopped - see the comment on toggleSerialLog() below.
+var serialLogInterval = null;
 
 //Used for submission!
 const form = document.getElementById('form');
@@ -570,11 +573,14 @@ function showContent() {
 	}
 	
 	isPageLoading = false; // Page has finished loading
-	
-	// Load serial log
-	refreshLog();
-	// Auto-refresh log every 2 seconds
-	setInterval(refreshLog, 2000);
+
+	//BUG FIX, 2026-08-15: this used to unconditionally call refreshLog() + start a permanent
+	//setInterval(refreshLog, 2000) here, on every single page load - regardless of whether the
+	//Serial Log panel was ever opened. Since the panel used to default to visible, that meant
+	//just leaving the main "clock" page open in a browser tab polled /log forever, every 2s,
+	//for a panel most people never look at - a real, observed contributor to heap pressure (see
+	//BUGFIX_LOG.md #56). The panel now starts hidden and this poll only starts when the user
+	//actually opens it - see toggleSerialLog() below.
 }
 
 // Fetch and display serial log
@@ -767,17 +773,30 @@ function copyDebugLog() {
 }
 
 // Toggle serial log visibility
+//BUG FIX, 2026-08-15: this used to only toggle the panel's CSS visibility, while a permanent
+//setInterval(refreshLog, 2000) (started once in showContent(), see above) kept polling /log
+//forever regardless - hiding the panel never actually stopped the requests, it just stopped
+//displaying their results. Now starts/stops the poll along with the panel itself, so a hidden
+//(the new default, see index.html) or closed-again panel truly stops polling. See
+//BUGFIX_LOG.md #56.
 function toggleSerialLog() {
 	var container = document.getElementById("containerSerialLog");
 	var button = document.getElementById("btnToggleSerialLog");
-	
+
 	if (container.style.display === "none") {
 		container.style.display = "block";
 		if (button) button.textContent = "Hide";
-		refreshLog(); // Refresh when showing
+		refreshLog(); // Refresh immediately when showing
+		if (!serialLogInterval) {
+			serialLogInterval = setInterval(refreshLog, 2000);
+		}
 	} else {
 		container.style.display = "none";
 		if (button) button.textContent = "Show";
+		if (serialLogInterval) {
+			clearInterval(serialLogInterval);
+			serialLogInterval = null;
+		}
 	}
 }
 
