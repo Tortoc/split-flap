@@ -1510,7 +1510,11 @@ void setup() {
       //If there was an error, report back to check what has been input
       if (submissionError) {
         SerialPrintln("Finished Processing Request with Error");
-        request->redirect("/?invalid-submission=" + true);
+        //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #68): this used to redirect to
+        //"/?invalid-submission=true" for a classic full-page-navigation <form> submission - every
+        //Enter-to-submit or Submit-click caused a visible full-page reload ("blinks", per user
+        //report). The form now submits via AJAX (see script.js) and shows this inline instead.
+        request->send(400, "text/plain", "Invalid submission - check the values you entered (e.g. schedule/countdown dates must be in the future).");
       }
       else {
         SerialPrintln("Finished Processing Request Successfully");
@@ -1563,8 +1567,12 @@ void setup() {
           }
         }
 
-        //Redirect so that we don't have the "re-submit form" problem in browser for refresh
-        request->redirect("/");
+        //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #68): this used to redirect to "/" - a classic
+        //Post/Redirect/Get pattern specifically to dodge the browser's "resubmit form?" prompt on
+        //refresh. That concern doesn't apply anymore now that the form submits via AJAX (see
+        //script.js) instead of a real navigation - refreshing after an AJAX POST is just a normal
+        //GET, no resubmission possible. Plain success response instead.
+        request->send(200, "text/plain", "OK");
       }
     });
 

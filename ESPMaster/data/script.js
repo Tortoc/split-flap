@@ -4,13 +4,6 @@ const localDevelopment = false;
 //Various variables
 var unitCount = 0;
 var timezoneOffset = 0;
-var fullDebugLogData = null; // Store full debug log for copying
-var fullSerialLogData = null; // Store full serial log for copying
-var isPageLoading = true; // Track if page is still loading
-var pageLoadErrors = []; // Store page load errors and status messages
-//BUG FIX, 2026-08-15: holds the /log auto-refresh setInterval's id so it can actually be
-//stopped - see the comment on toggleSerialLog() below.
-var serialLogInterval = null;
 
 //Used for submission!
 const form = document.getElementById('form');
@@ -67,31 +60,72 @@ form.onsubmit = function () {
 
 				break;
 		}
+
+		//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #68): this used to let the browser perform a real
+		//POST + full-page navigation here (the server responded with a redirect back to "/" - a
+		//classic Post/Redirect/Get pattern to dodge the "resubmit form?" browser prompt on refresh,
+		//no longer needed once nothing navigates at all). Every Enter-to-submit or Submit-click
+		//caused a visible full-page reload - reported by the user as the page "blinking". Converted
+		//to AJAX: same field values (via FormData, so every existing name="..." input is picked up
+		//automatically, nothing to keep in sync by hand), sent to the same endpoint, page never
+		//navigates.
+		var formData = new FormData(form);
+		var xhrRequest = new XMLHttpRequest();
+		xhrRequest.onreadystatechange = function () {
+			if (this.readyState == 4) {
+				restoreSubmitButton(loadingIconContainer);
+
+				if (this.status == 200) {
+					//Matches the old reload-clears-it behavior - a fresh page load never restored
+					//previously typed text either, since index.html doesn't carry a stored value.
+					document.getElementById('inputText').value = "";
+					updateCharacterCount();
+					//Refresh everything else (mode/alignment/speed/countdown/scheduled messages/
+					//"last received") from the server's now-updated state.
+					loadPage();
+				} else {
+					showBannerMessage(this.responseText || `
+						Something went wrong during submission. Feel free to try again, ensure that you have entered valid information.
+						<br>
+						Ensure things like dates provided for schedules/countdowns are in the future.
+					`);
+				}
+			}
+		};
+		xhrRequest.onerror = function () {
+			restoreSubmitButton(loadingIconContainer);
+			showBannerMessage("Network error while submitting.");
+		};
+		xhrRequest.open("POST", "/", true);
+		xhrRequest.send(formData);
+
+		return false;
 	}
 }
 
-// Log page load errors and status
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #68): the loading spinner used to replace the Submit
+//button permanently - fine when a real page reload followed right after (a fresh page load
+//recreates it), not fine now that the page stays alive and the user needs to be able to submit
+//again.
+function restoreSubmitButton(loadingIconContainer) {
+	var freshContainer = document.createElement("div");
+	freshContainer.id = "containerSubmit";
+	var submitInput = document.createElement("input");
+	submitInput.type = "submit";
+	submitInput.value = "Submit";
+	freshContainer.appendChild(submitInput);
+	loadingIconContainer.replaceWith(freshContainer);
+}
+
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #59): used to also append to an on-page "Page Load
+//Errors & Status" panel (removed - see the comment in index.html for why). Kept as a
+//console-only logger since the many call sites throughout the /settings loading flow below are
+//still genuinely useful when debugging with devtools open, and this way costs nothing on a
+//normal load.
 function logPageLoadStatus(message, isError) {
 	var timestamp = new Date().toLocaleTimeString();
 	var logEntry = "[" + timestamp + "] " + message;
-	pageLoadErrors.push(logEntry);
-	
-	var container = document.getElementById("pageLoadErrorContent");
-	if (container) {
-		var color = isError ? "#f48771" : "#4ec9b0";
-		var html = container.innerHTML;
-		html += '<div style="margin-bottom: 2px; padding: 1px 0; color: ' + color + ';">' + escapeHtml(logEntry) + '</div>';
-		container.innerHTML = html;
-		container.scrollTop = container.scrollHeight;
-		
-		// Show the error log if there are errors
-		var errorLogDiv = document.getElementById("pageLoadErrorLog");
-		if (errorLogDiv && (isError || pageLoadErrors.length > 0)) {
-			errorLogDiv.style.display = "block";
-		}
-	}
-	
-	// Also log to console
+
 	if (isError) {
 		console.error(logEntry);
 	} else {
@@ -115,33 +149,15 @@ window.addEventListener('load', function() {
 	loadPage();
 });
 
-// Start loading debug log immediately when page loads
-var debugLogInterval = null;
-window.addEventListener('DOMContentLoaded', function() {
-	logPageLoadStatus("DOMContentLoaded event fired", false);
-	loadDebugLog();
-	debugLogInterval = setInterval(loadDebugLog, 500); // Refresh every 500ms during page load
-});
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #68): loadPage() used to also check for an
+//'invalid-submission' URL param here (see BUGFIX_LOG.md #67 for the same story about a since-
+//removed 'is-resetting-units' param) - both were only ever set by a server redirect after a real
+//<form> POST navigation. Neither endpoint redirects anymore (both now respond to AJAX calls
+//instead, see form.onsubmit and triggerResetUnits() in admin.js), so both params are permanently
+//unreachable now - removed rather than left as dead branches.
 
 // Request and retrieve settings from ESP-01s filesystem
 function loadPage() {
-	//Show messages from the server if need be
-	const urlParams = new URLSearchParams(location.search);
-	if (urlParams.get('invalid-submission') === "true") {
-		showBannerMessage(`
-			Something went wrong during submission. Feel free to try again, ensure that you have entered valid information.
-			<br>
-			Ensure things like dates provided for schedules/countdowns are in the future.
-		`);
-	}
-	else if (urlParams.get('is-resetting-units') === "true") {
-		showBannerMessage(`
-			Display is now resetting/re-calibrating. It should only take a few seconds.
-			<br>
-			It will display different characters in order to carry this out and then go back to the last thing being displayed.
-		`);
-	}
-	
 	//Set date time fields to be a minimum of todays date/time add 1 minute
 	var tzOffset = timezoneOffset * 60000;
 	document.querySelectorAll('input[type="datetime-local"]').forEach((dateTimeElement) => {
@@ -153,13 +169,10 @@ function loadPage() {
 		setSpeed("80");
 		setSavedMode("text");
 		setAlignment("left");
-		setVersion("Development")
 		setUnitCount("10");
 		setLastReceivedMessage(new Date().toLocaleString());
 		setWiFiStatus("Connected", -65, "192.168.1.100"); // Mock WiFi status for development
 		setCountdownDate((Date.now() / 1000) + (24 * 60 * 60));
-		showHideResetWifiSettingsAction(false);
-		showHideOtaUpdateAction(false);
 		showScheduledMessages([
 			{
 				"scheduledDateTimeUnix": 1690134480,
@@ -204,14 +217,11 @@ function loadPage() {
 						setSpeed(responseObject.flapSpeed);
 						setSavedMode(responseObject.deviceMode);
 						setAlignment(responseObject.alignment);
-						setVersion(responseObject.version);
 						setUnitCount(responseObject.unitCount);
 						setCountdownDate(responseObject.countdownToDateUnix);
 						setLastReceivedMessage(responseObject.lastTimeReceivedMessageDateTime);
 						setWiFiStatus(responseObject.wifiStatus, responseObject.wifiRssi, responseObject.wifiIp);
-						showHideResetWifiSettingsAction(responseObject.wifiSettingsResettable);
-						showHideOtaUpdateAction(responseObject.otaEnabled);
-						
+
 						if (responseObject.scheduledMessages) {
 							showScheduledMessages(responseObject.scheduledMessages);
 						}
@@ -368,11 +378,6 @@ function setAlignment(alignment) {
 }
 
 //Sets the version on the UI just for awareness
-function setVersion(version) {
-	document.getElementById("labelVersion").innerHTML = version;
-}
-
-//Sets the version on the UI just for awareness
 function setUnitCount(count) {
 	document.getElementById("labelUnits").innerHTML = count;
 	unitCount = count;
@@ -483,19 +488,10 @@ function showHideScheduledMessageInput() {
 	}
 }
 
-function showHideResetWifiSettingsAction(isWifiApMode) {
-	if (!isWifiApMode) {
-		var linkActionResetWifi = document.getElementById("linkActionResetWifi");
-		linkActionResetWifi.classList.add("hidden");
-	}
-}
-
-function showHideOtaUpdateAction(isOtaEnabled) {
-	if (!isOtaEnabled) {
-		var linkActionOtaUpdate = document.getElementById("linkActionOtaUpdate");
-		linkActionOtaUpdate.classList.add("hidden");
-	}
-}
+//BUG FIX, 2026-08-15: showHideResetWifiSettingsAction()/showHideOtaUpdateAction() used to live
+//here, controlling the Reset WiFi / OTA Update links that were part of index.html's old
+//"Actions" card. Both moved to admin.html (see BUGFIX_LOG.md #57) along with the equivalent
+//show/hide logic - see loadSystemActionVisibility() in admin.js.
 
 //Formats and displays all scheduled messages in a "nice" format
 function showScheduledMessages(scheduledMessages) {
@@ -565,80 +561,11 @@ function showContent() {
 
 	elementInitialLoading.classList.add("hidden");
 	elementContent.classList.remove("hidden");
-	
-	// Stop the fast debug log refresh, switch to slower refresh
-	if (debugLogInterval) {
-		clearInterval(debugLogInterval);
-		debugLogInterval = null;
-	}
-	
-	isPageLoading = false; // Page has finished loading
-
-	//BUG FIX, 2026-08-15: this used to unconditionally call refreshLog() + start a permanent
-	//setInterval(refreshLog, 2000) here, on every single page load - regardless of whether the
-	//Serial Log panel was ever opened. Since the panel used to default to visible, that meant
-	//just leaving the main "clock" page open in a browser tab polled /log forever, every 2s,
-	//for a panel most people never look at - a real, observed contributor to heap pressure (see
-	//BUGFIX_LOG.md #56). The panel now starts hidden and this poll only starts when the user
-	//actually opens it - see toggleSerialLog() below.
 }
 
-// Fetch and display serial log
-function refreshLog() {
-	var xhrRequest = new XMLHttpRequest();
-	xhrRequest.onreadystatechange = function () {
-		if (this.readyState == 4 && this.status == 200) {
-			var responseObject = JSON.parse(this.responseText);
-			displaySerialLog(responseObject);
-		}
-	};
-
-	xhrRequest.open("GET", "/log", true);
-	xhrRequest.send();
-}
-
-// Display serial log messages
-function displaySerialLog(logData) {
-	var container = document.getElementById("containerSerialLog");
-	var countElement = document.getElementById("spanLogCount");
-	
-	// Store full log data for copying
-	fullSerialLogData = logData;
-	
-	countElement.innerText = logData.count || 0;
-	
-	if (!logData.logs || logData.logs.length === 0) {
-		container.innerHTML = '<div style="color: #888;">No log messages yet.</div>';
-		return;
-	}
-	
-	var html = "";
-	for (var i = 0; i < logData.logs.length; i++) {
-		var logEntry = logData.logs[i];
-		// Timestamp is in milliseconds since boot, format as seconds with 1 decimal
-		var timestampSec = (logEntry.timestamp / 1000).toFixed(1) + "s";
-		var message = logEntry.message || "";
-		
-		// Escape HTML and add some color coding
-		message = escapeHtml(message);
-		if (message.indexOf("DEBUG:") >= 0) {
-			message = '<span style="color: #4ec9b0;">' + message + '</span>';
-		} else if (message.indexOf("ERROR") >= 0 || message.indexOf("Error") >= 0) {
-			message = '<span style="color: #f48771;">' + message + '</span>';
-		} else if (message.indexOf("WARNING") >= 0 || message.indexOf("Warning") >= 0) {
-			message = '<span style="color: #dcdcaa;">' + message + '</span>';
-		}
-		
-		html += '<div style="margin-bottom: 4px; padding: 2px 0; border-bottom: 1px solid #333;">';
-		html += '<span style="color: #808080; margin-right: 10px;">[' + timestampSec + ']</span>';
-		html += message;
-		html += '</div>';
-	}
-	
-	container.innerHTML = html;
-	// Auto-scroll to bottom
-	container.scrollTop = container.scrollHeight;
-}
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #61): refreshLog()/displaySerialLog()/toggleSerialLog()/
+//copySerialLog() used to live here, driving the "Serial Log" card - moved to admin.js along with
+//the card itself (now on the Administration page, on user request).
 
 // Helper function to escape HTML
 function escapeHtml(text) {
@@ -652,181 +579,40 @@ function escapeHtml(text) {
 	return text.replace(/[&<>"']/g, function(m) { return map[m]; });
 }
 
-// Load and display debug log (for page load debugging)
-function loadDebugLog() {
-	var xhrRequest = new XMLHttpRequest();
-	xhrRequest.onreadystatechange = function () {
-		if (this.readyState == 4) {
-			if (this.status == 200) {
-				try {
-					var responseObject = JSON.parse(this.responseText);
-					displayDebugLog(responseObject);
-				} catch (e) {
-					logPageLoadStatus("ERROR: Failed to parse /log response: " + e.message, true);
-				}
-			} else {
-				logPageLoadStatus("ERROR: /log request failed with status " + this.status, true);
-			}
-		}
-	};
-	
-	xhrRequest.onerror = function() {
-		logPageLoadStatus("ERROR: Network error on /log request", true);
-	};
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #59): loadDebugLog()/displayDebugLog()/toggleDebugLog()/
+//togglePageLoadLog()/copyDebugLog() used to live here, driving the two removed page-load debug
+//panels (see the comment in index.html). loadDebugLog() in particular polled /log every 500ms
+//for the entire page-load phase, competing with the actual /settings request - removed along
+//with the panels rather than just hidden, since nothing else in this file calls them anymore.
 
-	xhrRequest.open("GET", "/log", true);
-	xhrRequest.send();
+// Kebab (3-dot) menu, added 2026-08-15 - see BUGFIX_LOG.md #57.
+function toggleKebabMenu() {
+	var dropdown = document.getElementById("kebabMenuDropdown");
+	var button = document.getElementById("btnKebabMenu");
+	var isOpen = !dropdown.classList.contains("hidden");
+
+	if (isOpen) {
+		dropdown.classList.add("hidden");
+		button.setAttribute("aria-expanded", "false");
+	} else {
+		dropdown.classList.remove("hidden");
+		button.setAttribute("aria-expanded", "true");
+	}
 }
 
-// Display debug log in the top viewer
-function displayDebugLog(logData) {
-	var container = document.getElementById("debugLogContent");
-	
-	// Store full log data for copying
-	fullDebugLogData = logData;
-	
-	if (!logData.logs || logData.logs.length === 0) {
-		container.innerHTML = '<div style="color: #888;">No log messages yet.</div>';
+// Close the kebab menu when clicking anywhere outside it
+document.addEventListener("click", function (event) {
+	var menu = document.querySelector(".kebab-menu");
+	var dropdown = document.getElementById("kebabMenuDropdown");
+	if (!menu || !dropdown || dropdown.classList.contains("hidden")) {
 		return;
 	}
-	
-	// During page load, show full log. After page loads, show only last 15 messages
-	var startIdx = isPageLoading ? 0 : Math.max(0, logData.logs.length - 15);
-	var html = "";
-	for (var i = startIdx; i < logData.logs.length; i++) {
-		var logEntry = logData.logs[i];
-		var timestampSec = (logEntry.timestamp / 1000).toFixed(1) + "s";
-		var message = logEntry.message || "";
-		
-		// Escape HTML and add color coding
-		message = escapeHtml(message);
-		var color = "#d4d4d4"; // default
-		if (message.indexOf("DEBUG:") >= 0) {
-			color = "#4ec9b0";
-		} else if (message.indexOf("ERROR") >= 0 || message.indexOf("Error") >= 0) {
-			color = "#f48771";
-		} else if (message.indexOf("WARNING") >= 0 || message.indexOf("Warning") >= 0) {
-			color = "#dcdcaa";
-		}
-		
-		html += '<div style="margin-bottom: 2px; padding: 1px 0; font-size: 0.9em;">';
-		html += '<span style="color: #808080; margin-right: 8px;">[' + timestampSec + ']</span>';
-		html += '<span style="color: ' + color + ';">' + message + '</span>';
-		html += '</div>';
+	if (!menu.contains(event.target)) {
+		dropdown.classList.add("hidden");
+		var button = document.getElementById("btnKebabMenu");
+		if (button) button.setAttribute("aria-expanded", "false");
 	}
-	
-	container.innerHTML = html;
-	// Auto-scroll to bottom
-	container.scrollTop = container.scrollHeight;
-}
+});
 
-// Toggle debug log viewer visibility
-function toggleDebugLog() {
-	var viewer = document.getElementById("debugLogViewer");
-	if (viewer.style.display === "none") {
-		viewer.style.display = "block";
-		loadDebugLog();
-	} else {
-		viewer.style.display = "none";
-	}
-}
-
-// Toggle page load error log visibility
-function togglePageLoadLog() {
-	var viewer = document.getElementById("pageLoadErrorLog");
-	if (viewer.style.display === "none") {
-		viewer.style.display = "block";
-	} else {
-		viewer.style.display = "none";
-	}
-}
-
-// Copy full debug log to clipboard
-function copyDebugLog() {
-	if (!fullDebugLogData || !fullDebugLogData.logs || fullDebugLogData.logs.length === 0) {
-		alert("No log data available to copy.");
-		return;
-	}
-	
-	var logText = "";
-	for (var i = 0; i < fullDebugLogData.logs.length; i++) {
-		var logEntry = fullDebugLogData.logs[i];
-		var timestampSec = (logEntry.timestamp / 1000).toFixed(1) + "s";
-		var message = logEntry.message || "";
-		logText += "[" + timestampSec + "] " + message + "\n";
-	}
-	
-	// Copy to clipboard
-	var textArea = document.createElement("textarea");
-	textArea.value = logText;
-	textArea.style.position = "fixed";
-	textArea.style.opacity = "0";
-	document.body.appendChild(textArea);
-	textArea.select();
-	try {
-		document.execCommand('copy');
-		alert("Debug log copied to clipboard!");
-	} catch (err) {
-		alert("Failed to copy log. Please select and copy manually.");
-	}
-	document.body.removeChild(textArea);
-}
-
-// Toggle serial log visibility
-//BUG FIX, 2026-08-15: this used to only toggle the panel's CSS visibility, while a permanent
-//setInterval(refreshLog, 2000) (started once in showContent(), see above) kept polling /log
-//forever regardless - hiding the panel never actually stopped the requests, it just stopped
-//displaying their results. Now starts/stops the poll along with the panel itself, so a hidden
-//(the new default, see index.html) or closed-again panel truly stops polling. See
-//BUGFIX_LOG.md #56.
-function toggleSerialLog() {
-	var container = document.getElementById("containerSerialLog");
-	var button = document.getElementById("btnToggleSerialLog");
-
-	if (container.style.display === "none") {
-		container.style.display = "block";
-		if (button) button.textContent = "Hide";
-		refreshLog(); // Refresh immediately when showing
-		if (!serialLogInterval) {
-			serialLogInterval = setInterval(refreshLog, 2000);
-		}
-	} else {
-		container.style.display = "none";
-		if (button) button.textContent = "Show";
-		if (serialLogInterval) {
-			clearInterval(serialLogInterval);
-			serialLogInterval = null;
-		}
-	}
-}
-
-// Copy full serial log to clipboard
-function copySerialLog() {
-	if (!fullSerialLogData || !fullSerialLogData.logs || fullSerialLogData.logs.length === 0) {
-		alert("No log data available to copy.");
-		return;
-	}
-	
-	var logText = "";
-	for (var i = 0; i < fullSerialLogData.logs.length; i++) {
-		var logEntry = fullSerialLogData.logs[i];
-		var timestampSec = (logEntry.timestamp / 1000).toFixed(1) + "s";
-		var message = logEntry.message || "";
-		logText += "[" + timestampSec + "] " + message + "\n";
-	}
-	
-	// Copy to clipboard
-	var textArea = document.createElement("textarea");
-	textArea.value = logText;
-	textArea.style.position = "fixed";
-	textArea.style.opacity = "0";
-	document.body.appendChild(textArea);
-	textArea.select();
-	try {
-		document.execCommand('copy');
-		alert("Serial log copied to clipboard!");
-	} catch (err) {
-		alert("Failed to copy log. Please select and copy manually.");
-	}
-	document.body.removeChild(textArea);
-}
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #61): toggleSerialLog()/copySerialLog() used to live
+//here too - see the comment further up where refreshLog()/displaySerialLog() used to be.
