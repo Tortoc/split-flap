@@ -1,3 +1,40 @@
+/* BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #64): design tokens, added during a CSS consistency
+   pass on user request. Everything below derives its colors/spacing/radius from these instead of
+   repeating literal values - makes the whole stylesheet easier to keep visually consistent as
+   the UI keeps growing. No visual change intended from the token values themselves (all copied
+   from what was already in use); the actual consistency fixes are in the component rules below,
+   which used to be duplicated ad-hoc across index.html/admin.html as inline styles. */
+:root {
+	--color-primary: #F8880E;
+	--color-primary-hover: #FFB96D;
+	--color-on-primary: #FEFCFB;
+	--color-bg: #333;
+	--color-card-bg: #ffffff;
+	--color-text: #333;
+	--color-text-muted: #666;
+	--color-text-subtle: #555;
+	--color-border: #ccc;
+	--color-success: #2e7d32;
+	--color-warning: #ed6c02;
+	--color-danger: #c62828;
+	--color-note-bg: #fdf3e5;
+	--color-console-bg: #1e1e1e;
+	--color-console-text: #d4d4d4;
+
+	--space-xs: 4px;
+	--space-sm: 8px;
+	--space-md: 15px;
+	--space-lg: 24px;
+	--space-xl: 32px;
+
+	--radius-sm: 4px;
+
+	--font-size-sm: 0.85rem;
+	--font-size-note: 0.9rem;
+
+	--transition-fast: 0.4s;
+}
+
 html {
 	font-family: Arial, Helvetica, sans-serif;
 	display: inline-block;
@@ -5,7 +42,8 @@ html {
 }
 
 body {
-	background-color: #333;
+	background-color: var(--color-bg);
+	margin: 0;
 }
 
 h1 {
@@ -17,10 +55,6 @@ p {
 	font-size: 1.4rem;
 }
 
-body {
-	margin: 0;
-}
-
 label {
 	font-size: 1.2rem;
 }
@@ -29,8 +63,8 @@ input[type=submit],
 a,
 .action-link {
 	border: none;
-	color: #FEFCFB;
-	background-color: #F8880E;
+	color: var(--color-on-primary);
+	background-color: var(--color-primary);
 	padding: 15px 15px;
 	text-align: center;
 	text-decoration: none;
@@ -38,21 +72,21 @@ a,
 	font-size: 16px;
 	width: 120px;
 	margin-right: 10px;
-	border-radius: 4px;
-	transition-duration: 0.4s;
+	border-radius: var(--radius-sm);
+	transition-duration: var(--transition-fast);
 	font-family: inherit;
 }
 
 a,
 .action-link {
 	padding: 5px;
-	background-color: #F8880E;
+	background-color: var(--color-primary);
 }
 
 input[type=submit]:hover,
 a:hover,
 .action-link:hover {
-	background-color: #FFB96D;
+	background-color: var(--color-primary-hover);
 	cursor: pointer;
 }
 
@@ -66,8 +100,10 @@ a:last-child,
    <a href> GET links to <form method="post"><button> (see index.html) so they can no longer be
    triggered cross-site with just a GET request. `display: contents` makes the wrapping <form>
    invisible to layout, so .actions' flex row keeps behaving exactly like it did with bare <a>
-   children - only .action-link needs the button-as-link visual treatment above. */
-.actions form {
+   children - only .action-link needs the button-as-link visual treatment above. Also used by
+   .card-title-actions (see below) for the same reason. */
+.actions form,
+.card-title-actions form {
 	display: contents;
 }
 
@@ -77,8 +113,8 @@ select {
 	padding: 12px 20px;
 	margin: 10px;
 	display: inline-block;
-	border: 1px solid #ccc;
-	border-radius: 4px;
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-sm);
 	box-sizing: border-box;
 }
 
@@ -96,18 +132,25 @@ input[type=datetime-local] {
 }
 
 .topnav {
-	background-color: #F8880E;
+	background-color: var(--color-primary);
 	padding: 0 10px;
 	font-size: 0.8em;
-	color: #333;
+	color: var(--color-text);
 }
 
 .topnav label {
 	font-size: 0.8em;
 }
 
-.float-container {
-	overflow: hidden;
+/* BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #57): this used to be `overflow: hidden` - the classic
+   clearfix technique, but it also clips any absolutely-positioned child that pops out past the
+   container's edge, which is exactly what the hamburger menu's dropdown needs to do (see
+   .kebab-dropdown below). Switched to the pseudo-element clearfix instead, which contains the
+   floated children the same way without clipping anything that's meant to overflow. */
+.float-container::after {
+	content: "";
+	display: table;
+	clear: both;
 }
 
 .float-left {
@@ -118,29 +161,91 @@ input[type=datetime-local] {
 	float: right;
 }
 
+/* Hamburger (3-line) menu, added 2026-08-15, moved under the "Split Flap UI" heading on
+   2026-08-15 (see BUGFIX_LOG.md #57). Replaces the old "Actions" card; Administration/Reboot
+   now live here instead. */
+.kebab-menu {
+	position: relative;
+	display: inline-block;
+}
+
+.kebab-button {
+	width: auto;
+	margin: 0 0 var(--space-sm) 0;
+	padding: var(--space-xs) 10px;
+	font-size: 1.3rem;
+	line-height: 1;
+	background-color: transparent;
+	color: var(--color-text);
+	border: none;
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+}
+
+.kebab-button:hover {
+	background-color: rgba(0, 0, 0, 0.1);
+}
+
+.kebab-dropdown {
+	position: absolute;
+	top: 100%;
+	left: 0;
+	z-index: 10;
+	min-width: 180px;
+	background-color: var(--color-card-bg);
+	border-radius: var(--radius-sm);
+	box-shadow: 2px 2px 10px 1px rgba(0, 0, 0, .3);
+	overflow: hidden;
+	text-align: left;
+}
+
+.kebab-dropdown a,
+.kebab-dropdown button {
+	display: block;
+	width: 100%;
+	margin: 0;
+	padding: 12px 16px;
+	background-color: var(--color-card-bg);
+	color: var(--color-text);
+	border: none;
+	border-radius: 0;
+	text-align: left;
+	font-size: 1rem;
+	box-sizing: border-box;
+	cursor: pointer;
+}
+
+.kebab-dropdown a:hover,
+.kebab-dropdown button:hover {
+	background-color: var(--color-note-bg);
+}
+
 .content {
-	padding: 15px 25px 25px 25px;
+	padding: var(--space-md) 25px 25px 25px;
 }
 
 .banner-message {
 	max-width: 800px;
-	margin: 0 auto;
-	background-color: #F8880E;
+	margin: 0 auto 15px auto;
+	background-color: var(--color-primary);
 	padding: 10px 10px;
-	margin-bottom: 15px;
 }
 
 .card-grid {
 	max-width: 800px;
-	margin: 0 auto;
+	margin: 0 auto var(--space-xl) auto;
 	display: grid;
 	grid-gap: 2rem;
 	grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-	margin-bottom: 2rem;
+}
+
+.card-grid + .card-grid,
+.info-box + .card-grid {
+	margin-top: var(--space-xl);
 }
 
 .card {
-	background-color: white;
+	background-color: var(--color-card-bg);
 	box-shadow: 2px 2px 10px 1px rgba(230, 230, 230, .5);
 }
 
@@ -151,7 +256,40 @@ input[type=datetime-local] {
 .card-title {
 	font-size: 1.2rem;
 	font-weight: bold;
-	color: #F8880E;
+	color: var(--color-primary);
+}
+
+/* BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #64): every card header with buttons on the right used
+   to place them with `float: right` directly on each <button>, repeated inline on every single
+   one (Refresh, Rescan Units, Reset Unit Calibration, Show/Hide, Copy Full Log, Refresh log,
+   Crash Log). Besides the duplication, float order is reversed (the first element in the DOM
+   ends up rightmost) - confusing to work with, and exactly what caused the "Reset Unit
+   Calibration" positioning to need a workaround comment when it moved here (BUGFIX_LOG.md #62).
+   Flexbox reads naturally instead: first in the DOM = leftmost of the button group, actually
+   readable. Wrap the title text and the button group in a .card-title-actions row; buttons
+   inside get .btn-small instead of one-off inline styles. */
+.card-title-actions {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: var(--space-sm);
+}
+
+.card-title-actions .card-title-buttons {
+	display: flex;
+	align-items: center;
+	gap: var(--space-sm);
+	flex-wrap: wrap;
+}
+
+.btn-small,
+.btn-small.action-link {
+	width: auto;
+	margin: 0;
+	padding: 5px 10px;
+	font-size: 0.9em;
+	font-weight: normal;
 }
 
 .card .count {
@@ -195,7 +333,7 @@ input[type=datetime-local] {
 	width: 25px;
 	height: 25px;
 	border-radius: 50%;
-	background: #F8880E;
+	background: var(--color-primary);
 	cursor: pointer;
 }
 
@@ -226,23 +364,23 @@ input[type=datetime-local] {
 	margin: 5px;
 	display: flex;
 	align-content: center;
-    align-items: stretch;
+	align-items: stretch;
 }
 
 .message .time {
 	padding: 5px;
 	width: calc(30% - 10px);
-	background-color: #FFB96D;
+	background-color: var(--color-primary-hover);
 	display: flex;
 	align-items: center;
-    justify-content: center;
+	justify-content: center;
 }
 
 .message .text {
 	text-align: left;
 	padding: 5px;
 	width: calc(50% - 10px);
-	background-color: #fff;
+	background-color: var(--color-card-bg);
 }
 
 .message .action {
@@ -256,26 +394,26 @@ input[type=datetime-local] {
 	width: 90px;
 	padding: 5px 10px;
 	border: none;
-	color: #FEFCFB;
-	background-color: #F8880E;
+	color: var(--color-on-primary);
+	background-color: var(--color-primary);
 	text-align: center;
 	text-decoration: none;
 	font-size: 16px;
-	border-radius: 4px;
-	transition-duration: 0.4s;
+	border-radius: var(--radius-sm);
+	transition-duration: var(--transition-fast);
 	justify-content: center;
 	align-items: center;
 	display: flex;
 }
 
 .message .action .remove-button:hover {
-	background-color: #FFB96D;
+	background-color: var(--color-primary-hover);
 	cursor: pointer;
 }
 
 .actions {
-    display: flex;
-    justify-content: center;
+	display: flex;
+	justify-content: center;
 	padding: 0 10px 10px 10px;
 }
 
@@ -291,7 +429,7 @@ input[type=datetime-local] {
 	.message {
 		flex-wrap: wrap;
 		padding-bottom: 20px;
-		border-bottom: 1px solid #F8880E;
+		border-bottom: 1px solid var(--color-primary);
 	}
 
 	.message:last-child {
@@ -305,7 +443,7 @@ input[type=datetime-local] {
 	.message .text {
 		width: 100%;
 	}
-	
+
 	.message .action {
 		width: 100%;
 		justify-content: center;
@@ -318,40 +456,168 @@ input[type=datetime-local] {
 	position: relative;
 	width: 80px;
 	height: 45px;
-  }
+}
 
-  .lds-facebook div {
+.lds-facebook div {
 	display: inline-block;
 	position: absolute;
 	left: 8px;
 	width: 12px;
-	background: #F8880E;
+	background: var(--color-primary);
 	animation: lds-facebook 1.2s cubic-bezier(0, 0.5, 0.5, 1) infinite;
-  }
+}
 
-  .lds-facebook div:nth-child(1) {
+.lds-facebook div:nth-child(1) {
 	left: 15px;
 	animation-delay: -0.24s;
-  }
+}
 
-  .lds-facebook div:nth-child(2) {
+.lds-facebook div:nth-child(2) {
 	left: 34px;
 	animation-delay: -0.12s;
-  }
+}
 
-  .lds-facebook div:nth-child(3) {
+.lds-facebook div:nth-child(3) {
 	left: 53px;
 	animation-delay: 0;
-  }
+}
 
-  @keyframes lds-facebook {
+@keyframes lds-facebook {
 	0% {
-	  top: 8px;
-	  height: 64px;
+		top: 8px;
+		height: 64px;
 	}
 	50%, 100% {
-	  top: 24px;
-	  height: 32px;
+		top: 24px;
+		height: 32px;
 	}
-  }
-  
+}
+
+/* BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #64): moved here from admin.html's embedded <style>
+   block during the CSS consistency pass - these were only ever used on admin.html, but belong in
+   the shared stylesheet along with everything else so there's one place to look for the app's
+   whole visual language. No rule changes, just relocated (and switched to tokens where a value
+   already had one). */
+.unit-row {
+	padding: 5px;
+	margin: 5px;
+	display: flex;
+	flex-wrap: wrap;
+	align-content: center;
+	align-items: center;
+	border-bottom: 1px solid #eee;
+}
+
+.unit-row:last-child {
+	border-bottom: none;
+}
+
+.unit-row .unit-label {
+	text-align: left;
+	width: 160px;
+	font-weight: bold;
+}
+
+.unit-row .unit-status {
+	width: 160px;
+	text-align: left;
+}
+
+.unit-row .unit-offset {
+	width: 120px;
+	text-align: left;
+}
+
+.unit-row .unit-input {
+	display: flex;
+	align-items: center;
+	gap: var(--space-sm);
+}
+
+.unit-row input[type=number] {
+	width: 90px;
+	padding: var(--space-sm) 10px;
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius-sm);
+	box-sizing: border-box;
+}
+
+.unit-row button,
+.btn-primary {
+	border: none;
+	color: var(--color-on-primary);
+	background-color: var(--color-primary);
+	padding: var(--space-sm) 15px;
+	text-align: center;
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+	font-size: 14px;
+	transition-duration: var(--transition-fast);
+}
+
+.unit-row button:hover,
+.btn-primary:hover {
+	background-color: var(--color-primary-hover);
+}
+
+.unit-row button:disabled,
+.btn-primary:disabled {
+	background-color: var(--color-border);
+	cursor: not-allowed;
+}
+
+.status-online-ready {
+	color: var(--color-success);
+	font-weight: bold;
+}
+
+.status-online-busy {
+	color: var(--color-warning);
+	font-weight: bold;
+}
+
+.status-offline {
+	color: var(--color-danger);
+	font-weight: bold;
+}
+
+.info-box {
+	text-align: left;
+	font-size: 1rem;
+	background-color: var(--color-note-bg);
+	border: 1px solid var(--color-primary);
+	border-radius: var(--radius-sm);
+	padding: 10px var(--space-md);
+	margin: var(--space-md) auto 0 auto;
+	max-width: 770px;
+}
+
+/* BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #64): consolidates the various one-off inline
+   "small print note" paragraph styles that were scattered across admin.html (upload warnings,
+   hints about shared passwords, etc.) into three consistent variants. */
+.note {
+	font-size: var(--font-size-note);
+	color: var(--color-text-subtle);
+}
+
+.note-muted {
+	font-size: var(--font-size-note);
+	color: var(--color-text-muted);
+}
+
+.note-danger {
+	font-size: 1rem;
+	color: var(--color-danger);
+}
+
+/* Dark, monospace console-style panel - used by the Serial Log card. */
+.console-panel {
+	background-color: var(--color-console-bg);
+	color: var(--color-console-text);
+	font-family: 'Courier New', monospace;
+	font-size: var(--font-size-sm);
+	padding: 10px;
+	max-height: 400px;
+	overflow-y: auto;
+	border-radius: var(--radius-sm);
+}
