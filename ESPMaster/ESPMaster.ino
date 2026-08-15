@@ -225,8 +225,14 @@
 const char* wifiDirectSsid = "";
 const char* wifiDirectPassword = "";
 
-//Change if you want to have an Over The Air (OTA) Password for updates
-const char* otaPassword = "0424";
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #63): this used to be a compile-time const char* (fixed
+//value "0424", only changeable by re-flashing) - now runtime-changeable and persisted to
+//LittleFS, so it can be viewed/changed from the Administration page without needing the Arduino
+//toolchain. Default changed to "splitflap" on user request. Loaded from otaPasswordPath in
+//loadValuesFromFileSystem() (ServiceFileSystemFunctions.ino), same pattern as alignment/
+//flapSpeed/deviceMode.
+String otaPassword = "";
+const char* otaPasswordPath = "/otapassword.txt";
 
 //Change this to your timezone, use the TZ database name
 //https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
@@ -1575,7 +1581,9 @@ void setup() {
 
         //If there is a password set, disabled by default for ease
         if (otaPassword != "") {
-          ArduinoOTA.setPassword(otaPassword);
+          //BUG FIX, 2026-08-15: otaPassword is now a String (was const char*, see the comment on
+          //its declaration) - .c_str() for the overload ArduinoOTA.setPassword() expects.
+          ArduinoOTA.setPassword(otaPassword.c_str());
         }
         
         SerialPrintln("Starting OTA Mode");
@@ -1648,7 +1656,46 @@ void setup() {
       request->send(200, "text/html", html);
       isPendingWifiReset = true;
     });
-#endif   
+#endif
+
+    //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #63): lets the Administration page show/change the
+    //OTA password at runtime, now that it's a persisted setting instead of a compile-time
+    //constant. Freely readable without authentication (on user request - this device has no
+    //separate login of its own, every other admin action already just checks this same shared
+    //password per-request) - changing it still requires the current password, same as every
+    //other state-changing admin action on this page.
+    webServer.on("/admin/ota-password", HTTP_GET, [](AsyncWebServerRequest * request) {
+      JsonDocument doc;
+      doc["otaPassword"] = otaPassword;
+      AsyncResponseStream *response = request->beginResponseStream("application/json");
+      serializeJson(doc, *response);
+      request->send(response);
+    });
+
+    webServer.on("/admin/set-ota-password", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (!request->hasParam("currentPassword", true) || !request->hasParam("newPassword", true)) {
+        request->send(400, "text/plain", "'currentPassword' and 'newPassword' are required");
+        return;
+      }
+
+      String currentPasswordValue = request->getParam("currentPassword", true)->value();
+      if (currentPasswordValue != otaPassword) {
+        SerialPrintln("OTA password change rejected: current password incorrect");
+        request->send(401, "text/plain", "Current password is incorrect");
+        return;
+      }
+
+      String newPasswordValue = request->getParam("newPassword", true)->value();
+      if (newPasswordValue.length() == 0) {
+        request->send(400, "text/plain", "New password cannot be empty");
+        return;
+      }
+
+      otaPassword = newPasswordValue;
+      writeFile(LittleFS, otaPasswordPath, otaPassword.c_str());
+      SerialPrintln("OTA password changed");
+      request->send(200, "text/plain", "OTA password changed");
+    });
 
     delay(250);
     webServer.begin();
