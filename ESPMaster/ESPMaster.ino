@@ -566,7 +566,23 @@ void setup() {
     
     // Set sync interval but don't block
     setInterval(60); // Sync every 60 seconds
-    setDebug(INFO); // Set to INFO level for debugging
+
+    //BUG FIX, 2026-08-15: was setDebug(INFO). Live-caught via the new, reliable FTDI serial
+    //adapter (the old CH340 dropped too often to ever capture enough sustained output to
+    //notice this): ezTime's own internal INFO-level logging (updateNTP()'s "Received time: ...
+    //ms fast)" message, ezTime.cpp) was printing at an extreme rate - one 60s capture showed
+    //the same message's tail fragment (" ms fast)") repeated 44000+ times in a few minutes,
+    //right after a "Querying pool.ntp.org ... ERROR: No network" line (i.e. right around a
+    //WiFi hiccup) - while the full message's actual prefix only appeared 3 times, matching the
+    //genuine ~60s sync interval. Root cause not fully isolated inside ezTime's own event-
+    //scheduling code, but the practical effect is real regardless of the exact mechanism: tens
+    //of thousands of Serial writes per minute is real, wasted loop()/UART time that could
+    //plausibly starve everything else (web server responsiveness, I2C timing) - a strong
+    //candidate for a chunk of this whole project's hard-to-pin-down instability history.
+    //setDebug(NONE) stops ezTime's own internal logging at the source, regardless of how many
+    //times the underlying code path actually re-fires - our own SerialPrintln()-based DEBUG:
+    //logging elsewhere is unaffected.
+    setDebug(NONE);
     
     // Try to sync with timeout (non-blocking)
     unsigned long ntpStartTime = millis();
