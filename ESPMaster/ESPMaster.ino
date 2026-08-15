@@ -403,6 +403,9 @@ bool firmwareUpdateAuthFailed = false;
 #if UNIT_BOOTLOADER_ENABLE == true
 bool unitFirmwareUploadAuthFailed = false;
 #endif
+//BUG FIX, 2026-08-15: same reasoning, for /admin/upload-web-file - see the comment there
+//(BUGFIX_LOG.md #56).
+bool webFileUploadAuthFailed = false;
 
 // LED Debugging variables
 String debugStatus = "";
@@ -993,6 +996,69 @@ void setup() {
 
       request->send(202, "text/plain", "Offset sent. Unit is recalibrating now, this can take a few seconds.");
     });
+
+    //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #56): updating a static web UI file used to mean
+    //rebuilding and reflashing the *entire* littlefs.bin image - which would silently wipe every
+    //runtime file living in the same filesystem (alignment.txt, flapspeed.txt, devicemode.txt,
+    //countdown.txt, scheduled-messages.txt, debugmode.txt, crash-log.jsonl, unit-firmware.bin).
+    //This lets a single known static asset be replaced in place instead. Restricted to a fixed
+    //allowlist of the actual filenames in ESPMaster/data/ - deliberately NOT an arbitrary path,
+    //so this can never become a way to overwrite one of those runtime files.
+    webServer.on("/admin/upload-web-file", HTTP_POST,
+      [](AsyncWebServerRequest * request) {
+        if (webFileUploadAuthFailed) {
+          webFileUploadAuthFailed = false;
+          request->send(401, "text/plain", "Invalid password");
+          return;
+        }
+        request->send(200, "text/plain", "OK - file updated");
+      },
+      [](AsyncWebServerRequest * request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
+        static File webUploadFile;
+        static bool webUploadFilenameValid = false;
+
+        if (index == 0) {
+          webFileUploadAuthFailed = false;
+          if (String(otaPassword) != "") {
+            String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
+            if (providedPassword != String(otaPassword)) {
+              SerialPrintln("Web file upload rejected: invalid password");
+              webFileUploadAuthFailed = true;
+              return;
+            }
+          }
+
+          webUploadFilenameValid = (filename == "index.html" || filename == "script.js" ||
+            filename == "admin.html" || filename == "admin.js" || filename == "style.css");
+          if (!webUploadFilenameValid) {
+            SerialPrintln("Web file upload rejected: filename not in allowlist: " + filename);
+            request->send(400, "text/plain", "Filename must be one of the known static assets");
+            return;
+          }
+
+          SerialPrintln("DEBUG: Web file upload starting: " + filename);
+          webUploadFile = LittleFS.open("/" + filename, "w");
+          if (!webUploadFile) {
+            SerialPrintln("Web file upload: failed to open /" + filename + " for writing");
+          }
+        }
+
+        if (webFileUploadAuthFailed || !webUploadFilenameValid) {
+          return;
+        }
+
+        if (webUploadFile) {
+          webUploadFile.write(data, len);
+        }
+
+        if (final) {
+          if (webUploadFile) {
+            webUploadFile.close();
+          }
+          SerialPrintln("DEBUG: Web file upload finished: " + filename + ", total bytes: " + String(index + len));
+        }
+      }
+    );
 
 #if UNIT_BOOTLOADER_ENABLE == true
     // Admin: upload a compiled Unit.ino firmware image (raw AVR flash .bin, NOT the ESPMaster's own

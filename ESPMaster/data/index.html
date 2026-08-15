@@ -197,11 +197,14 @@
 				<div class="card card-full">
 					<p class="card-title">Serial Log (<span id="spanLogCount">0</span> messages)
 						<a href="/crash-log" target="_blank" style="float: right; padding: 5px 10px; font-size: 0.9em; margin-right: 5px;" title="Crash details captured on-device just before the last automatic reset - survives even if serial wasn't connected/reliable at the time">Crash Log</a>
-						<button id="btnToggleSerialLog" onclick="toggleSerialLog()" style="float: right; padding: 5px 10px; font-size: 0.9em; margin-right: 5px;">Hide</button>
+						<!-- BUG FIX, 2026-08-15: starts hidden now, see the comment on toggleSerialLog() in
+						script.js - the auto-refresh poll only runs while this panel is actually open, so a
+						"clock" tab left open no longer polls /log forever for a panel nobody is looking at. -->
+						<button id="btnToggleSerialLog" onclick="toggleSerialLog()" style="float: right; padding: 5px 10px; font-size: 0.9em; margin-right: 5px;">Show</button>
 						<button onclick="copySerialLog()" style="float: right; padding: 5px 10px; font-size: 0.9em; margin-right: 5px;">Copy Full Log</button>
 						<button onclick="refreshLog()" style="float: right; padding: 5px 10px; font-size: 0.9em; margin-right: 5px;">Refresh</button>
 					</p>
-					<div id="containerSerialLog" style="background-color: #1e1e1e; color: #d4d4d4; font-family: 'Courier New', monospace; font-size: 0.85em; padding: 10px; max-height: 400px; overflow-y: auto; border-radius: 4px;">
+					<div id="containerSerialLog" style="display: none; background-color: #1e1e1e; color: #d4d4d4; font-family: 'Courier New', monospace; font-size: 0.85em; padding: 10px; max-height: 400px; overflow-y: auto; border-radius: 4px;">
 						<div style="color: #888;">Loading log...</div>
 					</div>
 				</div>
