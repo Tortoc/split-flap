@@ -2,11 +2,185 @@
 const localDevelopment = false;
 
 var unitsData = [];
-var pollIntervalId = null;
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #66): true while ANY unit is recalibrating after an
+//offset change - disables every "Save & Recalibrate" button (not just the one being edited)
+//while true, so the UI itself can't trigger overlapping I2C operations. Doesn't fix the
+//underlying Wire.requestFrom() hang risk (a long-standing, deliberately-not-touched-again issue,
+//see BUGFIX_LOG.md's "compare upstream" lesson and the reverted fix in #40) - just avoids
+//provoking it from here. Became noticeably more likely to trigger with 3 units instead of 1
+//(more chances for a status poll to land while a different unit is mid-recalibration).
+var recalibrationInProgress = false;
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #61): moved here along with the Serial Log card itself -
+//see refreshLog()/toggleSerialLog()/copySerialLog() below.
+var fullSerialLogData = null; // Store full serial log for copying
+var serialLogInterval = null; // Holds the /log auto-refresh setInterval's id so it can be stopped
 
 window.addEventListener('load', function () {
 	loadUnits();
+	loadSystemActionVisibility();
+	loadCurrentOtaPassword();
 });
+
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #57): OTA Update / Reset WiFi moved here from index.html's
+//old "Actions" card, along with the show/hide logic that used to live in script.js
+//(showHideOtaUpdateAction()/showHideResetWifiSettingsAction()) - only relevant here now, since
+//these buttons no longer exist on the main page. Reads the same /settings fields
+//(otaEnabled/wifiSettingsResettable) the main page's initial load already used.
+function loadSystemActionVisibility() {
+	if (localDevelopment) {
+		return;
+	}
+
+	var xhrRequest = new XMLHttpRequest();
+	xhrRequest.onreadystatechange = function () {
+		if (this.readyState == 4 && this.status == 200) {
+			try {
+				var responseObject = JSON.parse(this.responseText);
+
+				var formOtaUpdate = document.getElementById("formOtaUpdate");
+				if (formOtaUpdate && !responseObject.otaEnabled) {
+					formOtaUpdate.classList.add("hidden");
+				}
+
+				var formResetWifi = document.getElementById("formResetWifi");
+				if (formResetWifi && !responseObject.wifiSettingsResettable) {
+					formResetWifi.classList.add("hidden");
+				}
+			} catch (e) {
+				// Non-critical - worst case both buttons stay visible even if not applicable.
+			}
+		}
+	};
+	xhrRequest.open("GET", "/settings", true);
+	xhrRequest.send();
+}
+
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #67): these three used to be real <form method="post">
+//submissions - the response was a full standalone HTML page meant for classic browser
+//navigation, so clicking any of them replaced the entire Administration page. On user request
+//("weniger neu laden, mehr auf der Seite bleiben"), converted to AJAX with the same confirm()
+//dialogs as before - the page itself never navigates away now, a banner message shows the result
+//inline instead.
+function triggerOtaMode() {
+	if (!confirm("Are you sure you want to put device in OTA mode?")) {
+		return;
+	}
+	postActionForBanner("/ota", "OTA mode started. Open your Arduino IDE, select the new network port, and upload as normal.");
+}
+
+function triggerResetWifi() {
+	if (!confirm("Are you sure you want to Reset WiFi settings?")) {
+		return;
+	}
+	postActionForBanner("/reset-wifi", "WiFi settings erased. The device is rebooting into AP setup mode now.");
+}
+
+function triggerResetUnits() {
+	if (!confirm("Are you sure you want to Reset Units?")) {
+		return;
+	}
+	postActionForBanner("/reset-units", "Units are resetting/recalibrating now - this only takes a few seconds.");
+}
+
+//Shared helper for the three simple fire-and-confirm admin actions above - POSTs with no body,
+//shows successMessage in the banner on success, or the server's error text on failure.
+function postActionForBanner(path, successMessage) {
+	if (localDevelopment) {
+		showBannerMessage(successMessage, true);
+		return;
+	}
+
+	var xhrRequest = new XMLHttpRequest();
+	xhrRequest.onreadystatechange = function () {
+		if (this.readyState == 4) {
+			if (this.status == 200) {
+				showBannerMessage(successMessage, true);
+			} else {
+				showBannerMessage("Failed: " + (this.responseText || ("Status " + this.status)));
+			}
+		}
+	};
+	xhrRequest.onerror = function () {
+		showBannerMessage("Network error.");
+	};
+	xhrRequest.open("POST", path, true);
+	xhrRequest.send();
+}
+
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #63): fetches and displays the currently-set OTA
+//password - freely, no authentication needed to view (on user request).
+function loadCurrentOtaPassword() {
+	var displayEl = document.getElementById("currentOtaPasswordDisplay");
+
+	if (localDevelopment) {
+		displayEl.innerText = "splitflap (simuliert)";
+		return;
+	}
+
+	var xhrRequest = new XMLHttpRequest();
+	xhrRequest.onreadystatechange = function () {
+		if (this.readyState == 4) {
+			if (this.status == 200) {
+				try {
+					var responseObject = JSON.parse(this.responseText);
+					displayEl.innerText = responseObject.otaPassword || "(leer)";
+				} catch (e) {
+					displayEl.innerText = "(konnte nicht geladen werden)";
+				}
+			} else {
+				displayEl.innerText = "(konnte nicht geladen werden)";
+			}
+		}
+	};
+	xhrRequest.open("GET", "/admin/ota-password", true);
+	xhrRequest.send();
+}
+
+//Changes the OTA password - requires the current password (read from the same "OTA-Passwort"
+//field used elsewhere on this page) for confirmation, same as every other admin action here.
+function changeOtaPassword() {
+	var currentPasswordInput = document.getElementById("firmwarePassword");
+	var newPasswordInput = document.getElementById("newOtaPassword");
+	var statusEl = document.getElementById("otaPasswordChangeStatus");
+
+	var newPassword = newPasswordInput.value;
+	if (!newPassword) {
+		alert("Bitte ein neues Passwort eingeben.");
+		return;
+	}
+
+	if (localDevelopment) {
+		statusEl.innerHTML = '<span class="status-online-ready">Passwort geändert (simuliert).</span>';
+		document.getElementById("currentOtaPasswordDisplay").innerText = newPassword;
+		newPasswordInput.value = "";
+		return;
+	}
+
+	statusEl.innerHTML = "";
+
+	var xhrRequest = new XMLHttpRequest();
+	xhrRequest.onreadystatechange = function () {
+		if (this.readyState == 4) {
+			if (this.status == 200) {
+				statusEl.innerHTML = '<span class="status-online-ready">Passwort geändert.</span>';
+				newPasswordInput.value = "";
+				loadCurrentOtaPassword();
+			} else if (this.status == 401) {
+				statusEl.innerHTML = '<span class="status-offline">Falsches aktuelles Passwort - siehe Feld "OTA-Passwort" oben.</span>';
+			} else {
+				statusEl.innerHTML = '<span class="status-offline">Fehlgeschlagen: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
+			}
+		}
+	};
+
+	xhrRequest.onerror = function () {
+		statusEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
+	};
+
+	xhrRequest.open("POST", "/admin/set-ota-password", true);
+	xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+	xhrRequest.send("currentPassword=" + encodeURIComponent(currentPasswordInput.value) + "&newPassword=" + encodeURIComponent(newPassword));
+}
 
 //Re-runs the I2C scan on the ESP to pick up units connected/fixed after boot, no reboot needed
 function rescanUnits() {
@@ -122,7 +296,9 @@ function renderUnits(responseObject) {
 		var button = document.createElement("button");
 		button.id = "unitButton" + unit.index;
 		button.innerText = "Save & Recalibrate";
-		button.disabled = !unit.online;
+		//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #66): disabled while ANY unit is recalibrating,
+		//not just when this particular one is offline - see recalibrationInProgress above.
+		button.disabled = !unit.online || recalibrationInProgress;
 		button.onclick = (function (unitIndex) {
 			return function () { saveOffset(unitIndex); };
 		})(unit.index);
@@ -185,6 +361,16 @@ function formatStatus(unit) {
 	return '<span class="status-offline">Unknown (' + unit.status + ')</span>';
 }
 
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #66): disables/enables every rendered unit's
+//"Save & Recalibrate" button immediately, without waiting for a full renderUnits() re-render -
+//see the comment on recalibrationInProgress above.
+function setAllUnitButtonsDisabled(disabled) {
+	var buttons = document.querySelectorAll('#containerUnits button[id^="unitButton"]');
+	for (var i = 0; i < buttons.length; i++) {
+		buttons[i].disabled = disabled;
+	}
+}
+
 //Sends a new offset for a single unit, then polls until it has finished recalibrating
 function saveOffset(unitIndex) {
 	var input = document.getElementById("unitInput" + unitIndex);
@@ -194,6 +380,14 @@ function saveOffset(unitIndex) {
 	// 2037 = UNIT_STEPS - 1 in ESPMaster.ino (28BYJ-48 stepper steps per revolution). Keep in sync.
 	if (isNaN(offsetValue) || offsetValue < 0 || offsetValue > 2037) {
 		alert("Please enter an offset between 0 and 2037.");
+		return;
+	}
+
+	//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #66): shouldn't normally be reachable since every
+	//button is disabled while this is true, but guard here too in case a click still slips
+	//through (e.g. a stale render).
+	if (recalibrationInProgress) {
+		showBannerMessage("Another unit is still recalibrating - please wait for it to finish first.");
 		return;
 	}
 
@@ -213,6 +407,13 @@ function saveOffset(unitIndex) {
 	xhrRequest.onreadystatechange = function () {
 		if (this.readyState == 4) {
 			if (this.status == 202) {
+				//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #66): lock every unit's button for the
+				//duration of this recalibration, not just the one just saved - prevents the UI
+				//itself from firing an overlapping status poll/offset-save against a different
+				//unit while this one is mid-recalibration (the actual trigger for the
+				//Wire.requestFrom() hang risk becoming a user-visible "network error").
+				recalibrationInProgress = true;
+				setAllUnitButtonsDisabled(true);
 				showBannerMessage("Unit " + unitIndex + " is recalibrating with the new offset, this can take a few seconds...");
 				pollUntilReady(unitIndex, button);
 			} else {
@@ -252,6 +453,10 @@ function pollUntilReady(unitIndex, button) {
 
 					if (unit && unit.online && unit.status !== 1) {
 						clearInterval(intervalId);
+						//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #66): release the lock before
+						//re-rendering, so renderUnits() re-enables every button based on each
+						//unit's actual online status again.
+						recalibrationInProgress = false;
 						renderUnits(responseObject);
 						showBannerMessage("Unit " + unitIndex + " is ready. Current offset: " + unit.offset, true);
 						return;
@@ -263,7 +468,10 @@ function pollUntilReady(unitIndex, button) {
 
 			if (attempts >= maxAttempts) {
 				clearInterval(intervalId);
-				button.disabled = false;
+				//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #66): release the lock on every button,
+				//not just this one - see recalibrationInProgress above.
+				recalibrationInProgress = false;
+				setAllUnitButtonsDisabled(false);
 				button.innerText = "Save & Recalibrate";
 				showBannerMessage("Timed out waiting for Unit " + unitIndex + " to finish recalibrating. Hit Refresh to check its status.");
 			}
@@ -440,6 +648,23 @@ function uploadUnitFirmware() {
 	xhr.send(formData);
 }
 
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #58): switches between updating a single selected unit
+//and updating every known unit sequentially - see pushUnitFirmwareAll() below.
+function setUnitFirmwareMode(mode) {
+	var singlePanel = document.getElementById("unitFirmwareModeSingle");
+	var allPanel = document.getElementById("unitFirmwareModeAll");
+	var resultEl = document.getElementById("unitFirmwareResult");
+
+	if (mode === "all") {
+		singlePanel.classList.add("hidden");
+		allPanel.classList.remove("hidden");
+	} else {
+		singlePanel.classList.remove("hidden");
+		allPanel.classList.add("hidden");
+	}
+	resultEl.innerHTML = "";
+}
+
 //Pushes the previously uploaded firmware to the selected unit over I2C
 function pushUnitFirmware() {
 	var select = document.getElementById("unitFirmwareTarget");
@@ -497,6 +722,113 @@ function pushUnitFirmware() {
 	xhr.send("id=" + encodeURIComponent(select.value));
 }
 
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #58): updates every known unit one after another, reusing
+//the exact same /unit-firmware-push call pushUnitFirmware() makes above - never fires more than
+//one push at a time (see the warning text in admin.html on why: only one unit's I2C transaction
+//should ever be in flight at once). Stops immediately on the first failure rather than continuing
+//to the next unit, so a partially-updated fleet is never silently left in a mixed state without
+//the operator noticing exactly where it stopped.
+function pushUnitFirmwareAll() {
+	var button = document.getElementById("unitFirmwarePushAllButton");
+	var progressEl = document.getElementById("unitFirmwareAllProgress");
+	var units = (unitsData && unitsData.units) || [];
+
+	if (units.length === 0) {
+		alert("Keine Units bekannt.");
+		return;
+	}
+
+	if (!confirm("Firmware jetzt nacheinander auf alle " + units.length + " Unit(s) übertragen? Das kann je nach Anzahl mehrere Minuten dauern.")) {
+		return;
+	}
+
+	var unitIndexes = units.map(function (u) { return u.index; });
+
+	if (localDevelopment) {
+		progressEl.innerHTML = "";
+		for (var i = 0; i < unitIndexes.length; i++) {
+			progressEl.innerHTML += '<p class="status-online-ready">Unit ' + unitIndexes[i] + ': ✓ erfolgreich (simuliert)</p>';
+		}
+		return;
+	}
+
+	button.disabled = true;
+	progressEl.innerHTML = "";
+
+	unitIndexes.forEach(function (unitIndex) {
+		var row = document.createElement("p");
+		row.id = "unitFirmwareAllRow" + unitIndex;
+		row.innerText = "Unit " + unitIndex + ": wartet...";
+		progressEl.appendChild(row);
+	});
+
+	pushUnitFirmwareAllStep(unitIndexes, 0, button);
+}
+
+//Processes one unit, then recurses into the next - kept sequential (not e.g. Promise.all) on
+//purpose, see the comment on pushUnitFirmwareAll() above.
+function pushUnitFirmwareAllStep(unitIndexes, stepIndex, button) {
+	if (stepIndex >= unitIndexes.length) {
+		button.disabled = false;
+		loadUnits();
+		return;
+	}
+
+	var unitIndex = unitIndexes[stepIndex];
+	var row = document.getElementById("unitFirmwareAllRow" + unitIndex);
+	row.innerText = "Unit " + unitIndex + ": Update läuft, bitte warten...";
+	row.className = "status-online-busy";
+
+	var xhr = new XMLHttpRequest();
+	xhr.onreadystatechange = function () {
+		if (this.readyState == 4) {
+			if (this.status == 401) {
+				row.innerText = "Unit " + unitIndex + ": abgelehnt - falsches OTA-Passwort.";
+				row.className = "status-offline";
+				button.disabled = false;
+				return; //Wrong password won't work for any other unit either - stop the batch here.
+			}
+
+			var success = false;
+			var message = "Antwort konnte nicht gelesen werden (Status " + this.status + ").";
+			try {
+				var responseObject = JSON.parse(this.responseText);
+				success = !!responseObject.success;
+				message = responseObject.success ? (responseObject.message || "Erfolgreich.") : (responseObject.error || "Fehlgeschlagen.");
+				if (typeof responseObject.pagesWritten !== "undefined" && typeof responseObject.totalPages !== "undefined") {
+					message += " (" + responseObject.pagesWritten + "/" + responseObject.totalPages + " Seiten)";
+				}
+			} catch (e) {
+				// message already has a fallback set above
+			}
+
+			row.innerText = "Unit " + unitIndex + ": " + (success ? "✓ " : "✗ ") + message;
+			row.className = success ? "status-online-ready" : "status-offline";
+
+			if (!success) {
+				button.disabled = false; //Stop the batch - see the comment on pushUnitFirmwareAll() above.
+				loadUnits();
+				return;
+			}
+
+			pushUnitFirmwareAllStep(unitIndexes, stepIndex + 1, button);
+		}
+	};
+
+	xhr.onerror = function () {
+		row.innerText = "Unit " + unitIndex + ": Netzwerkfehler.";
+		row.className = "status-offline";
+		button.disabled = false;
+	};
+
+	xhr.open("POST", "/unit-firmware-push", true);
+	xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+	//SECURITY FIX, 2026-08-13: same OTA password as the upload above and the ESPMaster update.
+	var passwordInput = document.getElementById("firmwarePassword");
+	xhr.setRequestHeader("X-OTA-Password", passwordInput ? passwordInput.value : "");
+	xhr.send("id=" + encodeURIComponent(unitIndex));
+}
+
 //Renders the JSON result of a firmware push in the result panel
 function renderUnitFirmwareResult(result) {
 	var resultEl = document.getElementById("unitFirmwareResult");
@@ -536,4 +868,119 @@ function simulateFirmwareUpload() {
 			button.disabled = false;
 		}
 	}, 300);
+}
+
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #61): moved here from script.js along with the "Serial
+//Log" card itself (now on the Administration page, on user request).
+
+// Fetch and display serial log
+function refreshLog() {
+	var xhrRequest = new XMLHttpRequest();
+	xhrRequest.onreadystatechange = function () {
+		if (this.readyState == 4 && this.status == 200) {
+			var responseObject = JSON.parse(this.responseText);
+			displaySerialLog(responseObject);
+		}
+	};
+
+	xhrRequest.open("GET", "/log", true);
+	xhrRequest.send();
+}
+
+// Display serial log messages
+function displaySerialLog(logData) {
+	var container = document.getElementById("containerSerialLog");
+	var countElement = document.getElementById("spanLogCount");
+
+	// Store full log data for copying
+	fullSerialLogData = logData;
+
+	countElement.innerText = logData.count || 0;
+
+	if (!logData.logs || logData.logs.length === 0) {
+		container.innerHTML = '<div style="color: #888;">No log messages yet.</div>';
+		return;
+	}
+
+	var html = "";
+	for (var i = 0; i < logData.logs.length; i++) {
+		var logEntry = logData.logs[i];
+		// Timestamp is in milliseconds since boot, format as seconds with 1 decimal
+		var timestampSec = (logEntry.timestamp / 1000).toFixed(1) + "s";
+		var message = logEntry.message || "";
+
+		// Escape HTML and add some color coding
+		message = escapeHtml(message);
+		if (message.indexOf("DEBUG:") >= 0) {
+			message = '<span style="color: #4ec9b0;">' + message + '</span>';
+		} else if (message.indexOf("ERROR") >= 0 || message.indexOf("Error") >= 0) {
+			message = '<span style="color: #f48771;">' + message + '</span>';
+		} else if (message.indexOf("WARNING") >= 0 || message.indexOf("Warning") >= 0) {
+			message = '<span style="color: #dcdcaa;">' + message + '</span>';
+		}
+
+		html += '<div style="margin-bottom: 4px; padding: 2px 0; border-bottom: 1px solid #333;">';
+		html += '<span style="color: #808080; margin-right: 10px;">[' + timestampSec + ']</span>';
+		html += message;
+		html += '</div>';
+	}
+
+	container.innerHTML = html;
+	// Auto-scroll to bottom
+	container.scrollTop = container.scrollHeight;
+}
+
+// Toggle serial log visibility - starts/stops the auto-refresh poll along with the panel itself
+// (see BUGFIX_LOG.md #56 for why that matters: it used to keep polling /log every 2s even while
+// hidden).
+function toggleSerialLog() {
+	var container = document.getElementById("containerSerialLog");
+	var button = document.getElementById("btnToggleSerialLog");
+
+	if (container.style.display === "none") {
+		container.style.display = "block";
+		if (button) button.textContent = "Hide";
+		refreshLog(); // Refresh immediately when showing
+		if (!serialLogInterval) {
+			serialLogInterval = setInterval(refreshLog, 2000);
+		}
+	} else {
+		container.style.display = "none";
+		if (button) button.textContent = "Show";
+		if (serialLogInterval) {
+			clearInterval(serialLogInterval);
+			serialLogInterval = null;
+		}
+	}
+}
+
+// Copy full serial log to clipboard
+function copySerialLog() {
+	if (!fullSerialLogData || !fullSerialLogData.logs || fullSerialLogData.logs.length === 0) {
+		alert("No log data available to copy.");
+		return;
+	}
+
+	var logText = "";
+	for (var i = 0; i < fullSerialLogData.logs.length; i++) {
+		var logEntry = fullSerialLogData.logs[i];
+		var timestampSec = (logEntry.timestamp / 1000).toFixed(1) + "s";
+		var message = logEntry.message || "";
+		logText += "[" + timestampSec + "] " + message + "\n";
+	}
+
+	// Copy to clipboard
+	var textArea = document.createElement("textarea");
+	textArea.value = logText;
+	textArea.style.position = "fixed";
+	textArea.style.opacity = "0";
+	document.body.appendChild(textArea);
+	textArea.select();
+	try {
+		document.execCommand('copy');
+		alert("Serial log copied to clipboard!");
+	} catch (err) {
+		alert("Failed to copy log. Please select and copy manually.");
+	}
+	document.body.removeChild(textArea);
 }

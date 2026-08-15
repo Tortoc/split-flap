@@ -1343,11 +1343,16 @@ void setup() {
     
     webServer.on("/reset-units", HTTP_POST, [](AsyncWebServerRequest * request) {
       SerialPrintln("Request to Reset Units Received");
-      
+
       //This will be picked up in the loop
       isPendingUnitsReset = true;
-      
-      request->redirect("/?is-resetting-units=true");
+
+      //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #67): this used to redirect to
+      //"/?is-resetting-units=true" for a classic full-page-navigation <form> submission on
+      //index.html - that form moved to the Administration page and now calls this via AJAX (see
+      //triggerResetUnits() in admin.js), so a redirect just meant an extra, pointless background
+      //fetch of index.html. Plain text response instead.
+      request->send(200, "text/plain", "Units are resetting/recalibrating now.");
     });
 
     webServer.on("/scheduled-message/remove", HTTP_DELETE, [](AsyncWebServerRequest * request) {
