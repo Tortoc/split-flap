@@ -1622,10 +1622,18 @@ void loop() {
   //possible.
   if (pendingRescanRequest != nullptr) {
     AsyncWebServerRequest* deferredRequest = pendingRescanRequest;
-    pendingRescanRequest = nullptr;
     pendingRescanRequestDisconnected = false; //this run's flag starts clean - see the comment near unitsAmount
 
     int detectedAmount = scanI2CBus();
+
+    //BUG FIX, 2026-08-15: don't release the guard slot until the (potentially slow) work above
+    //is actually done. Clearing it eagerly, before scanI2CBus() ran, left a window where a new
+    //incoming request's handler (line ~938) saw the slot as free and silently overwrote
+    //pendingRescanRequest with itself - orphaning *this* request (no send() ever called on it,
+    //client just times out) instead of getting the intended 503 "try again" rejection. Moving
+    //the reset here means new requests correctly see the slot as busy for the entire duration.
+    //See BUGFIX_LOG.md #50. Same fix applied to all 5 deferred-request handlers below.
+    pendingRescanRequest = nullptr;
 
     //BUG FIX, 2026-08-13: only call send() if the client is still actually there to receive it -
     //see the comment on pendingRescanRequestDisconnected near unitsAmount. If it disconnected
@@ -1641,7 +1649,6 @@ void loop() {
 
   if (pendingUnitsInfoRequest != nullptr) {
     AsyncWebServerRequest* deferredRequest = pendingUnitsInfoRequest;
-    pendingUnitsInfoRequest = nullptr;
     pendingUnitsInfoRequestDisconnected = false;
 
     JsonDocument doc;
@@ -1665,6 +1672,11 @@ void loop() {
       yield();
     }
 
+    //BUG FIX, 2026-08-15: see the comment on the matching line in the pendingRescanRequest
+    //block above - release the guard slot only once the (per-unit, I2C-bound, potentially slow)
+    //work above is actually finished, not before. See BUGFIX_LOG.md #50.
+    pendingUnitsInfoRequest = nullptr;
+
     //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near unitsAmount.
     if (!pendingUnitsInfoRequestDisconnected) {
       String jsonString;
@@ -1675,7 +1687,6 @@ void loop() {
 
   if (pendingLegacyI2CScanRequest != nullptr) {
     AsyncWebServerRequest* deferredRequest = pendingLegacyI2CScanRequest;
-    pendingLegacyI2CScanRequest = nullptr;
     pendingLegacyI2CScanRequestDisconnected = false;
 
     JsonDocument doc;
@@ -1714,6 +1725,11 @@ void loop() {
     doc["foundCount"] = foundCount;
     doc["expectedCount"] = unitsAmount;
 
+    //BUG FIX, 2026-08-15: see the comment on the matching line in the pendingRescanRequest
+    //block above - release the guard slot only once the (I2C-bound, potentially slow) work
+    //above is actually finished, not before. See BUGFIX_LOG.md #50.
+    pendingLegacyI2CScanRequest = nullptr;
+
     //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near unitsAmount.
     if (!pendingLegacyI2CScanRequestDisconnected) {
       String jsonString;
@@ -1726,7 +1742,6 @@ void loop() {
   if (pendingFirmwarePushRequest != nullptr) {
     AsyncWebServerRequest* deferredRequest = pendingFirmwarePushRequest;
     int unitIndex = pendingFirmwarePushUnitIndex;
-    pendingFirmwarePushRequest = nullptr;
     pendingFirmwarePushRequestDisconnected = false;
 
     SerialPrintln("Pushing firmware to Unit " + String(unitIndex) + "...");
@@ -1734,6 +1749,11 @@ void loop() {
     //Always runs to completion regardless of whether the client is still listening - see the
     //comment on the onDisconnect handler for /unit-firmware-push above.
     bool success = pushFirmwareToUnit(unitIndex, resultJson);
+
+    //BUG FIX, 2026-08-15: see the comment on the matching line in the pendingRescanRequest
+    //block above - release the guard slot only once the (potentially slow, minutes-long)
+    //firmware push above is actually finished, not before. See BUGFIX_LOG.md #50.
+    pendingFirmwarePushRequest = nullptr;
 
     //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near unitsAmount.
     if (!pendingFirmwarePushRequestDisconnected) {
@@ -1744,7 +1764,6 @@ void loop() {
   if (pendingBootloaderProbeRequest != nullptr) {
     AsyncWebServerRequest* deferredRequest = pendingBootloaderProbeRequest;
     int unitIndex = pendingBootloaderProbeUnitIndex;
-    pendingBootloaderProbeRequest = nullptr;
     pendingBootloaderProbeRequestDisconnected = false;
 
     SerialPrintln("Bootloader probe: requesting Unit " + String(unitIndex) + " to enter bootloader...");
@@ -1780,6 +1799,11 @@ void loop() {
       doc["bootloaderStart"] = chipInfo.bootloaderStart;
       doc["note"] = "Nothing was written. The unit returns to its normal app on its own within about a second of being left idle.";
     }
+
+    //BUG FIX, 2026-08-15: see the comment on the matching line in the pendingRescanRequest
+    //block above - release the guard slot only once the (multi-attempt, potentially slow)
+    //probe above is actually finished, not before. See BUGFIX_LOG.md #50.
+    pendingBootloaderProbeRequest = nullptr;
 
     //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near unitsAmount.
     if (!pendingBootloaderProbeRequestDisconnected) {
