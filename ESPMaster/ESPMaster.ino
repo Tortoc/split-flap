@@ -647,6 +647,18 @@ void setup() {
     SerialPrintln("DEBUG: Status = " + debugStatus);
     blinkLed(7, 200, 100); // 7 blinks = Web server starting
     
+    //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #60): this used to set .setCacheControl("no-cache")
+    //here to fix browsers serving a stale cached copy after a web-file update - worked, but
+    //REVERTED (see BUGFIX_LOG.md #69) after the user reported ERR_EMPTY_RESPONSE happening too
+    //often, live-reproduced as heap fragmentation climbing unusually fast (10%->20% within
+    //minutes) under repeated requests. AsyncStaticWebHandler's cache-control path adds real
+    //per-request overhead (If-None-Match header tracking, ETag computation, an extra
+    //AsyncBasicResponse allocation on 304s) - on this heap-constrained device that's a
+    //meaningfully worse trade than the (comparatively minor, dev-time-only) stale-cache
+    //inconvenience it was fixing. Taking the user's regression report seriously and reverting
+    //rather than defending the change - see the "take user regression reports seriously" lesson
+    //from earlier in this project. A manual hard-refresh after updating a web file is back to
+    //being necessary, same as before #60.
     webServer.serveStatic("/", LittleFS, "/");
     webServer.on("/", HTTP_GET, [](AsyncWebServerRequest * request) {
       unsigned long pageRequestStart = millis();
