@@ -10,10 +10,26 @@
 
 <body>
 	<div class="topnav float-container">
-		<h1 class="float-left">Split Flap UI</h1>
+		<div class="float-left">
+			<h1>Split Flap UI</h1>
+			<!-- Hamburger menu, replaces the old "Actions" card further down the page (moved
+			     2026-08-15, see BUGFIX_LOG.md #57) - Administration links to admin.html, which now
+			     also hosts Reset WiFi / Reset Unit Calibration / OTA Update alongside the Unit
+			     Calibration section that already lived there. Reboot stays directly reachable from
+			     every page. -->
+			<div class="kebab-menu">
+				<button type="button" id="btnKebabMenu" class="kebab-button" onclick="toggleKebabMenu()" aria-haspopup="true" aria-expanded="false" aria-label="Menu">&#9776;</button>
+				<div id="kebabMenuDropdown" class="kebab-dropdown hidden">
+					<a href="/admin.html">Administration</a>
+					<!-- SECURITY FIX, 2026-08-13 (preserved): POST form + confirm, not a plain GET link -
+					     see the comment that used to sit on the old Actions section for the full reasoning. -->
+					<form action="/reboot" method="post" class="kebab-form" onsubmit="return confirm('Are you sure you want reboot device?')">
+						<button type="submit">Reboot</button>
+					</form>
+				</div>
+			</div>
+		</div>
 		<h4 class="float-right" style="text-align: right;">
-			Version: <label id="labelVersion">N/A</label>
-			<br>
 			Units: <label id="labelUnits">N/A</label>
 			<br>
 			WiFi: <label id="labelWiFiStatus">N/A</label>
@@ -22,30 +38,14 @@
 		</h4>
 	</div>
 	<div class="content">
-		<!-- Page Load Error Log (shows JavaScript/network errors) -->
-		<div id="pageLoadErrorLog" style="background-color: #2d1b1b; color: #f48771; font-family: 'Courier New', monospace; font-size: 0.85em; padding: 10px; max-height: 200px; overflow-y: auto; border-radius: 4px; margin-bottom: 20px; border: 1px solid #f44336; display: none;">
-			<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-				<strong style="color: #f48771;">⚠️ Page Load Errors & Status</strong>
-				<button onclick="togglePageLoadLog()" style="padding: 4px 8px; font-size: 0.9em; background: #f44336; color: white; border: none; border-radius: 3px; cursor: pointer;">Hide</button>
-			</div>
-			<div id="pageLoadErrorContent" style="max-height: 150px; overflow-y: auto;">
-				<div style="color: #888;">No errors yet...</div>
-			</div>
-		</div>
-		
-		<!-- Debug Log Viewer (collapsible, shown during page load) -->
-		<div id="debugLogViewer" style="background-color: #1e1e1e; color: #d4d4d4; font-family: 'Courier New', monospace; font-size: 0.85em; padding: 10px; max-height: 200px; overflow-y: auto; border-radius: 4px; margin-bottom: 20px; border: 1px solid #3e3e42;">
-			<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-				<strong style="color: #4ec9b0;">Page Load Debug Log</strong>
-				<div>
-					<button onclick="copyDebugLog()" style="padding: 4px 8px; font-size: 0.9em; background: #0e639c; color: white; border: none; border-radius: 3px; cursor: pointer; margin-right: 5px;">Copy Full Log</button>
-					<button onclick="toggleDebugLog()" style="padding: 4px 8px; font-size: 0.9em; background: #0e639c; color: white; border: none; border-radius: 3px; cursor: pointer;">Hide</button>
-				</div>
-			</div>
-			<div id="debugLogContent" style="max-height: 150px; overflow-y: auto;">
-				<div style="color: #888;">Loading logs...</div>
-			</div>
-		</div>
+		<!-- BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #59): the "Page Load Errors & Status" and
+		     "Page Load Debug Log" panels used to live here - debugging aids from earlier sessions
+		     when this page genuinely failed to load intermittently. The latter polled /log every
+		     500ms for the entire loading phase, competing with the actual /settings request for
+		     the ESP's limited connection/CPU budget and measurably slowing every page load down.
+		     The board is far more stable now (see this session's heap/guard-slot fixes) - removed
+		     both rather than keep paying that cost on every load. logPageLoadStatus() still logs
+		     to the browser console for anyone debugging with devtools open. -->
 		<div id="initialLoading" class="lds-facebook"><div></div><div></div><div></div></div>
 
 		<div id="loadedContent" class="hidden">
@@ -154,34 +154,6 @@
 				</div>
 			</form>
 
-			<div class="card-grid">
-				<div class="card card-full">
-					<p class="card-title">Actions</p>
-
-					<div class="actions">
-						<!-- SECURITY FIX, 2026-08-13: these used to be plain GET <a href> links - any page
-						     loaded in the same browser could trigger them with no user interaction at all
-						     (CSRF via GET). Small POST forms instead; the browser still navigates on submit
-						     exactly like the old links did, so the resulting pages are unchanged. -->
-						<form action="/ota" method="post" class="action-form" onsubmit="return confirm('Are you sure you want to put device in OTA mode?')">
-							<button type="submit" id="linkActionOtaUpdate" class="action-link">OTA Update</button>
-						</form>
-						<form action="/reboot" method="post" class="action-form" onsubmit="return confirm('Are you sure you want reboot device?')">
-							<button type="submit" id="linkActionReboot" class="action-link">Reboot</button>
-						</form>
-						<form action="/reset-units" method="post" class="action-form" onsubmit="return confirm('Are you sure you want to Reset Units?')">
-							<button type="submit" id="linkActionUnitCalibration" class="action-link">Reset Unit Calibration</button>
-						</form>
-						<a id="linkActionAdmin" href="/admin.html">
-							Unit Calibration (Admin)
-						</a>
-						<form action="/reset-wifi" method="post" class="action-form" onsubmit="return confirm('Are you sure you want to Reset WiFi settings?')">
-							<button type="submit" id="linkActionResetWifi" class="action-link">Reset WiFi</button>
-						</form>
-					</div>
-				</div>
-			</div>
-
 			<form>
 				<div class="card-grid">
 					<div class="card card-full">
@@ -192,23 +164,9 @@
 					</div>
 				</div>
 			</form>
-
-			<div class="card-grid">
-				<div class="card card-full">
-					<p class="card-title">Serial Log (<span id="spanLogCount">0</span> messages)
-						<a href="/crash-log" target="_blank" style="float: right; padding: 5px 10px; font-size: 0.9em; margin-right: 5px;" title="Crash details captured on-device just before the last automatic reset - survives even if serial wasn't connected/reliable at the time">Crash Log</a>
-						<!-- BUG FIX, 2026-08-15: starts hidden now, see the comment on toggleSerialLog() in
-						script.js - the auto-refresh poll only runs while this panel is actually open, so a
-						"clock" tab left open no longer polls /log forever for a panel nobody is looking at. -->
-						<button id="btnToggleSerialLog" onclick="toggleSerialLog()" style="float: right; padding: 5px 10px; font-size: 0.9em; margin-right: 5px;">Show</button>
-						<button onclick="copySerialLog()" style="float: right; padding: 5px 10px; font-size: 0.9em; margin-right: 5px;">Copy Full Log</button>
-						<button onclick="refreshLog()" style="float: right; padding: 5px 10px; font-size: 0.9em; margin-right: 5px;">Refresh</button>
-					</p>
-					<div id="containerSerialLog" style="display: none; background-color: #1e1e1e; color: #d4d4d4; font-family: 'Courier New', monospace; font-size: 0.85em; padding: 10px; max-height: 400px; overflow-y: auto; border-radius: 4px;">
-						<div style="color: #888;">Loading log...</div>
-					</div>
-				</div>
-			</div>
+			<!-- BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #61): the "Serial Log" card used to live here -
+			     moved to the Administration page (admin.html) on user request, alongside the other
+			     diagnostic/admin tooling. -->
 		</div>
 	</div>
 	<script src="script.js" /></script>

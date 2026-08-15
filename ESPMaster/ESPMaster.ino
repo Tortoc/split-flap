@@ -225,8 +225,14 @@
 const char* wifiDirectSsid = "";
 const char* wifiDirectPassword = "";
 
-//Change if you want to have an Over The Air (OTA) Password for updates
-const char* otaPassword = "0424";
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #63): this used to be a compile-time const char* (fixed
+//value "0424", only changeable by re-flashing) - now runtime-changeable and persisted to
+//LittleFS, so it can be viewed/changed from the Administration page without needing the Arduino
+//toolchain. Default changed to "splitflap" on user request. Loaded from otaPasswordPath in
+//loadValuesFromFileSystem() (ServiceFileSystemFunctions.ino), same pattern as alignment/
+//flapSpeed/deviceMode.
+String otaPassword = "";
+const char* otaPasswordPath = "/otapassword.txt";
 
 //Change this to your timezone, use the TZ database name
 //https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
@@ -641,6 +647,18 @@ void setup() {
     SerialPrintln("DEBUG: Status = " + debugStatus);
     blinkLed(7, 200, 100); // 7 blinks = Web server starting
     
+    //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #60): this used to set .setCacheControl("no-cache")
+    //here to fix browsers serving a stale cached copy after a web-file update - worked, but
+    //REVERTED (see BUGFIX_LOG.md #69) after the user reported ERR_EMPTY_RESPONSE happening too
+    //often, live-reproduced as heap fragmentation climbing unusually fast (10%->20% within
+    //minutes) under repeated requests. AsyncStaticWebHandler's cache-control path adds real
+    //per-request overhead (If-None-Match header tracking, ETag computation, an extra
+    //AsyncBasicResponse allocation on 304s) - on this heap-constrained device that's a
+    //meaningfully worse trade than the (comparatively minor, dev-time-only) stale-cache
+    //inconvenience it was fixing. Taking the user's regression report seriously and reverting
+    //rather than defending the change - see the "take user regression reports seriously" lesson
+    //from earlier in this project. A manual hard-refresh after updating a web file is back to
+    //being necessary, same as before #60.
     webServer.serveStatic("/", LittleFS, "/");
     webServer.on("/", HTTP_GET, [](AsyncWebServerRequest * request) {
       unsigned long pageRequestStart = millis();
@@ -1325,11 +1343,16 @@ void setup() {
     
     webServer.on("/reset-units", HTTP_POST, [](AsyncWebServerRequest * request) {
       SerialPrintln("Request to Reset Units Received");
-      
+
       //This will be picked up in the loop
       isPendingUnitsReset = true;
-      
-      request->redirect("/?is-resetting-units=true");
+
+      //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #67): this used to redirect to
+      //"/?is-resetting-units=true" for a classic full-page-navigation <form> submission on
+      //index.html - that form moved to the Administration page and now calls this via AJAX (see
+      //triggerResetUnits() in admin.js), so a redirect just meant an extra, pointless background
+      //fetch of index.html. Plain text response instead.
+      request->send(200, "text/plain", "Units are resetting/recalibrating now.");
     });
 
     webServer.on("/scheduled-message/remove", HTTP_DELETE, [](AsyncWebServerRequest * request) {
@@ -1487,7 +1510,11 @@ void setup() {
       //If there was an error, report back to check what has been input
       if (submissionError) {
         SerialPrintln("Finished Processing Request with Error");
-        request->redirect("/?invalid-submission=" + true);
+        //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #68): this used to redirect to
+        //"/?invalid-submission=true" for a classic full-page-navigation <form> submission - every
+        //Enter-to-submit or Submit-click caused a visible full-page reload ("blinks", per user
+        //report). The form now submits via AJAX (see script.js) and shows this inline instead.
+        request->send(400, "text/plain", "Invalid submission - check the values you entered (e.g. schedule/countdown dates must be in the future).");
       }
       else {
         SerialPrintln("Finished Processing Request Successfully");
@@ -1540,8 +1567,12 @@ void setup() {
           }
         }
 
-        //Redirect so that we don't have the "re-submit form" problem in browser for refresh
-        request->redirect("/");
+        //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #68): this used to redirect to "/" - a classic
+        //Post/Redirect/Get pattern specifically to dodge the browser's "resubmit form?" prompt on
+        //refresh. That concern doesn't apply anymore now that the form submits via AJAX (see
+        //script.js) instead of a real navigation - refreshing after an AJAX POST is just a normal
+        //GET, no resubmission possible. Plain success response instead.
+        request->send(200, "text/plain", "OK");
       }
     });
 
@@ -1575,7 +1606,9 @@ void setup() {
 
         //If there is a password set, disabled by default for ease
         if (otaPassword != "") {
-          ArduinoOTA.setPassword(otaPassword);
+          //BUG FIX, 2026-08-15: otaPassword is now a String (was const char*, see the comment on
+          //its declaration) - .c_str() for the overload ArduinoOTA.setPassword() expects.
+          ArduinoOTA.setPassword(otaPassword.c_str());
         }
         
         SerialPrintln("Starting OTA Mode");
@@ -1648,7 +1681,46 @@ void setup() {
       request->send(200, "text/html", html);
       isPendingWifiReset = true;
     });
-#endif   
+#endif
+
+    //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #63): lets the Administration page show/change the
+    //OTA password at runtime, now that it's a persisted setting instead of a compile-time
+    //constant. Freely readable without authentication (on user request - this device has no
+    //separate login of its own, every other admin action already just checks this same shared
+    //password per-request) - changing it still requires the current password, same as every
+    //other state-changing admin action on this page.
+    webServer.on("/admin/ota-password", HTTP_GET, [](AsyncWebServerRequest * request) {
+      JsonDocument doc;
+      doc["otaPassword"] = otaPassword;
+      AsyncResponseStream *response = request->beginResponseStream("application/json");
+      serializeJson(doc, *response);
+      request->send(response);
+    });
+
+    webServer.on("/admin/set-ota-password", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (!request->hasParam("currentPassword", true) || !request->hasParam("newPassword", true)) {
+        request->send(400, "text/plain", "'currentPassword' and 'newPassword' are required");
+        return;
+      }
+
+      String currentPasswordValue = request->getParam("currentPassword", true)->value();
+      if (currentPasswordValue != otaPassword) {
+        SerialPrintln("OTA password change rejected: current password incorrect");
+        request->send(401, "text/plain", "Current password is incorrect");
+        return;
+      }
+
+      String newPasswordValue = request->getParam("newPassword", true)->value();
+      if (newPasswordValue.length() == 0) {
+        request->send(400, "text/plain", "New password cannot be empty");
+        return;
+      }
+
+      otaPassword = newPasswordValue;
+      writeFile(LittleFS, otaPasswordPath, otaPassword.c_str());
+      SerialPrintln("OTA password changed");
+      request->send(200, "text/plain", "OTA password changed");
+    });
 
     delay(250);
     webServer.begin();

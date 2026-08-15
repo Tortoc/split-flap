@@ -14,6 +14,9 @@ void loadValuesFromFileSystem() {
   alignment = readFile(LittleFS, alignmentPath, ALIGNMENT_MODE_LEFT);
   flapSpeed = readFile(LittleFS, flapSpeedPath, "80");
   deviceMode = readFile(LittleFS, deviceModePath, DEVICE_MODE_TEXT);
+  //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #63): otaPassword used to be a compile-time constant -
+  //now loaded here like every other persisted setting, default "splitflap" on first boot.
+  otaPassword = readFile(LittleFS, otaPasswordPath, "splitflap");
 
   String scheduledMessagesJson = readFile(LittleFS, scheduledMessagesPath, "");
   if (scheduledMessagesJson != "") {    

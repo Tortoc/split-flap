@@ -86,7 +86,7 @@ Remove the comment characters to help with your testing for the next step of Set
 
 The zero position (or blank flaps position in this case) is attained by driving the stepper to the hall sensor and step a few steps forward. This offset is individual to every unit and needs to be saved to the arduino nano's EEPROM.
 
-This used to require a separate `EEPROM_Write_Offset.ino` sketch uploaded over USB per unit. That sketch has been removed - instead, once `Unit.ino` and `ESPMaster.ino` are uploaded and wired up over I2C, open the ESPMaster web UI and go to **Actions > Unit Calibration (Admin)** (`/admin.html`). This page reads the live offset from every connected unit and lets you set a new one per unit directly from the browser.
+This used to require a separate `EEPROM_Write_Offset.ino` sketch uploaded over USB per unit. That sketch has been removed - instead, once `Unit.ino` and `ESPMaster.ino` are uploaded and wired up over I2C, open the ESPMaster web UI and go to the **⋮ menu > Administration** (`/admin.html`). This page reads the live offset from every connected unit and lets you set a new one per unit directly from the browser.
 
 A good starting value is usually around **100**, but yours may vary. Enter a value and hit "Save & Recalibrate" - the unit will immediately do a full rotation to re-home using the new offset, and the page will show you the confirmed value once it's done. Repeat until the blank flap is showing exactly right every time the unit homes.
 
