@@ -42,16 +42,28 @@ void requestUnitEnterBootloader(int unitIndex) {
 //momentarily put more than one unit in bootloader mode at once) - it only ever proceeds if
 //exactly one unit answers as a bootloader right now.
 //Returns the found address, or a negative sentinel: -1 = none found, -2 = more than one found.
+//
+//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #53): this used to call twibootReadChipInfo() - which
+//uses a repeated-start read (endTransmission(false) + requestFrom(), the exact pattern flagged
+//in esp8266/Arduino issue #5718 as able to leave the ESP8266's *software* I2C state stuck) -
+//against all 16 candidate addresses, even the (usually) 15 with nothing listening. Live-tested
+//today: doing that repeatedly, then immediately trying a real command against the one address
+//that *did* answer, consistently got "NACK on address" - the real unit's own address stopped
+//being acknowledged right after the scan touched it. Split into two passes instead: a cheap
+//presence-only check (plain beginTransmission()+endTransmission(), a full STOP each time - the
+//simple write-style pattern this project has always found reliable) against all 16 addresses
+//first, then the actual repeated-start chip-info read only once, against the single confirmed
+//candidate. Keeps the same multi-unit safety property (still checks all 16 for ambiguity) while
+//cutting the repeated-start operations from up to 16 down to at most 1 per scan.
 int scanForBootloaderAddress(TwibootChipInfo &infoOut) {
   int foundAddress = -1;
   int foundCount = 0;
 
   for (int address = UNIT_BOOTLOADER_BASE_ADDRESS; address < UNIT_BOOTLOADER_BASE_ADDRESS + 16; address++) {
-    TwibootChipInfo candidateInfo;
-    if (twibootReadChipInfo(address, candidateInfo)) {
+    Wire.beginTransmission(address);
+    if (Wire.endTransmission() == 0) {
       foundCount++;
       foundAddress = address;
-      infoOut = candidateInfo;
     }
     yield();
   }
@@ -61,6 +73,12 @@ int scanForBootloaderAddress(TwibootChipInfo &infoOut) {
   }
   if (foundCount > 1) {
     return -2;
+  }
+
+  if (!twibootReadChipInfo(foundAddress, infoOut)) {
+    //Answered the cheap presence check a moment ago but not the real chip-info read now -
+    //treat as not-found rather than returning a stale/empty infoOut.
+    return -1;
   }
   return foundAddress;
 }
@@ -138,11 +156,22 @@ bool twibootWriteFlashPage(int bootAddress, uint16_t flashAddress, const uint8_t
 
 //Jumps into the freshly written application - only ever call this after every page (including
 //page 0) has been written AND read back and verified.
+//
+//DIAGNOSTIC, 2026-08-15: twiboot's own source (main.c, TWI_data_write(), case CMD_SWITCH_APPLICATION)
+//deliberately NACKs the second (BOOTTYPE_APPLICATION) byte of this exact command - the internal
+//`cmd` state is updated *before* the NACK is returned, so a NACK here should be the *expected*,
+//correct result, not a real failure. Live-tested today and the unit did NOT return to the app
+//despite this - logging the exact endTransmission() code (2=NACK on address, 3=NACK on data,
+//other=a real problem) to tell those cases apart. See BUGFIX_LOG.md #53.
 bool twibootStartApplication(int bootAddress) {
   Wire.beginTransmission(bootAddress);
   Wire.write(TWIBOOT_CMD_SWITCH_APP);
   Wire.write(TWIBOOT_BOOTTYPE_APPLICATION);
-  return Wire.endTransmission() == 0;
+  uint8_t result = Wire.endTransmission();
+  SerialPrintln("DEBUG: twibootStartApplication() Wire.endTransmission() = " + String(result));
+  //A NACK on the data byte (3) is twiboot's documented, expected behavior for this specific
+  //command - treat it as success. Anything else (address NACK, timeout, etc.) is a real failure.
+  return result == 0 || result == 3;
 }
 
 //Pushes the firmware currently stored at unitFirmwarePath to the given unit over I2C.

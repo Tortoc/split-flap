@@ -780,15 +780,20 @@ void setup() {
         }
       }
       
-      String minimalJson;
-      serializeJson(minimalDoc, minimalJson);
-      
+      //HARDENING, 2026-08-15: switched from building a contiguous String (then handing it to
+      //send(), which copied it again) to beginResponseStream() - same fix as /log (BUGFIX_LOG.md
+      //#42/#44), applied here because this is the actual live equivalent of that bug: this is the
+      //response getCurrentSettingValues() *used to* build before something (predating this
+      //session) inlined the same logic directly into this handler instead - the standalone
+      //function is now dead code, never called. measureJson() gives the same size figure for the
+      //debug log without needing a full contiguous buffer just to measure it. See BUGFIX_LOG.md #52.
       unsigned long totalTime = millis() - settingsStart;
-      SerialPrintln("DEBUG: Settings response ready in " + String(totalTime) + "ms, JSON size: " + String(minimalJson.length()) + " bytes");
-      
-      request->send(200, "application/json", minimalJson);
-      minimalJson = String();
-      
+      SerialPrintln("DEBUG: Settings response ready in " + String(totalTime) + "ms, JSON size: " + String(measureJson(minimalDoc)) + " bytes");
+
+      AsyncResponseStream *response = request->beginResponseStream("application/json");
+      serializeJson(minimalDoc, *response);
+      request->send(response);
+
       SerialPrintln("DEBUG: Settings response sent (total: " + String(millis() - settingsStart) + "ms)");
       
       // Clear flag after request completes
@@ -1641,9 +1646,13 @@ void loop() {
     if (!pendingRescanRequestDisconnected) {
       JsonDocument doc;
       doc["unitsAmount"] = detectedAmount;
-      String jsonString;
-      serializeJson(doc, jsonString);
-      deferredRequest->send(200, "application/json", jsonString);
+      //HARDENING, 2026-08-15: same beginResponseStream() switch as /log (BUGFIX_LOG.md #42/#44) -
+      //avoids building the JSON into one contiguous String before send() copies it again. This
+      //response was always small so the crash was never observed here, but the risk is the same
+      //shape. See BUGFIX_LOG.md #52.
+      AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
+      serializeJson(doc, *response);
+      deferredRequest->send(response);
     }
   }
 
@@ -1679,9 +1688,11 @@ void loop() {
 
     //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near unitsAmount.
     if (!pendingUnitsInfoRequestDisconnected) {
-      String jsonString;
-      serializeJson(doc, jsonString);
-      deferredRequest->send(200, "application/json", jsonString);
+      //HARDENING, 2026-08-15: see the comment on the matching change in the pendingRescanRequest
+      //block above. See BUGFIX_LOG.md #52.
+      AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
+      serializeJson(doc, *response);
+      deferredRequest->send(response);
     }
   }
 
@@ -1732,9 +1743,11 @@ void loop() {
 
     //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near unitsAmount.
     if (!pendingLegacyI2CScanRequestDisconnected) {
-      String jsonString;
-      serializeJson(doc, jsonString);
-      deferredRequest->send(200, "application/json", jsonString);
+      //HARDENING, 2026-08-15: see the comment on the matching change in the pendingRescanRequest
+      //block above. See BUGFIX_LOG.md #52.
+      AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
+      serializeJson(doc, *response);
+      deferredRequest->send(response);
     }
   }
 
@@ -1797,7 +1810,45 @@ void loop() {
       doc["signature"] = sigBuf;
       doc["pageSize"] = chipInfo.pageSize;
       doc["bootloaderStart"] = chipInfo.bootloaderStart;
-      doc["note"] = "Nothing was written. The unit returns to its normal app on its own within about a second of being left idle.";
+
+      //BUG FIX, 2026-08-15 (research-based, see BUGFIX_LOG.md #53): the first live attempts got
+      //endTransmission()==2 ("NACK on address") when calling twibootStartApplication() right
+      //after the scan above - neither a 20ms/300ms settle delay nor recoverI2CBus() fixed it
+      //reliably. Online research (esp8266/Arduino issues #5718/#5528/#1025) turned up a known
+      //ESP8266 core bug class: repeated-start reads (exactly what twibootReadChipInfo() does -
+      //endTransmission(false) + requestFrom()) can leave the *software* I2C state machine
+      //(core_esp8266_si2c.c's internal state, not the physical bus lines) stuck, causing "NACK on
+      //address" on every subsequent transaction. scanForBootloaderAddress() deliberately keeps
+      //scanning all 16 possible addresses even after finding a match (to detect an ambiguous
+      //multi-unit response), so after a real hit it immediately does up to 15 more failed
+      //repeated-start attempts against addresses nothing is listening at - a very plausible
+      //trigger. recoverI2CBus() alone didn't help because it only re-inits Wire on the branch
+      //where it detects an actual *electrically* stuck bus (SDA held low) - if the physical
+      //lines already look idle (likely here, since nothing is actively holding them down) it
+      //returns early and never touches Wire's software state at all. Forcing an unconditional
+      //Wire.begin() here - bypassing that conditional entirely - targets the software-state
+      //theory directly instead of the physical-bus theory.
+      Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+#if UNIT_BOOTLOADER_ENABLE == true
+      Wire.setClockStretchLimit(25000);
+#endif
+
+      //BUG FIX, 2026-08-15: this used to just rely on twiboot's own ~1000ms since-last-activity
+      //timeout to return to the app on its own, and deliberately never called
+      //twibootStartApplication() - live-tested today (first real end-to-end test of this whole
+      //code path) and the unit did NOT come back on its own even after 44+ real seconds of
+      //complete I2C silence (confirmed both via repeated /admin/units reads failing and via a
+      //visible LED the user could see stayed lit). A power cycle was needed to recover it. Root
+      //cause not fully isolated (twiboot's own timeout logic vs. something specific to this
+      //build/hardware), but the fix doesn't require understanding why - just stop depending on a
+      //timeout that isn't reliable in practice and explicitly ask the bootloader to jump to the
+      //app right away, exactly like the real push flow (pushFirmwareToUnit()) already does on
+      //success. See BUGFIX_LOG.md #53.
+      bool returnedToApp = twibootStartApplication(bootAddress);
+      doc["returnedToApp"] = returnedToApp;
+      doc["note"] = returnedToApp
+        ? "Nothing was written. The unit was explicitly told to return to its app."
+        : "Nothing was written, but the explicit return-to-app command failed - the unit may still be sitting in the bootloader. Check /admin/units, or power-cycle the unit if it doesn't come back on its own.";
     }
 
     //BUG FIX, 2026-08-15: see the comment on the matching line in the pendingRescanRequest
@@ -1807,9 +1858,11 @@ void loop() {
 
     //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near unitsAmount.
     if (!pendingBootloaderProbeRequestDisconnected) {
-      String jsonString;
-      serializeJson(doc, jsonString);
-      deferredRequest->send(200, "application/json", jsonString);
+      //HARDENING, 2026-08-15: see the comment on the matching change in the pendingRescanRequest
+      //block above. See BUGFIX_LOG.md #52.
+      AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
+      serializeJson(doc, *response);
+      deferredRequest->send(response);
     }
   }
 #endif
