@@ -4,20 +4,27 @@ void initWiFi() {
 
   WiFi.mode(WIFI_STA);
 
-  //BUG FIX, 2026-08-14: researched live (per user request) why WiFi kept disconnecting and
-  //then failing to reconnect even with the loop()-side fix that stops giving up permanently
-  //(see BUGFIX_LOG.md #46) - repeated "Reconnection attempt N failed" every ~10s for many
-  //minutes straight, never recovering on its own. This is a well-documented ESP8266 pattern:
-  //the default WiFi modem-sleep power-saving mode periodically sleeps the radio between beacon
-  //intervals, which some routers/environments turn into missed beacons ("bcn_timeout") and
-  //disconnects that the radio then recovers from poorly. WIFI_NONE_SLEEP is the standard,
-  //widely-confirmed preventive fix (see esp8266/Arduino issues #5998, #5083) - addresses *why*
-  //it disconnects in the first place, not just recovery after the fact. Set as early as
-  //possible, before any connection attempt.
-  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+  //TRIED & REVERTED, 2026-08-16 (see BUGFIX_LOG.md #78): WiFi.setSleepMode(WIFI_NONE_SLEEP) was
+  //added 2026-08-14 to fix a *different* symptom (full disconnects that never self-recovered,
+  //"Reconnection attempt N failed" for minutes - BUGFIX_LOG.md #46). It forces the radio to stay
+  //continuously fully active instead of modem-sleeping between beacons - sustained higher
+  //current draw instead of periodic sleep/wake spikes. This line doesn't exist anywhere in the
+  //upstream evilscientress/split-flap repo. Given this session's power-supply-related findings
+  //(a unit stalling, an unexplained crash-log-silent reboot) and a newly-observed recurring
+  //~30-40s reachability cycle that persisted through a TX-power fix and a PSU upgrade, removed
+  //this to test whether it's contributing - if the original #46 symptom returns, it should look
+  //qualitatively different (occasional, minutes-long) and easy to tell apart from the ~30s cycle.
 
 #if WIFI_USE_DIRECT == false
   SerialPrintln("Setting up WiFi AP Setup Mode");
+
+  // TRIED & REVERTED, 2026-08-16 (see BUGFIX_LOG.md #78): tested WiFi.setOutputPower(20.5) here
+  // (max TX power - previously only set in the inactive WIFI_USE_DIRECT==true branch) against a
+  // recurring ~30s up/down reachability cycle. Several minutes of live monitoring showed no
+  // clear improvement (one ~3min good stretch, otherwise the same ~30s cycle), and research
+  // turned up reports of max TX power itself causing ESP8266 instability (RF amplifier current
+  // draw). Reverted to isolate whether the newly-installed 120W PSU (swapped in mid-session)
+  // makes a difference on its own, without this variable mixed in.
 
 #if WIFI_STATIC_IP == true
   wifiManager.setSTAStaticIPConfig(wifiDeviceStaticIp, wifiRouterGateway, wifiSubnet, wifiPrimaryDns);
@@ -56,10 +63,6 @@ void initWiFi() {
     SerialPrintln(WiFi.localIP());
 
     isWifiConfigured = true;
-
-    //Re-assert this after autoConnect() - WiFiManager does its own WiFi.begin()/mode calls
-    //internally, so set it again here in case any of that reset it back to a sleep mode.
-    WiFi.setSleepMode(WIFI_NONE_SLEEP);
   }
   
 #else
@@ -161,7 +164,6 @@ void initWiFi() {
       // Double-check connection is still good
       if (WiFi.status() == WL_CONNECTED) {
         isWifiConfigured = true;
-        WiFi.setSleepMode(WIFI_NONE_SLEEP);
       } else {
         SerialPrintln("DEBUG: WARNING - Connection lost immediately after connect!");
         isWifiConfigured = false;

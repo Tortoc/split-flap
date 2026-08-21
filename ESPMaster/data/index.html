@@ -4,48 +4,636 @@
 <head>
 	<title>Split-Flap</title>
 	<meta name="viewport" content="width=device-width, initial-scale=1" charset="utf-8" />
-	<link rel="icon" type="image/png" href="favicon.png" />
-	<link rel="stylesheet" type="text/css" href="style.css" />
+	<!-- Favicon inlined as a data URI, CSS/JS inlined below - keeps this page to 1 TCP connection
+	     to load (see BUGFIX_LOG.md #70/#71 for why that matters on this hardware). -->
+	<link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAABdElEQVQ4T82TsYrCUBBFb8BKUVMIKUIQbOxtLUUImqBiKst8gYU/INgI9mltLFQUMWJnJzYSS0UMNtpZCUqMIi5vZAO7W7jsNk73huHM3PtmuFgs9sA/gnsfQCAQQC6XgyRJ2Gw2GI1GuF6vJE6WZQiC8EXofr/HZDIBSQgGg+j3+1iv15jP50ilUvD7/SiVSgRptVpwXRer1cqDbLdb9Hq9J0DTNOi6jkwmQwU+n4/ojUYDpmkSYDgcot1u/7CbAOl0GrVaDYqi4HA4UFEkEsHlcsHpdHoN4DgO1WoVqqqS9sFgAMuyvG5sAgZeLBZertvtwnGcp4TPbDweR7FYRKFQwHQ6RaVSwf1+9zxYLpcewDAMnM/nJ4DnedxuN0qwYG82Sb1e/50HbPxwOIxyuex16HQ6GI/HaDabrz0QRZEcns1mpDORSCCZTCKfz5P2l7/A2oZCIVqkaDSK3W5HRh6PR5oom83Ctm3ak+/xRrfw14v+AL86ymEKl1vEAAAAAElFTkSuQmCC" />
+	<style>
+		/* Design tokens - everything below derives colors/spacing/radius from these. */
+		:root {
+			--color-primary: #F8880E;
+			--color-primary-hover: #FFB96D;
+			--color-on-primary: #FEFCFB;
+			--color-bg: #333;
+			--color-card-bg: #ffffff;
+			--color-text: #333;
+			--color-text-muted: #666;
+			--color-text-subtle: #555;
+			--color-border: #ccc;
+			--color-success: #2e7d32;
+			--color-warning: #ed6c02;
+			--color-danger: #c62828;
+			--color-note-bg: #fdf3e5;
+			--color-console-bg: #1e1e1e;
+			--color-console-text: #d4d4d4;
+
+			--space-xs: 4px;
+			--space-sm: 8px;
+			--space-md: 15px;
+			--space-lg: 24px;
+			--space-xl: 32px;
+
+			--radius-sm: 4px;
+
+			--font-size-sm: 0.85rem;
+			--font-size-note: 0.9rem;
+
+			--transition-fast: 0.4s;
+		}
+
+		html {
+			font-family: Arial, Helvetica, sans-serif;
+			display: inline-block;
+			text-align: center;
+		}
+
+		body {
+			background-color: var(--color-bg);
+			margin: 0;
+		}
+
+		h1 {
+			font-size: 1.9rem;
+			color: white;
+		}
+
+		p {
+			font-size: 1.4rem;
+		}
+
+		label {
+			font-size: 1.2rem;
+		}
+
+		input[type=submit],
+		a,
+		.action-link {
+			border: none;
+			color: var(--color-on-primary);
+			background-color: var(--color-primary);
+			padding: 15px 15px;
+			text-align: center;
+			text-decoration: none;
+			display: inline-block;
+			font-size: 16px;
+			width: 120px;
+			margin-right: 10px;
+			border-radius: var(--radius-sm);
+			transition-duration: var(--transition-fast);
+			font-family: inherit;
+		}
+
+		a,
+		.action-link {
+			padding: 5px;
+			background-color: var(--color-primary);
+		}
+
+		input[type=submit]:hover,
+		a:hover,
+		.action-link:hover {
+			background-color: var(--color-primary-hover);
+			cursor: pointer;
+		}
+
+		input[type=submit]:last-child,
+		a:last-child,
+		.action-form:last-child .action-link {
+			margin-right: 0;
+		}
+
+		/* `display: contents` makes the wrapping <form> (POST buttons, not GET links - CSRF hardening)
+		   invisible to layout, so .actions' flex row behaves like it did with bare <a> children. */
+		.actions form,
+		.card-title-actions form {
+			display: contents;
+		}
+
+		input[type=text],
+		select {
+			width: 50%;
+			padding: 12px 20px;
+			margin: 10px;
+			display: inline-block;
+			border: 1px solid var(--color-border);
+			border-radius: var(--radius-sm);
+			box-sizing: border-box;
+		}
+
+		input[type=radio],
+		input[type=checkbox] {
+			accent-color: orangered;
+		}
+
+		input[type=datetime-local] {
+			width: 150px;
+		}
+
+		.hidden {
+			display: none !important;
+		}
+
+		.topnav {
+			background-color: var(--color-primary);
+			padding: 0 10px;
+			font-size: 0.8em;
+			color: var(--color-text);
+		}
+
+		.topnav label {
+			font-size: 0.8em;
+		}
+
+		/* Pseudo-element clearfix, not overflow:hidden - that would clip the kebab dropdown below. */
+		.float-container::after {
+			content: "";
+			display: table;
+			clear: both;
+		}
+
+		.float-left {
+			float: left;
+		}
+
+		.float-right {
+			float: right;
+		}
+
+		/* Hamburger (3-line) menu, added 2026-08-15, moved under the "Split Flap UI" heading on
+		   2026-08-15 (see BUGFIX_LOG.md #57). Replaces the old "Actions" card; Administration/Reboot
+		   now live here instead. */
+		.kebab-menu {
+			position: relative;
+			display: inline-block;
+		}
+
+		.kebab-button {
+			width: auto;
+			margin: 0 0 var(--space-sm) 0;
+			padding: var(--space-xs) 10px;
+			font-size: 1.3rem;
+			line-height: 1;
+			background-color: transparent;
+			color: var(--color-text);
+			border: none;
+			border-radius: var(--radius-sm);
+			cursor: pointer;
+		}
+
+		.kebab-button:hover {
+			background-color: rgba(0, 0, 0, 0.1);
+		}
+
+		.kebab-dropdown {
+			position: absolute;
+			top: 100%;
+			left: 0;
+			z-index: 10;
+			min-width: 180px;
+			background-color: var(--color-card-bg);
+			border-radius: var(--radius-sm);
+			box-shadow: 2px 2px 10px 1px rgba(0, 0, 0, .3);
+			overflow: hidden;
+			text-align: left;
+		}
+
+		.kebab-dropdown a,
+		.kebab-dropdown button {
+			display: block;
+			width: 100%;
+			margin: 0;
+			padding: 12px 16px;
+			background-color: var(--color-card-bg);
+			color: var(--color-text);
+			border: none;
+			border-radius: 0;
+			text-align: left;
+			font-size: 1rem;
+			box-sizing: border-box;
+			cursor: pointer;
+		}
+
+		.kebab-dropdown a:hover,
+		.kebab-dropdown button:hover {
+			background-color: var(--color-note-bg);
+		}
+
+		.content {
+			padding: var(--space-md) 25px 25px 25px;
+		}
+
+		.banner-message {
+			max-width: 800px;
+			margin: 0 auto 15px auto;
+			background-color: var(--color-primary);
+			padding: 10px 10px;
+		}
+
+		.card-grid {
+			max-width: 800px;
+			margin: 0 auto var(--space-xl) auto;
+			display: grid;
+			grid-gap: 2rem;
+			grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+		}
+
+		.card-grid + .card-grid,
+		.info-box + .card-grid {
+			margin-top: var(--space-xl);
+		}
+
+		.card {
+			background-color: var(--color-card-bg);
+			box-shadow: 2px 2px 10px 1px rgba(230, 230, 230, .5);
+		}
+
+		.card.card-full {
+			grid-column: span 2;
+		}
+
+		.card-title {
+			font-size: 1.2rem;
+			font-weight: bold;
+			color: var(--color-primary);
+		}
+
+		/* Card header row: title + right-aligned button group, DOM order = visual order. */
+		.card-title-actions {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			flex-wrap: wrap;
+			gap: var(--space-sm);
+		}
+
+		.card-title-actions .card-title-buttons {
+			display: flex;
+			align-items: center;
+			gap: var(--space-sm);
+			flex-wrap: wrap;
+		}
+
+		.btn-small,
+		.btn-small.action-link {
+			width: auto;
+			margin: 0;
+			padding: 5px 10px;
+			font-size: 0.9em;
+			font-weight: normal;
+		}
+
+		.card .count {
+			display: block;
+			font-size: 14px;
+		}
+		.card .count label {
+			font-size: 14px;
+		}
+
+		.alignment-inputs {
+			text-align: left;
+			margin: auto;
+			width: 40%;
+			line-height: 0.6;
+			white-space: nowrap;
+		}
+
+		.devicemode {
+			padding-bottom: 20px;
+		}
+
+		.value {
+			font-size: 1.2rem;
+			color: #1282A2;
+		}
+
+		.slider {
+			-webkit-appearance: none;
+			margin: 0 auto;
+			width: 90%;
+			height: 17px;
+			border-radius: 10px;
+			background: #FFD65C;
+			outline: none;
+		}
+
+		.slider::-webkit-slider-thumb {
+			-webkit-appearance: none;
+			appearance: none;
+			width: 25px;
+			height: 25px;
+			border-radius: 50%;
+			background: var(--color-primary);
+			cursor: pointer;
+		}
+
+		.slider::-moz-range-thumb {
+			width: 25px;
+			height: 25px;
+			border-radius: 50%;
+			background: #034078;
+			cursor: pointer;
+		}
+
+		.switch {
+			padding-left: 5%;
+			padding-right: 5%;
+		}
+
+		.scheduled-messages {
+			width: 100%;
+			padding-bottom: 5px;
+		}
+
+		.scheduled-messages .message:last-child {
+			padding-bottom: 0;
+		}
+
+		.message {
+			padding: 5px;
+			margin: 5px;
+			display: flex;
+			align-content: center;
+			align-items: stretch;
+		}
+
+		.message .time {
+			padding: 5px;
+			width: calc(30% - 10px);
+			background-color: var(--color-primary-hover);
+			display: flex;
+			align-items: center;
+			justify-content: center;
+		}
+
+		.message .text {
+			text-align: left;
+			padding: 5px;
+			width: calc(50% - 10px);
+			background-color: var(--color-card-bg);
+		}
+
+		.message .action {
+			text-align: right;
+			width: calc(20% - 10px);
+			display: flex;
+			justify-content: end;
+		}
+
+		.message .action .remove-button {
+			width: 90px;
+			padding: 5px 10px;
+			border: none;
+			color: var(--color-on-primary);
+			background-color: var(--color-primary);
+			text-align: center;
+			text-decoration: none;
+			font-size: 16px;
+			border-radius: var(--radius-sm);
+			transition-duration: var(--transition-fast);
+			justify-content: center;
+			align-items: center;
+			display: flex;
+		}
+
+		.message .action .remove-button:hover {
+			background-color: var(--color-primary-hover);
+			cursor: pointer;
+		}
+
+		.actions {
+			display: flex;
+			justify-content: center;
+			padding: 0 10px 10px 10px;
+		}
+
+		.actions a,
+		.actions .action-link {
+			display: flex;
+			justify-content: center;
+			align-items: center;
+			height: 35px;
+		}
+
+		@media (max-width: 700px) {
+			.message {
+				flex-wrap: wrap;
+				padding-bottom: 20px;
+				border-bottom: 1px solid var(--color-primary);
+			}
+
+			.message:last-child {
+				border-bottom: none;
+			}
+
+			.message .time {
+				width: 100%;
+			}
+
+			.message .text {
+				width: 100%;
+			}
+
+			.message .action {
+				width: 100%;
+				justify-content: center;
+			}
+		}
+
+		/* Loading Processing CSS from https://loading.io/css/ */
+		.lds-facebook {
+			display: inline-block;
+			position: relative;
+			width: 80px;
+			height: 45px;
+		}
+
+		.lds-facebook div {
+			display: inline-block;
+			position: absolute;
+			left: 8px;
+			width: 12px;
+			background: var(--color-primary);
+			animation: lds-facebook 1.2s cubic-bezier(0, 0.5, 0.5, 1) infinite;
+		}
+
+		.lds-facebook div:nth-child(1) {
+			left: 15px;
+			animation-delay: -0.24s;
+		}
+
+		.lds-facebook div:nth-child(2) {
+			left: 34px;
+			animation-delay: -0.12s;
+		}
+
+		.lds-facebook div:nth-child(3) {
+			left: 53px;
+			animation-delay: 0;
+		}
+
+		@keyframes lds-facebook {
+			0% {
+				top: 8px;
+				height: 64px;
+			}
+			50%, 100% {
+				top: 24px;
+				height: 32px;
+			}
+		}
+
+		.unit-row {
+			padding: 5px;
+			margin: 5px;
+			display: flex;
+			flex-wrap: wrap;
+			align-content: center;
+			align-items: center;
+			border-bottom: 1px solid #eee;
+		}
+
+		.unit-row:last-child {
+			border-bottom: none;
+		}
+
+		.unit-row .unit-label {
+			text-align: left;
+			width: 160px;
+			font-weight: bold;
+		}
+
+		.unit-row .unit-status {
+			width: 160px;
+			text-align: left;
+		}
+
+		.unit-row .unit-offset {
+			width: 120px;
+			text-align: left;
+		}
+
+		.unit-row .unit-input {
+			display: flex;
+			align-items: center;
+			gap: var(--space-sm);
+		}
+
+		.unit-row input[type=number] {
+			width: 90px;
+			padding: var(--space-sm) 10px;
+			border: 1px solid var(--color-border);
+			border-radius: var(--radius-sm);
+			box-sizing: border-box;
+		}
+
+		.unit-row button,
+		.btn-primary {
+			border: none;
+			color: var(--color-on-primary);
+			background-color: var(--color-primary);
+			padding: var(--space-sm) 15px;
+			text-align: center;
+			border-radius: var(--radius-sm);
+			cursor: pointer;
+			font-size: 14px;
+			transition-duration: var(--transition-fast);
+		}
+
+		.unit-row button:hover,
+		.btn-primary:hover {
+			background-color: var(--color-primary-hover);
+		}
+
+		.unit-row button:disabled,
+		.btn-primary:disabled {
+			background-color: var(--color-border);
+			cursor: not-allowed;
+		}
+
+		.status-online-ready {
+			color: var(--color-success);
+			font-weight: bold;
+		}
+
+		.status-online-busy {
+			color: var(--color-warning);
+			font-weight: bold;
+		}
+
+		.status-offline {
+			color: var(--color-danger);
+			font-weight: bold;
+		}
+
+		.info-box {
+			text-align: left;
+			font-size: 1rem;
+			background-color: var(--color-note-bg);
+			border: 1px solid var(--color-primary);
+			border-radius: var(--radius-sm);
+			padding: 10px var(--space-md);
+			margin: var(--space-md) auto 0 auto;
+			max-width: 770px;
+		}
+
+		.note {
+			font-size: var(--font-size-note);
+			color: var(--color-text-subtle);
+		}
+
+		.note-muted {
+			font-size: var(--font-size-note);
+			color: var(--color-text-muted);
+		}
+
+		.note-danger {
+			font-size: 1rem;
+			color: var(--color-danger);
+		}
+
+		/* Dark, monospace console-style panel - used by the Serial Log card. */
+		.console-panel {
+			background-color: var(--color-console-bg);
+			color: var(--color-console-text);
+			font-family: 'Courier New', monospace;
+			font-size: var(--font-size-sm);
+			padding: 10px;
+			max-height: 400px;
+			overflow-y: auto;
+			border-radius: var(--radius-sm);
+		}
+	</style>
 </head>
 
 <body>
-	<div class="topnav float-container">
-		<div class="float-left">
-			<h1>Split Flap UI</h1>
-			<!-- Hamburger menu, replaces the old "Actions" card further down the page (moved
-			     2026-08-15, see BUGFIX_LOG.md #57) - Administration links to admin.html, which now
-			     also hosts Reset WiFi / Reset Unit Calibration / OTA Update alongside the Unit
-			     Calibration section that already lived there. Reboot stays directly reachable from
-			     every page. -->
-			<div class="kebab-menu">
-				<button type="button" id="btnKebabMenu" class="kebab-button" onclick="toggleKebabMenu()" aria-haspopup="true" aria-expanded="false" aria-label="Menu">&#9776;</button>
-				<div id="kebabMenuDropdown" class="kebab-dropdown hidden">
-					<a href="/admin.html">Administration</a>
-					<!-- SECURITY FIX, 2026-08-13 (preserved): POST form + confirm, not a plain GET link -
-					     see the comment that used to sit on the old Actions section for the full reasoning. -->
-					<form action="/reboot" method="post" class="kebab-form" onsubmit="return confirm('Are you sure you want reboot device?')">
-						<button type="submit">Reboot</button>
-					</form>
+	<!-- #mainView and #adminView are sibling containers, exactly one visible at a time via
+	     showAdminView()/hideAdminView() - no navigation, no extra HTTP connections (BUGFIX_LOG.md #72). -->
+	<div id="mainView">
+		<div class="topnav float-container">
+			<div class="float-left">
+				<h1>Split Flap UI</h1>
+				<!-- Hamburger menu, replaces the old "Actions" card further down the page (moved
+				     2026-08-15, see BUGFIX_LOG.md #57). Reboot stays directly reachable from every
+				     page. -->
+				<div class="kebab-menu">
+					<button type="button" id="btnKebabMenu" class="kebab-button" onclick="toggleKebabMenu()" aria-haspopup="true" aria-expanded="false" aria-label="Menu">&#9776;</button>
+					<div id="kebabMenuDropdown" class="kebab-dropdown hidden">
+						<a href="#" onclick="showAdminView(); return false;">Administration</a>
+						<form action="/api/reboot" method="post" class="kebab-form" onsubmit="return confirm('Are you sure you want reboot device?')">
+							<button type="submit">Reboot</button>
+						</form>
+					</div>
 				</div>
 			</div>
+			<h4 class="float-right" style="text-align: right;">
+				Units: <label id="labelUnits">N/A</label>
+				<br>
+				WiFi: <label id="labelWiFiStatus">N/A</label>
+				<br>
+				Last Received: <label id="labelLastMessageReceived">N/A</label>
+			</h4>
 		</div>
-		<h4 class="float-right" style="text-align: right;">
-			Units: <label id="labelUnits">N/A</label>
-			<br>
-			WiFi: <label id="labelWiFiStatus">N/A</label>
-			<br>
-			Last Received: <label id="labelLastMessageReceived">N/A</label>
-		</h4>
-	</div>
-	<div class="content">
-		<!-- BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #59): the "Page Load Errors & Status" and
-		     "Page Load Debug Log" panels used to live here - debugging aids from earlier sessions
-		     when this page genuinely failed to load intermittently. The latter polled /log every
-		     500ms for the entire loading phase, competing with the actual /settings request for
-		     the ESP's limited connection/CPU budget and measurably slowing every page load down.
-		     The board is far more stable now (see this session's heap/guard-slot fixes) - removed
-		     both rather than keep paying that cost on every load. logPageLoadStatus() still logs
-		     to the browser console for anyone debugging with devtools open. -->
+		<div class="content">
 		<div id="initialLoading" class="lds-facebook"><div></div><div></div><div></div></div>
 
 		<div id="loadedContent" class="hidden">
@@ -104,7 +692,7 @@
 							<input onchange="setDeviceModeTab(this.value)" type="radio" id="modeText" name="deviceMode" value="text" />
 							<label for="modeText">Text Mode</label>
 						</p>
-						
+
 						<div id="tab-text" class="tab">
 							<p>
 								<label for="inputText"></label>
@@ -133,7 +721,7 @@
 										<input type="hidden" id="inputHiddenScheduledDateTimeUnix" name="scheduledDateTimeUnix" value="0" />
 									</p>
 								</div>
-							</p>				
+							</p>
 						</div>
 
 						<div id="tab-countdown" class="tab hidden">
@@ -144,12 +732,12 @@
 								<input type="hidden" id="inputHiddenCountdownDateTimeUnix" name="countdownDateTimeUnix" value="0" />
 							</p>
 						</div>
-		
+
 						<p>
 							<div id="containerSubmit">
 								<input type="submit" value="Submit" />
 							</div>
-						</p>		
+						</p>
 					</div>
 				</div>
 			</form>
@@ -164,12 +752,1836 @@
 					</div>
 				</div>
 			</form>
-			<!-- BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #61): the "Serial Log" card used to live here -
-			     moved to the Administration page (admin.html) on user request, alongside the other
-			     diagnostic/admin tooling. -->
 		</div>
 	</div>
-	<script src="script.js" /></script>
+	</div>
+	<!-- #adminBannerMessage/#adminInitialLoading/#adminLoadedContent are prefixed to avoid
+	     colliding with #mainView's own #bannerMessage/#initialLoading/#loadedContent. -->
+	<div id="adminView" class="hidden">
+		<div class="topnav float-container">
+			<h1 class="float-left">Split Flap - Administration</h1>
+			<h4 class="float-right" style="text-align: right;">
+				<a href="#" onclick="hideAdminView(); return false;">&laquo; Back to Home</a>
+			</h4>
+		</div>
+		<div class="content">
+			<div id="adminInitialLoading" class="lds-facebook">
+				<div></div>
+				<div></div>
+				<div></div>
+			</div>
+
+			<div id="adminLoadedContent" class="hidden">
+				<div id="adminBannerMessage" class="banner-message hidden"></div>
+
+				<div class="card-grid">
+					<div class="card card-full">
+						<p class="card-title">System</p>
+
+						<div class="actions">
+							<button id="formOtaUpdate" type="button" class="action-link" onclick="triggerOtaMode()">OTA Update</button>
+							<button id="formResetWifi" type="button" class="action-link" onclick="triggerResetWifi()">Reset WiFi</button>
+						</div>
+
+						<div style="text-align: left; padding: 15px 15px 0 15px;">
+							<p>
+								<label>Aktuell eingestellte Zeitzone</label>
+								<br>
+								<span id="currentTimezoneDisplay" style="font-family: monospace; font-size: 1.1rem;">wird geladen...</span>
+							</p>
+							<p>
+								<label for="newTimezone">Zeitzone ändern</label>
+								<br>
+								<input type="text" id="newTimezone" style="width: 250px;" placeholder="z.B. Europe/Berlin" />
+								<button class="btn-primary" onclick="changeTimezone()">Ändern</button>
+							</p>
+							<p class="note">
+								TZ-Datenbank-Name, siehe
+								<a href="https://en.wikipedia.org/wiki/List_of_tz_database_time_zones" target="_blank" rel="noopener">Liste der TZ-Datenbank-Zeitzonen</a>.
+							</p>
+							<p id="timezoneChangeStatus"></p>
+						</div>
+					</div>
+				</div>
+
+				<div class="card-grid">
+					<div class="card card-full">
+						<div class="card-title card-title-actions">
+							<span>Units</span>
+							<span class="card-title-buttons">
+								<button type="button" class="btn-small" onclick="triggerResetUnits()">Reset Unit Calibration</button>
+								<button onclick="rescanUnits()" class="btn-small">Rescan Units</button>
+								<button onclick="loadUnits()" class="btn-small">Refresh</button>
+							</span>
+						</div>
+						<p class="note-muted" style="text-align: left; padding: 0 15px;">
+							Units werden automatisch beim Start von ESPMaster über I2C erkannt (fortlaufend ab Adresse 0).
+							Falls eine Unit erst nachträglich angeschlossen oder repariert wurde, hier "Rescan Units"
+							klicken statt neu zu starten.
+						</p>
+
+						<div id="containerUnits"></div>
+					</div>
+				</div>
+
+				<div class="info-box">
+					<b>Wie funktioniert das?</b> Der Offset ist die Nullposition der Trommel relativ zum
+					Hall-Sensor, in Motorschritten. Ein guter Startwert liegt meist um die <b>100</b>. Nach dem
+					Speichern fährt die Einheit sofort eine komplette Umdrehung, um sich mit dem neuen Offset neu
+					zu kalibrieren - das ist normal und dauert ein paar Sekunden. Prüfe danach, ob die Leerzeichen-Klappe
+					exakt in der Anzeige steht, und passe den Wert bei Bedarf weiter an.
+				</div>
+
+				<div class="card-grid" style="margin-top: 2rem;">
+					<div class="card card-full">
+						<p class="card-title">Firmware Update (ESPMaster)</p>
+
+						<div style="text-align: left; padding: 0 15px 15px 15px;">
+							<p style="font-size: 1rem;">
+								Lädt eine kompilierte <code>.bin</code>-Datei (Sketch, exportiert über
+								<i>Sketch &gt; Export compiled Binary</i> in der Arduino IDE) direkt per Browser
+								auf das ESPMaster-Modul hoch. Kein Arduino IDE oder USB-Kabel nötig.
+							</p>
+							<p class="note-danger">
+								<b>Während des Uploads nicht die Stromversorgung trennen oder die Seite schließen.</b>
+								Schlägt der Upload fehl, bleibt die aktuell laufende Firmware unverändert aktiv.
+							</p>
+
+							<p>
+								<label for="firmwarePassword">OTA-Passwort (falls konfiguriert)</label>
+								<br>
+								<input type="password" id="firmwarePassword" autocomplete="off" style="width: 250px;" />
+							</p>
+
+							<p style="margin-top: 1.5em;">
+								<label>Aktuell gesetztes OTA-Passwort</label>
+								<br>
+								<span id="currentOtaPasswordDisplay" style="font-family: monospace; font-size: 1.1rem;">wird geladen...</span>
+							</p>
+
+							<p>
+								<label for="newOtaPassword">Neues OTA-Passwort setzen</label>
+								<br>
+								<input type="password" id="newOtaPassword" autocomplete="new-password" style="width: 250px;" placeholder="Neues Passwort" />
+								<button class="btn-primary" onclick="changeOtaPassword()">Ändern</button>
+							</p>
+							<p class="note">
+								Zum Ändern wird das aktuelle "OTA-Passwort" oben zur Bestätigung benötigt.
+							</p>
+							<p id="otaPasswordChangeStatus"></p>
+
+							<p>
+								<label for="firmwareFile">Firmware-Datei (.bin)</label>
+								<br>
+								<input type="file" id="firmwareFile" accept=".bin" />
+							</p>
+
+							<p>
+								<button id="firmwareUploadButton" class="btn-primary" onclick="uploadFirmware()">Firmware hochladen</button>
+							</p>
+
+							<div id="firmwareProgressContainer" class="hidden" style="margin-top: 10px;">
+								<div style="background: #eee; border-radius: 4px; overflow: hidden; height: 24px; max-width: 400px; margin: 0 auto;">
+									<div id="firmwareProgressBar" style="background: #F8880E; height: 100%; width: 0%; color: white; font-size: 0.85em; line-height: 24px; transition: width 0.2s;"></div>
+								</div>
+							</div>
+
+							<p id="firmwareStatus" style="margin-top: 10px;"></p>
+						</div>
+					</div>
+				</div>
+
+				<div class="card-grid" style="margin-top: 2rem;">
+					<div class="card card-full">
+						<p class="card-title">Unit Firmware Update (I2C / twiboot)</p>
+
+						<div style="text-align: left; padding: 0 15px 15px 15px;">
+							<p style="font-size: 1rem;">
+								Überträgt ein kompiliertes <code>Unit.ino</code>-Firmware-Image (rohes
+								AVR-Flash-<code>.bin</code>, siehe <code>Unit/BOOTLOADER_SETUP.md</code>) über I2C
+								auf eine einzelne Unit. Setzt voraus, dass diese Unit bereits einmalig mit dem
+								twiboot-Bootloader per ISP-Programmer vorbereitet wurde.
+							</p>
+							<p class="note-danger">
+								<b>Units werden immer nacheinander aktualisiert, nie gleichzeitig.</b> Während der
+								Übertragung Stromversorgung nicht unterbrechen. Schlägt die Verifikation fehl, bleibt
+								die bisherige Firmware der betroffenen Unit unangetastet (die kritische erste Seite
+								wird immer zuletzt geschrieben, erst wenn alles andere geprüft ist) - bei "Alle Units"
+								wird nach einem Fehlschlag nicht mit den restlichen Units weitergemacht.
+							</p>
+							<p class="note">
+								Nutzt, falls konfiguriert, dasselbe "OTA-Passwort" wie oben beim ESPMaster-Update.
+							</p>
+
+							<p>
+								<label for="unitFirmwareFile">Firmware-Datei (.bin)</label>
+								<br>
+								<input type="file" id="unitFirmwareFile" accept=".bin" />
+								<button id="unitFirmwareUploadButton" class="btn-primary" onclick="uploadUnitFirmware()">Hochladen</button>
+							</p>
+							<p id="unitFirmwareUploadStatus"></p>
+
+							<p style="margin-top: 1.5em;">
+								<label>
+									<input type="radio" name="unitFirmwareMode" value="all" checked onchange="setUnitFirmwareMode('all')" />
+									Alle Units
+								</label>
+								<label style="margin-left: 20px;">
+									<input type="radio" name="unitFirmwareMode" value="single" onchange="setUnitFirmwareMode('single')" />
+									Eine Unit
+								</label>
+							</p>
+
+							<div id="unitFirmwareModeAll">
+								<p>
+									<button id="unitFirmwarePushAllButton" class="btn-primary" onclick="pushUnitFirmwareAll()">Alle Units aktualisieren</button>
+								</p>
+								<div id="unitFirmwareAllProgress"></div>
+							</div>
+
+							<div id="unitFirmwareModeSingle" class="hidden">
+								<p>
+									<label for="unitFirmwareTarget">Ziel-Unit</label>
+									<br>
+									<select id="unitFirmwareTarget" style="padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px;"></select>
+									<button id="unitFirmwarePushButton" class="btn-primary" onclick="pushUnitFirmware()">Update starten</button>
+								</p>
+							</div>
+
+							<div id="unitFirmwareResult" style="margin-top: 10px;"></div>
+						</div>
+					</div>
+
+					<div class="card-grid" style="margin-top: 2rem;">
+						<div class="card card-full">
+							<div class="card-title card-title-actions">
+								<span>Serial Log (<span id="spanLogCount">0</span> messages)</span>
+								<span class="card-title-buttons">
+									<button onclick="refreshLog()" class="btn-small">Refresh</button>
+									<button onclick="copySerialLog()" class="btn-small">Copy Full Log</button>
+									<button id="btnToggleSerialLog" onclick="toggleSerialLog()" class="btn-small">Show</button>
+									<a href="/api/crash-log" target="_blank" class="btn-small action-link" title="Crash details captured on-device just before the last automatic reset - survives even if serial wasn't connected/reliable at the time">Crash Log</a>
+								</span>
+							</div>
+							<!-- Deliberately inline style="display: none" (not the .hidden class) -
+							     toggleSerialLog() reads/writes container.style.display directly, and
+							     .hidden's !important would fight it when showing the panel again. -->
+							<div id="containerSerialLog" class="console-panel" style="display: none;">
+								<div style="color: #888;">Loading log...</div>
+							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+	<!-- Stays after the form markup so document.getElementById('form') below finds it already parsed. -->
+	<script>
+		//Used for local development use
+		const localDevelopment = false;
+
+		//Various variables
+		var unitCount = 0;
+		var timezoneOffset = 0;
+
+		//Used for submission!
+		const form = document.getElementById('form');
+		form.onsubmit = function () {
+			//Show loading icon
+			var containerSubmit = document.getElementById('containerSubmit');
+
+			const loadingIconContainer = document.createElement("div");
+			loadingIconContainer.className = "lds-facebook";
+
+			for(var index = 0; index < 3; index++) {
+				loadingIconContainer.appendChild(document.createElement("div"));
+			}
+
+			containerSubmit.replaceWith(loadingIconContainer);
+
+			if (localDevelopment) {
+				setTimeout(function() {
+					location.reload();
+				}, 3000);
+
+				return false;
+			}
+			else {
+				const deviceMode = document.querySelector('input[name="deviceMode"]:checked').value;
+				const tzOffset = timezoneOffset * 60000;
+
+				switch(deviceMode) {
+					case "text":
+						//Convert characters which don't translate directly, replaces ä, ö, ü with unused unicode characters #, $, &
+						var inputTextValue = document.getElementById('inputText').value;
+						inputTextValue = inputTextValue.replace(/ä/gi, '$');
+						inputTextValue = inputTextValue.replace(/ö/gi, '&');
+						inputTextValue = inputTextValue.replace(/ü/gi, '#');
+						document.getElementById('inputText').value = inputTextValue;
+
+						//Set the hidden date time to UNIX
+						var currentScheduledDateTimeText = document.getElementById('inputScheduledDateTime').value;
+
+						//Take into account the timezone offset when we generate the unix timestamp
+						var currentScheduledDateTime = new Date(currentScheduledDateTimeText);
+						var time = Math.floor((currentScheduledDateTime.getTime() - tzOffset) / 1000);
+						document.getElementById('inputHiddenScheduledDateTimeUnix').value = time;
+
+						break;
+					case "countdown":
+						//Set the hidden date time to UNIX
+						var currentCountdownDateTimeText = document.getElementById('inputCountdownDateTime').value;
+
+						//Take into account the timezone offset when we generate the unix timestamp
+						var currentCountdownDateTime = new Date(currentCountdownDateTimeText);
+						var time = Math.floor((currentCountdownDateTime.getTime() - tzOffset) / 1000);
+						document.getElementById('inputHiddenCountdownDateTimeUnix').value = time;
+
+						break;
+				}
+
+				//Submits via AJAX instead of a real navigation - avoids the full-page reload ("blinking")
+				//a real form POST used to cause.
+				var formData = new FormData(form);
+				var xhrRequest = new XMLHttpRequest();
+				xhrRequest.onreadystatechange = function () {
+					if (this.readyState == 4) {
+						restoreSubmitButton(loadingIconContainer);
+
+						if (this.status == 200) {
+							//Matches the old reload-clears-it behavior - a fresh page load never restored
+							//previously typed text either, since index.html doesn't carry a stored value.
+							document.getElementById('inputText').value = "";
+							updateCharacterCount();
+							//Refresh everything else (mode/alignment/speed/countdown/scheduled messages/
+							//"last received") from the server's now-updated state.
+							loadPage();
+						} else {
+							showBannerMessage(this.responseText || `
+								Something went wrong during submission. Feel free to try again, ensure that you have entered valid information.
+								<br>
+								Ensure things like dates provided for schedules/countdowns are in the future.
+							`);
+						}
+					}
+				};
+				xhrRequest.onerror = function () {
+					restoreSubmitButton(loadingIconContainer);
+					showBannerMessage("Network error while submitting.");
+				};
+				xhrRequest.open("POST", "/api/settings", true);
+				xhrRequest.send(formData);
+
+				return false;
+			}
+		}
+
+		//Re-creates the Submit button after the spinner - the page never reloads anymore, so it
+		//needs to be usable again after the request completes.
+		function restoreSubmitButton(loadingIconContainer) {
+			var freshContainer = document.createElement("div");
+			freshContainer.id = "containerSubmit";
+			var submitInput = document.createElement("input");
+			submitInput.type = "submit";
+			submitInput.value = "Submit";
+			freshContainer.appendChild(submitInput);
+			loadingIconContainer.replaceWith(freshContainer);
+		}
+
+		//Console-only logger - the many call sites in the /settings loading flow below are useful
+		//with devtools open, and cost nothing otherwise.
+		function logPageLoadStatus(message, isError) {
+			var timestamp = new Date().toLocaleTimeString();
+			var logEntry = "[" + timestamp + "] " + message;
+
+			if (isError) {
+				console.error(logEntry);
+			} else {
+				console.log(logEntry);
+			}
+		}
+
+		// Catch JavaScript errors
+		window.addEventListener('error', function(e) {
+			logPageLoadStatus("JavaScript Error: " + e.message + " at " + e.filename + ":" + e.lineno, true);
+		});
+
+		// Catch unhandled promise rejections
+		window.addEventListener('unhandledrejection', function(e) {
+			logPageLoadStatus("Unhandled Promise Rejection: " + e.reason, true);
+		});
+
+		// Retrieve current Split-Flap settings when the page loads/refreshes
+		window.addEventListener('load', function() {
+			logPageLoadStatus("Page load event fired", false);
+			loadPage();
+		});
+
+
+		// Request and retrieve settings from ESP-01s filesystem
+		function loadPage() {
+			//Set date time fields to be a minimum of todays date/time add 1 minute
+			var tzOffset = timezoneOffset * 60000;
+			document.querySelectorAll('input[type="datetime-local"]').forEach((dateTimeElement) => {
+				var currentDateTime = convertDateToString((new Date(Date.now() - tzOffset + 60000)));
+				dateTimeElement.value = dateTimeElement.min = currentDateTime;
+			});
+
+			if (localDevelopment) {
+				setSpeed("80");
+				setSavedMode("text");
+				setAlignment("left");
+				setUnitCount("10");
+				setLastReceivedMessage(new Date().toLocaleString());
+				setWiFiStatus("Connected", -65, "192.168.1.100"); // Mock WiFi status for development
+				setCountdownDate((Date.now() / 1000) + (24 * 60 * 60));
+				showScheduledMessages([
+					{
+						"scheduledDateTimeUnix": 1690134480,
+						"message": "Test Message 1",
+						"showIndefinitely": false
+					},
+				]);
+
+				setTimeout(function() {
+					showContent();
+				}, 1000);
+			}
+			else {
+				logPageLoadStatus("Starting /settings request...", false);
+				var settingsRequestStart = Date.now();
+
+				var xhrRequest = new XMLHttpRequest();
+
+				// Set timeout (30 seconds)
+				var timeoutId = setTimeout(function() {
+					if (xhrRequest.readyState !== 4) {
+						xhrRequest.abort();
+						var elapsed = ((Date.now() - settingsRequestStart) / 1000).toFixed(1);
+						logPageLoadStatus("ERROR: /settings request timed out after " + elapsed + " seconds", true);
+						showContent(); // Show page anyway, even if settings failed
+					}
+				}, 30000);
+
+				xhrRequest.onreadystatechange = function () {
+					if (this.readyState == 4) {
+						clearTimeout(timeoutId);
+						var elapsed = ((Date.now() - settingsRequestStart) / 1000).toFixed(1);
+
+						if (this.status == 200) {
+							logPageLoadStatus("/settings request completed successfully in " + elapsed + "s", false);
+							try {
+								var responseObject = JSON.parse(this.responseText);
+								logPageLoadStatus("JSON parsed successfully", false);
+
+								timezoneOffset = responseObject.timezoneOffset;
+
+								setSpeed(responseObject.flapSpeed);
+								setSavedMode(responseObject.deviceMode);
+								setAlignment(responseObject.alignment);
+								setUnitCount(responseObject.unitCount);
+								setCountdownDate(responseObject.countdownToDateUnix);
+								setLastReceivedMessage(responseObject.lastTimeReceivedMessageDateTime);
+								setWiFiStatus(responseObject.wifiStatus, responseObject.wifiRssi, responseObject.wifiIp);
+
+								if (responseObject.scheduledMessages) {
+									showScheduledMessages(responseObject.scheduledMessages);
+								}
+
+								showContent();
+							} catch (e) {
+								logPageLoadStatus("ERROR: Failed to parse JSON response: " + e.message, true);
+								logPageLoadStatus("Response was: " + this.responseText.substring(0, 200), true);
+								showContent(); // Show page anyway
+							}
+						} else {
+							logPageLoadStatus("ERROR: /settings request failed with status " + this.status + " after " + elapsed + "s", true);
+							logPageLoadStatus("Response: " + (this.responseText || "No response"), true);
+							showContent(); // Show page anyway
+						}
+					} else if (this.readyState == 1) {
+						logPageLoadStatus("/settings request opened, waiting for response...", false);
+					} else if (this.readyState == 2) {
+						logPageLoadStatus("/settings request received headers (status: " + this.status + ")", false);
+					} else if (this.readyState == 3) {
+						logPageLoadStatus("/settings request loading...", false);
+					}
+				};
+
+				xhrRequest.onerror = function() {
+					clearTimeout(timeoutId);
+					var elapsed = ((Date.now() - settingsRequestStart) / 1000).toFixed(1);
+					logPageLoadStatus("ERROR: Network error on /settings request after " + elapsed + "s", true);
+					showContent(); // Show page anyway
+				};
+
+				xhrRequest.open("GET", "/api/settings", true);
+				xhrRequest.send();
+				logPageLoadStatus("/settings request sent", false);
+			}
+		}
+
+		// Shows a message up top of the page should the server request one to be shown
+		function showBannerMessage(message, hideAfterDuration) {
+			var bannerMessageElement = document.getElementById('bannerMessage');
+			bannerMessageElement.innerHTML = message;
+
+			bannerMessageElement.classList.remove("hidden");
+
+			if (hideAfterDuration) {
+				setTimeout(function() {
+					bannerMessageElement.classList.add("hidden");
+				}, 7500);
+			}
+		}
+
+		//Ongoing show how many characters are being used
+		function updateCharacterCount() {
+			var inputText = document.getElementById('inputText').value;
+			var length = inputText.replaceAll("\\n", "").length;
+
+			var labelCharacterCount = document.getElementById("labelCharacterCount");
+			var labelLineCount = document.getElementById("labelLineCount");
+
+			labelCharacterCount.innerHTML = length;
+			//unitCount can be 0 if no units were detected on startup - avoid Infinity/NaN in that case
+			var lineWidthEstimate = unitCount > 0 ? Math.ceil(length / unitCount) : 0;
+			labelLineCount.innerHTML = lineWidthEstimate + inputText.split("\\n").length - 1;
+		}
+
+		//Easy add a newline
+		function addNewline() {
+			var inputTextElement = document.getElementById('inputText');
+			var textWithNewline = inputTextElement.value + "\\n";
+			inputTextElement.value = textWithNewline;
+
+			updateCharacterCount();
+		}
+
+		//Send message to delete a message
+		function deleteScheduledMessage(id, message) {
+			var confirmDeletion = confirm(`Delete Message '${message}'?`);
+			if (!confirmDeletion) {
+				return false;
+			}
+
+			var xhr = new XMLHttpRequest();
+			xhr.onreadystatechange = function () {
+				//Reload the page
+				if (this.readyState == 4 && this.status == 202) {
+					window.location.reload();
+				}
+			};
+
+			xhr.open("DELETE", `/api/scheduled-messages?id=${id}`, true);
+			xhr.send();
+		}
+
+		//Updates slider value while sliding
+		function updateSpeedSlider() {
+			var sliderValue = document.getElementById("rangeFlapSpeed").value;
+			document.getElementById("rangeFlapSpeedValue").innerHTML = sliderValue + " %";
+		}
+
+		//Sets mode by checking corresponding radio button/tab
+		function setSavedMode(mode) {
+			switch (mode) {
+				case "text":
+					document.getElementById("modeText").checked = true;
+					break;
+				case "date":
+					document.getElementById("modeDate").checked = true;
+					break;
+				case "clock":
+					document.getElementById("modeClock").checked = true;
+					break;
+				case "countdown":
+					document.getElementById("modeCountdown").checked = true;
+					break;
+			}
+
+			setDeviceModeTab(mode);
+		}
+
+		//Shows/hides the tab associated with the device mode
+		function setDeviceModeTab(mode) {
+			document.querySelectorAll('.tab').forEach(function(tab) {
+				if (!tab.classList.contains("hidden")) {
+					tab.classList.add("hidden");
+				}
+			});
+
+			var tabName = `tab-${mode}`;
+			var tab = document.getElementById(tabName);
+			if (tab !== null) {
+				tab.classList.remove("hidden");
+			}
+		}
+
+		//Sets flap speed by setting the ranges
+		function setSpeed(speed) {
+			document.getElementById("rangeFlapSpeedValue").innerHTML = speed + " %";
+			document.getElementById("rangeFlapSpeed").value = speed;
+		}
+
+		//Sets alignment by checking corresponding radio button
+		function setAlignment(alignment) {
+			switch (alignment) {
+				case "left":
+					document.getElementById("radioLeft").checked = true;
+					break;
+				case "center":
+					document.getElementById("radioCenter").checked = true;
+					break;
+				case "right":
+					document.getElementById("radioRight").checked = true;
+					break;
+			}
+		}
+
+		//Sets the version on the UI just for awareness
+		function setUnitCount(count) {
+			document.getElementById("labelUnits").innerHTML = count;
+			unitCount = count;
+		}
+
+		//Sets the version on the UI just for awareness
+		function setCountdownDate(dateUnix) {
+			//Set date fields to be a minimum of tomorrows date
+			var currentCountdownDate = document.getElementById('inputCountdownDateTime');
+			var tzOffset = timezoneOffset * 60000;
+
+			var currentDate = (new Date(Date.now() - tzOffset));
+			var nextDayDate = new Date();
+			nextDayDate.setDate(currentDate.getDate() + 1);
+
+			//If one has been set and it is not exceeded
+			if (dateUnix !== 0) {
+				var countdownDate = new Date(dateUnix * 1000);
+				if (countdownDate >= currentDate) {
+					currentCountdownDate.value = convertDateToString(countdownDate);
+
+					if (countdownDate - currentDate < 24000) {
+						currentCountdownDate.min = convertDateToString(nextDayDate);
+						return;
+					}
+				}
+			}
+			else {
+				//Set date fields to be a minimum of tomorrows date
+				currentCountdownDate.value = convertDateToString(nextDayDate);
+			}
+
+			currentCountdownDate.min = convertDateToString(nextDayDate);
+		}
+
+		function convertDateToString(dateTime) {
+			const year = dateTime.getFullYear();
+			const month = String(dateTime.getMonth() + 1).padStart(2, '0');
+		  	const day = String(dateTime.getDate()).padStart(2, '0');
+
+			const hours = String(dateTime.getHours()).padStart(2, '0');
+			const minutes = String(dateTime.getMinutes()).padStart(2, '0');
+
+			return `${year}-${month}-${day}T${hours}:${minutes}`;
+		}
+
+		//Sets the last received post message to the server
+		function setLastReceivedMessage(time) {
+			const timeMessage = time == "" ? "N/A" : time;
+			document.getElementById("labelLastMessageReceived").innerHTML = timeMessage;
+		}
+
+		//Sets the WiFi status with signal strength and qualitative assessment
+		function setWiFiStatus(status, rssi, ip) {
+			var labelWiFiStatus = document.getElementById("labelWiFiStatus");
+			var statusText = "";
+			var statusColor = "#888";
+
+			if (status === "Connected" && rssi !== undefined && rssi !== null) {
+				// Determine qualitative assessment based on RSSI
+				var quality = "";
+				var qualityColor = "";
+
+				if (rssi >= -50) {
+					quality = "Excellent";
+					qualityColor = "#4caf50"; // Green
+				} else if (rssi >= -60) {
+					quality = "Very Good";
+					qualityColor = "#8bc34a"; // Light green
+				} else if (rssi >= -70) {
+					quality = "Good";
+					qualityColor = "#cddc39"; // Lime
+				} else if (rssi >= -80) {
+					quality = "Fair";
+					qualityColor = "#ffc107"; // Amber
+				} else if (rssi >= -90) {
+					quality = "Weak";
+					qualityColor = "#ff9800"; // Orange
+				} else {
+					quality = "Very Weak";
+					qualityColor = "#f44336"; // Red
+				}
+
+				statusText = status + " (" + rssi + " dBm) - <span style='color: " + qualityColor + "; font-weight: bold;'>" + quality + "</span>";
+				statusColor = "#4caf50"; // Green for connected
+			} else if (status === "Disconnected") {
+				statusText = "Disconnected";
+				statusColor = "#f44336"; // Red
+			} else {
+				statusText = "Unknown";
+				statusColor = "#888"; // Gray
+			}
+
+			labelWiFiStatus.innerHTML = statusText;
+			labelWiFiStatus.style.color = statusColor;
+		}
+
+		//Used for scheduling messages
+		function showHideScheduledMessageInput() {
+			var scheduleOptionsElement = document.getElementById("divScheduleOptions");
+			var checkboxScheduled = document.getElementById("inputCheckboxScheduleEnabled");
+
+			if (checkboxScheduled.checked) {
+				scheduleOptionsElement.classList.remove("hidden")
+			}
+			else {
+				scheduleOptionsElement.classList.add("hidden")
+			}
+		}
+
+		//Formats and displays all scheduled messages in a "nice" format
+		function showScheduledMessages(scheduledMessages) {
+			var elementMessageCount = document.getElementById("spanScheduledMessageCount");
+			elementMessageCount.innerText = scheduledMessages.length;
+
+			//Closest to being shown first
+			scheduledMessages = scheduledMessages.sort((a, b) => a.scheduledDateTimeUnix - b.scheduledDateTimeUnix);
+
+			for (var scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.length; scheduledMessageIndex++) {
+				var scheduledMessage = scheduledMessages[scheduledMessageIndex];
+
+				//Create a container for a message
+				var messageElement = document.createElement("div");
+				messageElement.className = "message";
+
+				//Create a element to show the time
+				var timeElement = document.createElement("div");
+				timeElement.className = "time";
+				timeElement.innerText = new Date((scheduledMessage.scheduledDateTimeUnix * 1000) + (timezoneOffset * 60000)).toString().slice(0, -34);
+
+				//Create a element to show the indefinite...ness...
+				//message is user-supplied - must stay escaped, this goes into innerHTML (XSS otherwise).
+				var message = `<b>Message:</b> ${scheduledMessage.message.trim() == "" ? "<Blank>" : escapeHtml(scheduledMessage.message)}`
+				var isIndefinitely = `<b>Shown Indefinitely:</b> ${scheduledMessage.showIndefinitely ? "Yes" : "No"}`;
+
+				//Create a element to show the text
+				var textElement = document.createElement("div");
+				textElement.className = "text";
+				textElement.innerHTML = `${message}<br>${isIndefinitely}`;
+
+				//Create a remove button
+				var actionElement = document.createElement("div");
+				var actionButtonElement = document.createElement("span");
+				actionElement.className = "action";
+				actionButtonElement.className = "remove-button";
+				actionButtonElement.innerText = "Remove";
+				//addEventListener+closure, not an inline onclick string - avoids splicing unescaped user
+				//text into an HTML attribute (attribute-injection XSS).
+				actionButtonElement.addEventListener('click', (function (dateTimeUnix, messageText) {
+					return function () { deleteScheduledMessage(dateTimeUnix, messageText); };
+				})(scheduledMessage.scheduledDateTimeUnix, scheduledMessage.message));
+				actionElement.appendChild(actionButtonElement);
+
+				//Add all the elements to the message
+				messageElement.appendChild(timeElement);
+				messageElement.appendChild(textElement);
+				messageElement.appendChild(actionElement);
+
+				//Append to the message container
+				var container = document.getElementById("containerScheduledMessages");
+				container.appendChild(messageElement);
+			}
+		}
+
+		function showContent() {
+			var elementInitialLoading = document.getElementById("initialLoading");
+			var elementContent = document.getElementById("loadedContent");
+
+			elementInitialLoading.classList.add("hidden");
+			elementContent.classList.remove("hidden");
+		}
+
+		// Helper function to escape HTML
+		function escapeHtml(text) {
+			var map = {
+				'&': '&amp;',
+				'<': '&lt;',
+				'>': '&gt;',
+				'"': '&quot;',
+				"'": '&#039;'
+			};
+			return text.replace(/[&<>"']/g, function(m) { return map[m]; });
+		}
+
+		// Kebab (3-dot) menu.
+		function toggleKebabMenu() {
+			var dropdown = document.getElementById("kebabMenuDropdown");
+			var button = document.getElementById("btnKebabMenu");
+			var isOpen = !dropdown.classList.contains("hidden");
+
+			if (isOpen) {
+				dropdown.classList.add("hidden");
+				button.setAttribute("aria-expanded", "false");
+			} else {
+				dropdown.classList.remove("hidden");
+				button.setAttribute("aria-expanded", "true");
+			}
+		}
+
+		// Close the kebab menu when clicking anywhere outside it
+		document.addEventListener("click", function (event) {
+			var menu = document.querySelector(".kebab-menu");
+			var dropdown = document.getElementById("kebabMenuDropdown");
+			if (!menu || !dropdown || dropdown.classList.contains("hidden")) {
+				return;
+			}
+			if (!menu.contains(event.target)) {
+				dropdown.classList.add("hidden");
+				var button = document.getElementById("btnKebabMenu");
+				if (button) button.setAttribute("aria-expanded", "false");
+			}
+		});
+
+		//Everything below was formerly admin.js, inlined here alongside #adminView's markup.
+
+		var unitsData = [];
+		//True while ANY unit is recalibrating - disables every "Save & Recalibrate" button so the
+		//UI can't trigger overlapping I2C operations (see the Wire.requestFrom() hang risk in
+		//BUGFIX_LOG.md).
+		var recalibrationInProgress = false;
+		var fullSerialLogData = null; // Store full serial log for copying
+		var serialLogInterval = null; // Holds the /log auto-refresh setInterval's id so it can be stopped
+
+		//Admin data (units/system-visibility/OTA-password) loads only when this view is actually
+		//opened, not on every page load - keeps the connection count down (BUGFIX_LOG.md #71/#72).
+		function showAdminView() {
+			document.getElementById("kebabMenuDropdown").classList.add("hidden");
+			var kebabButton = document.getElementById("btnKebabMenu");
+			if (kebabButton) kebabButton.setAttribute("aria-expanded", "false");
+
+			document.getElementById("mainView").classList.add("hidden");
+			document.getElementById("adminView").classList.remove("hidden");
+			document.getElementById("adminLoadedContent").classList.add("hidden");
+			document.getElementById("adminInitialLoading").classList.remove("hidden");
+
+			loadUnits();
+			loadAdminSettings();
+		}
+
+		function hideAdminView() {
+			document.getElementById("adminView").classList.add("hidden");
+			document.getElementById("mainView").classList.remove("hidden");
+		}
+
+		//BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #80): opening the Administration view used to fire
+		//four near-simultaneous XHRs (this function plus loadCurrentOtaPassword()/
+		//loadCurrentTimezone(), each hitting its own endpoint) - against this device's hard 5
+		//concurrent-TCP-connection ceiling (#70), that left almost no headroom for anything else
+		//happening at the same moment. /api/settings now also carries otaPassword/timezone (see
+		//ESPMaster.ino), so one fetch here covers what used to take three. loadCurrentOtaPassword()/
+		//loadCurrentTimezone() still exist and still work standalone - kept for refreshing just one
+		//value after a successful change, not called on every admin-view-open anymore.
+		function loadAdminSettings() {
+			if (localDevelopment) {
+				return;
+			}
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4 && this.status == 200) {
+					try {
+						var responseObject = JSON.parse(this.responseText);
+
+						var formOtaUpdate = document.getElementById("formOtaUpdate");
+						if (formOtaUpdate && !responseObject.otaEnabled) {
+							formOtaUpdate.classList.add("hidden");
+						}
+
+						var formResetWifi = document.getElementById("formResetWifi");
+						if (formResetWifi && !responseObject.wifiSettingsResettable) {
+							formResetWifi.classList.add("hidden");
+						}
+
+						document.getElementById("currentOtaPasswordDisplay").innerText = responseObject.otaPassword || "(leer)";
+						document.getElementById("currentTimezoneDisplay").innerText = responseObject.timezone || "(leer)";
+					} catch (e) {
+						// Non-critical - worst case buttons stay visible/displays stay on "wird geladen..." even if not applicable.
+					}
+				}
+			};
+			xhrRequest.open("GET", "/api/settings", true);
+			xhrRequest.send();
+		}
+
+		//Fire-and-confirm actions, all via AJAX (no page navigation) with a banner message result.
+		function triggerOtaMode() {
+			if (!confirm("Are you sure you want to put device in OTA mode?")) {
+				return;
+			}
+			postActionForBanner("/api/ota-mode", "OTA mode started. Open your Arduino IDE, select the new network port, and upload as normal.");
+		}
+
+		function triggerResetWifi() {
+			if (!confirm("Are you sure you want to Reset WiFi settings?")) {
+				return;
+			}
+			postActionForBanner("/api/wifi/reset", "WiFi settings erased. The device is rebooting into AP setup mode now.");
+		}
+
+		function triggerResetUnits() {
+			if (!confirm("Are you sure you want to Reset Units?")) {
+				return;
+			}
+			postActionForBanner("/api/units/reset", "Units are resetting/recalibrating now - this only takes a few seconds.");
+		}
+
+		//Shared helper for the three simple fire-and-confirm admin actions above - POSTs with no body,
+		//shows successMessage in the banner on success, or the server's error text on failure.
+		function postActionForBanner(path, successMessage) {
+			if (localDevelopment) {
+				showAdminBannerMessage(successMessage, true);
+				return;
+			}
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						showAdminBannerMessage(successMessage, true);
+					} else {
+						showAdminBannerMessage("Failed: " + (this.responseText || ("Status " + this.status)));
+					}
+				}
+			};
+			xhrRequest.onerror = function () {
+				showAdminBannerMessage("Network error.");
+			};
+			xhrRequest.open("POST", path, true);
+			xhrRequest.send();
+		}
+
+		function loadCurrentOtaPassword() {
+			var displayEl = document.getElementById("currentOtaPasswordDisplay");
+
+			if (localDevelopment) {
+				displayEl.innerText = "splitflap (simuliert)";
+				return;
+			}
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						try {
+							var responseObject = JSON.parse(this.responseText);
+							displayEl.innerText = responseObject.otaPassword || "(leer)";
+						} catch (e) {
+							displayEl.innerText = "(konnte nicht geladen werden)";
+						}
+					} else {
+						displayEl.innerText = "(konnte nicht geladen werden)";
+					}
+				}
+			};
+			xhrRequest.open("GET", "/api/ota-password", true);
+			xhrRequest.send();
+		}
+
+		//Changes the OTA password - requires the current password (read from the same "OTA-Passwort"
+		//field used elsewhere on this page) for confirmation, same as every other admin action here.
+		function changeOtaPassword() {
+			var currentPasswordInput = document.getElementById("firmwarePassword");
+			var newPasswordInput = document.getElementById("newOtaPassword");
+			var statusEl = document.getElementById("otaPasswordChangeStatus");
+
+			var newPassword = newPasswordInput.value;
+			if (!newPassword) {
+				alert("Bitte ein neues Passwort eingeben.");
+				return;
+			}
+
+			if (localDevelopment) {
+				statusEl.innerHTML = '<span class="status-online-ready">Passwort geändert (simuliert).</span>';
+				document.getElementById("currentOtaPasswordDisplay").innerText = newPassword;
+				newPasswordInput.value = "";
+				return;
+			}
+
+			statusEl.innerHTML = "";
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						statusEl.innerHTML = '<span class="status-online-ready">Passwort geändert.</span>';
+						newPasswordInput.value = "";
+						loadCurrentOtaPassword();
+					} else if (this.status == 401) {
+						statusEl.innerHTML = '<span class="status-offline">Falsches aktuelles Passwort - siehe Feld "OTA-Passwort" oben.</span>';
+					} else {
+						statusEl.innerHTML = '<span class="status-offline">Fehlgeschlagen: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
+					}
+				}
+			};
+
+			xhrRequest.onerror = function () {
+				statusEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
+			};
+
+			xhrRequest.open("POST", "/api/ota-password", true);
+			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.send("currentPassword=" + encodeURIComponent(currentPasswordInput.value) + "&newPassword=" + encodeURIComponent(newPassword));
+		}
+
+		function loadCurrentTimezone() {
+			var displayEl = document.getElementById("currentTimezoneDisplay");
+
+			if (localDevelopment) {
+				displayEl.innerText = "Europe/Berlin (simuliert)";
+				return;
+			}
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						try {
+							var responseObject = JSON.parse(this.responseText);
+							displayEl.innerText = responseObject.timezone || "(leer)";
+						} catch (e) {
+							displayEl.innerText = "(konnte nicht geladen werden)";
+						}
+					} else {
+						displayEl.innerText = "(konnte nicht geladen werden)";
+					}
+				}
+			};
+			xhrRequest.open("GET", "/api/timezone", true);
+			xhrRequest.send();
+		}
+
+		//Sets the timezone - the ESP validates it against ezTime's timezoned lookup before
+		//persisting, so an unrecognized name is rejected (400) rather than silently accepted.
+		function changeTimezone() {
+			var newTimezoneInput = document.getElementById("newTimezone");
+			var statusEl = document.getElementById("timezoneChangeStatus");
+
+			var newTimezone = newTimezoneInput.value;
+			if (!newTimezone) {
+				alert("Bitte eine Zeitzone eingeben.");
+				return;
+			}
+
+			if (localDevelopment) {
+				statusEl.innerHTML = '<span class="status-online-ready">Zeitzone geändert (simuliert).</span>';
+				document.getElementById("currentTimezoneDisplay").innerText = newTimezone;
+				newTimezoneInput.value = "";
+				return;
+			}
+
+			statusEl.innerHTML = "";
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						statusEl.innerHTML = '<span class="status-online-ready">Zeitzone geändert.</span>';
+						newTimezoneInput.value = "";
+						loadCurrentTimezone();
+					} else {
+						statusEl.innerHTML = '<span class="status-offline">Fehlgeschlagen: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
+					}
+				}
+			};
+
+			xhrRequest.onerror = function () {
+				statusEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
+			};
+
+			xhrRequest.open("POST", "/api/timezone", true);
+			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.send("timezone=" + encodeURIComponent(newTimezone));
+		}
+
+		//Re-runs the I2C scan on the ESP to pick up units connected/fixed after boot, no reboot needed
+		function rescanUnits() {
+			if (localDevelopment) {
+				loadUnits();
+				return;
+			}
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						try {
+							var responseObject = JSON.parse(this.responseText);
+							showAdminBannerMessage("Rescan abgeschlossen: " + responseObject.unitsAmount + " Unit(s) gefunden.", true);
+						} catch (e) {
+							showAdminBannerMessage("Rescan-Antwort konnte nicht gelesen werden.");
+						}
+					} else {
+						showAdminBannerMessage("Rescan fehlgeschlagen. Status: " + this.status);
+					}
+					loadUnits();
+				}
+			};
+
+			xhrRequest.onerror = function () {
+				showAdminBannerMessage("Netzwerkfehler beim Rescan.");
+				loadUnits();
+			};
+
+			xhrRequest.open("POST", "/api/units/rescan", true);
+			xhrRequest.send();
+		}
+
+		//Fetches live status + offset for every unit from the ESP
+		function loadUnits() {
+			if (localDevelopment) {
+				unitsData = {
+					units: [
+						{ index: 0, online: true, status: 0, offset: 103 },
+						{ index: 1, online: true, status: 0, offset: 97 },
+						{ index: 2, online: false, status: -2, offset: -1 },
+					]
+				};
+				renderUnits(unitsData);
+				showAdminContent();
+				return;
+			}
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						try {
+							var responseObject = JSON.parse(this.responseText);
+							renderUnits(responseObject);
+						} catch (e) {
+							showAdminBannerMessage("Failed to read unit data: " + e.message);
+						}
+					} else {
+						showAdminBannerMessage("Failed to load unit data. Status: " + this.status);
+					}
+					showAdminContent();
+				}
+			};
+
+			xhrRequest.onerror = function () {
+				showAdminBannerMessage("Network error while loading unit data.");
+				showAdminContent();
+			};
+
+			xhrRequest.open("GET", "/api/units", true);
+			xhrRequest.send();
+		}
+
+		//Renders the list of units and their current offset/status
+		function renderUnits(responseObject) {
+			var container = document.getElementById("containerUnits");
+			container.innerHTML = "";
+
+			var units = responseObject.units || [];
+			for (var i = 0; i < units.length; i++) {
+				var unit = units[i];
+
+				var row = document.createElement("div");
+				row.className = "unit-row";
+				row.id = "unitRow" + unit.index;
+
+				var labelElement = document.createElement("div");
+				labelElement.className = "unit-label";
+				labelElement.innerText = "Unit " + unit.index;
+
+				var statusElement = document.createElement("div");
+				statusElement.className = "unit-status";
+				statusElement.innerHTML = formatStatus(unit);
+
+				var offsetElement = document.createElement("div");
+				offsetElement.className = "unit-offset";
+				offsetElement.id = "unitOffset" + unit.index;
+				offsetElement.innerText = unit.online ? ("Offset: " + unit.offset) : "Offset: -";
+
+				var inputContainer = document.createElement("div");
+				inputContainer.className = "unit-input";
+
+				var input = document.createElement("input");
+				input.type = "number";
+				input.min = "0";
+				input.max = "2037";
+				input.id = "unitInput" + unit.index;
+				input.value = unit.online ? unit.offset : "";
+				input.disabled = !unit.online;
+
+				var button = document.createElement("button");
+				button.id = "unitButton" + unit.index;
+				button.innerText = "Save & Recalibrate";
+				button.disabled = !unit.online || recalibrationInProgress;
+				button.onclick = (function (unitIndex) {
+					return function () { saveOffset(unitIndex); };
+				})(unit.index);
+
+				inputContainer.appendChild(input);
+				inputContainer.appendChild(button);
+
+				row.appendChild(labelElement);
+				row.appendChild(statusElement);
+				row.appendChild(offsetElement);
+				row.appendChild(inputContainer);
+
+				container.appendChild(row);
+			}
+
+			if (units.length === 0) {
+				container.innerHTML = '<div style="padding: 10px;">No units configured.</div>';
+			}
+
+			populateUnitFirmwareTargetDropdown(units);
+		}
+
+		//Keeps the "Ziel-Unit" dropdown on the firmware update card in sync with the known units,
+		//preserving the current selection across refreshes where possible
+		function populateUnitFirmwareTargetDropdown(units) {
+			var select = document.getElementById("unitFirmwareTarget");
+			if (!select) {
+				return;
+			}
+
+			var previousValue = select.value;
+			select.innerHTML = "";
+
+			for (var i = 0; i < units.length; i++) {
+				var option = document.createElement("option");
+				option.value = units[i].index;
+				option.innerText = "Unit " + units[i].index;
+				select.appendChild(option);
+			}
+
+			if (previousValue !== "" && select.querySelector('option[value="' + previousValue + '"]')) {
+				select.value = previousValue;
+			}
+		}
+
+		//Turns the raw online/status fields into a readable, colour coded label
+		function formatStatus(unit) {
+			if (!unit.online) {
+				return '<span class="status-offline">Offline</span>';
+			}
+
+			if (unit.status === 1) {
+				return '<span class="status-online-busy">Busy / Recalibrating</span>';
+			}
+
+			if (unit.status === 0) {
+				return '<span class="status-online-ready">Ready</span>';
+			}
+
+			return '<span class="status-offline">Unknown (' + unit.status + ')</span>';
+		}
+
+		function setAllUnitButtonsDisabled(disabled) {
+			var buttons = document.querySelectorAll('#containerUnits button[id^="unitButton"]');
+			for (var i = 0; i < buttons.length; i++) {
+				buttons[i].disabled = disabled;
+			}
+		}
+
+		//Sends a new offset for a single unit, then polls until it has finished recalibrating
+		function saveOffset(unitIndex) {
+			var input = document.getElementById("unitInput" + unitIndex);
+			var button = document.getElementById("unitButton" + unitIndex);
+			var offsetValue = parseInt(input.value, 10);
+
+			// 2037 = UNIT_STEPS - 1 in ESPMaster.ino (28BYJ-48 stepper steps per revolution). Keep in sync.
+			if (isNaN(offsetValue) || offsetValue < 0 || offsetValue > 2037) {
+				alert("Please enter an offset between 0 and 2037.");
+				return;
+			}
+
+			//Shouldn't normally be reachable (button is disabled), guard against a stale render anyway.
+			if (recalibrationInProgress) {
+				showAdminBannerMessage("Another unit is still recalibrating - please wait for it to finish first.");
+				return;
+			}
+
+			button.disabled = true;
+			button.innerText = "Saving...";
+
+			if (localDevelopment) {
+				setTimeout(function () {
+					button.disabled = false;
+					button.innerText = "Save & Recalibrate";
+					showAdminBannerMessage("Unit " + unitIndex + " offset updated to " + offsetValue + " (simulated).", true);
+				}, 1500);
+				return;
+			}
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 202) {
+						//Lock every unit's button, not just this one - prevents an overlapping I2C
+						//request against a different unit while this one recalibrates.
+						recalibrationInProgress = true;
+						setAllUnitButtonsDisabled(true);
+						showAdminBannerMessage("Unit " + unitIndex + " is recalibrating with the new offset, this can take a few seconds...");
+						pollUntilReady(unitIndex, button);
+					} else {
+						button.disabled = false;
+						button.innerText = "Save & Recalibrate";
+						showAdminBannerMessage("Failed to set offset: " + (this.responseText || ("Status " + this.status)));
+					}
+				}
+			};
+
+			xhrRequest.onerror = function () {
+				button.disabled = false;
+				button.innerText = "Save & Recalibrate";
+				showAdminBannerMessage("Network error while setting offset.");
+			};
+
+			xhrRequest.open("POST", "/api/units/offset", true);
+			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.send("id=" + encodeURIComponent(unitIndex) + "&offset=" + encodeURIComponent(offsetValue));
+		}
+
+		//Polls /api/units until the given unit is done moving (or a timeout is hit), then refreshes the view.
+		//5s interval (not 1s) deliberately - every poll is an I2C read, and each I2C read runs inside
+		//the Unit's TWI interrupt handler, briefly stealing time from its stepper-timing loop while it's
+		//actively calibrating. Less frequent polling means less accumulated interference. 10 attempts * 5s
+		//= 50s total timeout (was 20 attempts * 1s = 20s).
+		function pollUntilReady(unitIndex, button) {
+			var attempts = 0;
+			var maxAttempts = 10;
+
+			var intervalId = setInterval(function () {
+				attempts++;
+
+				var xhrRequest = new XMLHttpRequest();
+				xhrRequest.onreadystatechange = function () {
+					if (this.readyState == 4 && this.status == 200) {
+						try {
+							var responseObject = JSON.parse(this.responseText);
+							var units = responseObject.units || [];
+							var unit = units[unitIndex];
+
+							if (unit && unit.online && unit.status !== 1) {
+								clearInterval(intervalId);
+								recalibrationInProgress = false;
+								renderUnits(responseObject);
+								showAdminBannerMessage("Unit " + unitIndex + " is ready. Current offset: " + unit.offset, true);
+								return;
+							}
+						} catch (e) {
+							// ignore and try again on next poll
+						}
+					}
+
+					if (attempts >= maxAttempts) {
+						clearInterval(intervalId);
+						recalibrationInProgress = false;
+						setAllUnitButtonsDisabled(false);
+						button.innerText = "Save & Recalibrate";
+						showAdminBannerMessage("Timed out waiting for Unit " + unitIndex + " to finish recalibrating. Hit Refresh to check its status.");
+					}
+				};
+
+				xhrRequest.open("GET", "/api/units", true);
+				xhrRequest.send();
+			}, 5000);
+		}
+
+		//Same as the main view's showBannerMessage() above, targeting #adminBannerMessage instead.
+		function showAdminBannerMessage(message, hideAfterDuration) {
+			var bannerMessageElement = document.getElementById('adminBannerMessage');
+			bannerMessageElement.innerHTML = message;
+			bannerMessageElement.classList.remove("hidden");
+
+			if (hideAfterDuration) {
+				setTimeout(function () {
+					bannerMessageElement.classList.add("hidden");
+				}, 7500);
+			}
+		}
+
+		function showAdminContent() {
+			document.getElementById("adminInitialLoading").classList.add("hidden");
+			document.getElementById("adminLoadedContent").classList.remove("hidden");
+		}
+
+		//Uploads a compiled .bin sketch to the ESP over the browser, no Arduino IDE required
+		function uploadFirmware() {
+			var fileInput = document.getElementById("firmwareFile");
+			var passwordInput = document.getElementById("firmwarePassword");
+			var button = document.getElementById("firmwareUploadButton");
+			var progressContainer = document.getElementById("firmwareProgressContainer");
+			var progressBar = document.getElementById("firmwareProgressBar");
+			var statusEl = document.getElementById("firmwareStatus");
+
+			if (!fileInput.files || fileInput.files.length === 0) {
+				alert("Bitte zuerst eine .bin Datei auswählen.");
+				return;
+			}
+
+			var file = fileInput.files[0];
+			if (!file.name.toLowerCase().endsWith(".bin")) {
+				if (!confirm("Die ausgewählte Datei endet nicht auf .bin. Trotzdem hochladen?")) {
+					return;
+				}
+			}
+
+			if (!confirm("Firmware '" + file.name + "' jetzt auf das ESPMaster-Modul hochladen? Das Gerät startet danach neu.")) {
+				return;
+			}
+
+			if (localDevelopment) {
+				simulateFirmwareUpload();
+				return;
+			}
+
+			var formData = new FormData();
+			formData.append("firmware", file, file.name);
+
+			button.disabled = true;
+			progressContainer.classList.remove("hidden");
+			progressBar.style.width = "0%";
+			progressBar.innerText = "0%";
+			statusEl.innerText = "Wird hochgeladen...";
+			statusEl.className = "";
+
+			var xhr = new XMLHttpRequest();
+
+			xhr.upload.onprogress = function (e) {
+				if (e.lengthComputable) {
+					var percent = Math.round((e.loaded / e.total) * 100);
+					progressBar.style.width = percent + "%";
+					progressBar.innerText = percent + "%";
+				}
+			};
+
+			xhr.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						progressBar.style.width = "100%";
+						progressBar.innerText = "100%";
+						statusEl.innerText = "Update erfolgreich! Gerät startet jetzt neu, dies kann 10-20 Sekunden dauern...";
+						statusEl.className = "status-online-ready";
+						setTimeout(function () {
+							window.location.href = "/";
+						}, 15000);
+					} else {
+						statusEl.innerText = "Update fehlgeschlagen: " + (this.responseText || ("Status " + this.status));
+						statusEl.className = "status-offline";
+						button.disabled = false;
+					}
+				}
+			};
+
+			xhr.onerror = function () {
+				statusEl.innerText = "Netzwerkfehler beim Hochladen.";
+				statusEl.className = "status-offline";
+				button.disabled = false;
+			};
+
+			xhr.open("POST", "/api/firmware", true);
+			xhr.setRequestHeader("X-OTA-Password", passwordInput.value);
+			xhr.send(formData);
+		}
+
+		//Uploads a compiled Unit.ino .bin to the ESP, to be pushed to a unit afterwards
+		function uploadUnitFirmware() {
+			var fileInput = document.getElementById("unitFirmwareFile");
+			var button = document.getElementById("unitFirmwareUploadButton");
+			var statusEl = document.getElementById("unitFirmwareUploadStatus");
+
+			if (!fileInput.files || fileInput.files.length === 0) {
+				alert("Bitte zuerst eine .bin Datei auswählen.");
+				return;
+			}
+
+			var file = fileInput.files[0];
+
+			if (localDevelopment) {
+				statusEl.innerText = "Firmware '" + file.name + "' hochgeladen (simuliert).";
+				statusEl.className = "status-online-ready";
+				return;
+			}
+
+			var formData = new FormData();
+			formData.append("firmware", file, file.name);
+
+			button.disabled = true;
+			statusEl.innerText = "Wird hochgeladen...";
+			statusEl.className = "";
+
+			var xhr = new XMLHttpRequest();
+			xhr.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					button.disabled = false;
+					if (this.status == 200) {
+						statusEl.innerText = "Firmware '" + file.name + "' hochgeladen und bereit zum Übertragen.";
+						statusEl.className = "status-online-ready";
+					} else if (this.status == 401) {
+						statusEl.innerText = "Upload abgelehnt: falsches OTA-Passwort (siehe Feld oben beim ESPMaster-Update).";
+						statusEl.className = "status-offline";
+					} else {
+						statusEl.innerText = "Upload fehlgeschlagen: " + (this.responseText || ("Status " + this.status));
+						statusEl.className = "status-offline";
+					}
+				}
+			};
+
+			xhr.onerror = function () {
+				button.disabled = false;
+				statusEl.innerText = "Netzwerkfehler beim Hochladen.";
+				statusEl.className = "status-offline";
+			};
+
+			xhr.open("POST", "/api/units/firmware", true);
+			var passwordInput = document.getElementById("firmwarePassword");
+			xhr.setRequestHeader("X-OTA-Password", passwordInput ? passwordInput.value : "");
+			xhr.send(formData);
+		}
+
+		function setUnitFirmwareMode(mode) {
+			var singlePanel = document.getElementById("unitFirmwareModeSingle");
+			var allPanel = document.getElementById("unitFirmwareModeAll");
+			var resultEl = document.getElementById("unitFirmwareResult");
+
+			if (mode === "all") {
+				singlePanel.classList.add("hidden");
+				allPanel.classList.remove("hidden");
+			} else {
+				singlePanel.classList.remove("hidden");
+				allPanel.classList.add("hidden");
+			}
+			resultEl.innerHTML = "";
+		}
+
+		//Pushes the previously uploaded firmware to the selected unit over I2C
+		function pushUnitFirmware() {
+			var select = document.getElementById("unitFirmwareTarget");
+			var button = document.getElementById("unitFirmwarePushButton");
+			var resultEl = document.getElementById("unitFirmwareResult");
+
+			if (!select.value) {
+				alert("Keine Ziel-Unit verfügbar.");
+				return;
+			}
+
+			if (!confirm("Firmware jetzt auf Unit " + select.value + " übertragen? Die Unit macht dabei eine kurze Zwangspause und startet danach neu.")) {
+				return;
+			}
+
+			if (localDevelopment) {
+				resultEl.innerHTML = '<p class="status-online-ready">Update erfolgreich (simuliert). 42 von 42 Seiten geschrieben und verifiziert.</p>';
+				return;
+			}
+
+			button.disabled = true;
+			resultEl.innerHTML = '<p>Update läuft, bitte warten - das dauert nur wenige Sekunden...</p>';
+
+			var xhr = new XMLHttpRequest();
+			xhr.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					button.disabled = false;
+
+					if (this.status == 401) {
+						resultEl.innerHTML = '<p class="status-offline">Abgelehnt: falsches OTA-Passwort (siehe Feld oben beim ESPMaster-Update).</p>';
+						return;
+					}
+
+					try {
+						var responseObject = JSON.parse(this.responseText);
+						renderUnitFirmwareResult(responseObject);
+					} catch (e) {
+						resultEl.innerHTML = '<p class="status-offline">Antwort konnte nicht gelesen werden: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</p>';
+					}
+
+					loadUnits();
+				}
+			};
+
+			xhr.onerror = function () {
+				button.disabled = false;
+				resultEl.innerHTML = '<p class="status-offline">Netzwerkfehler während des Updates.</p>';
+			};
+
+			xhr.open("POST", "/api/units/firmware/push", true);
+			xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			var passwordInput = document.getElementById("firmwarePassword");
+			xhr.setRequestHeader("X-OTA-Password", passwordInput ? passwordInput.value : "");
+			xhr.send("id=" + encodeURIComponent(select.value));
+		}
+
+		//Updates every known unit sequentially (never more than one I2C push in flight). Stops on the first
+		//failure rather than continuing to the next unit, so a partially-updated fleet is never
+		//silently left in a mixed state without the operator noticing exactly where it stopped.
+		function pushUnitFirmwareAll() {
+			var button = document.getElementById("unitFirmwarePushAllButton");
+			var progressEl = document.getElementById("unitFirmwareAllProgress");
+			var units = (unitsData && unitsData.units) || [];
+
+			if (units.length === 0) {
+				alert("Keine Units bekannt.");
+				return;
+			}
+
+			if (!confirm("Firmware jetzt nacheinander auf alle " + units.length + " Unit(s) übertragen? Das kann je nach Anzahl mehrere Minuten dauern.")) {
+				return;
+			}
+
+			var unitIndexes = units.map(function (u) { return u.index; });
+
+			if (localDevelopment) {
+				progressEl.innerHTML = "";
+				for (var i = 0; i < unitIndexes.length; i++) {
+					progressEl.innerHTML += '<p class="status-online-ready">Unit ' + unitIndexes[i] + ': ✓ erfolgreich (simuliert)</p>';
+				}
+				return;
+			}
+
+			button.disabled = true;
+			progressEl.innerHTML = "";
+
+			unitIndexes.forEach(function (unitIndex) {
+				var row = document.createElement("p");
+				row.id = "unitFirmwareAllRow" + unitIndex;
+				row.innerText = "Unit " + unitIndex + ": wartet...";
+				progressEl.appendChild(row);
+			});
+
+			pushUnitFirmwareAllStep(unitIndexes, 0, button);
+		}
+
+		//Processes one unit, then recurses into the next - kept sequential (not e.g. Promise.all) on
+		//purpose, see the comment on pushUnitFirmwareAll() above.
+		function pushUnitFirmwareAllStep(unitIndexes, stepIndex, button) {
+			if (stepIndex >= unitIndexes.length) {
+				button.disabled = false;
+				loadUnits();
+				return;
+			}
+
+			var unitIndex = unitIndexes[stepIndex];
+			var row = document.getElementById("unitFirmwareAllRow" + unitIndex);
+			row.innerText = "Unit " + unitIndex + ": Update läuft, bitte warten...";
+			row.className = "status-online-busy";
+
+			var xhr = new XMLHttpRequest();
+			xhr.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 401) {
+						row.innerText = "Unit " + unitIndex + ": abgelehnt - falsches OTA-Passwort.";
+						row.className = "status-offline";
+						button.disabled = false;
+						return; //Wrong password won't work for any other unit either - stop the batch here.
+					}
+
+					var success = false;
+					var message = "Antwort konnte nicht gelesen werden (Status " + this.status + ").";
+					try {
+						var responseObject = JSON.parse(this.responseText);
+						success = !!responseObject.success;
+						message = responseObject.success ? (responseObject.message || "Erfolgreich.") : (responseObject.error || "Fehlgeschlagen.");
+						if (typeof responseObject.pagesWritten !== "undefined" && typeof responseObject.totalPages !== "undefined") {
+							message += " (" + responseObject.pagesWritten + "/" + responseObject.totalPages + " Seiten)";
+						}
+					} catch (e) {
+						// message already has a fallback set above
+					}
+
+					row.innerText = "Unit " + unitIndex + ": " + (success ? "✓ " : "✗ ") + message;
+					row.className = success ? "status-online-ready" : "status-offline";
+
+					if (!success) {
+						button.disabled = false; //Stop the batch - see the comment on pushUnitFirmwareAll() above.
+						loadUnits();
+						return;
+					}
+
+					pushUnitFirmwareAllStep(unitIndexes, stepIndex + 1, button);
+				}
+			};
+
+			xhr.onerror = function () {
+				row.innerText = "Unit " + unitIndex + ": Netzwerkfehler.";
+				row.className = "status-offline";
+				button.disabled = false;
+			};
+
+			xhr.open("POST", "/api/units/firmware/push", true);
+			xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			var passwordInput = document.getElementById("firmwarePassword");
+			xhr.setRequestHeader("X-OTA-Password", passwordInput ? passwordInput.value : "");
+			xhr.send("id=" + encodeURIComponent(unitIndex));
+		}
+
+		//Renders the JSON result of a firmware push in the result panel
+		function renderUnitFirmwareResult(result) {
+			var resultEl = document.getElementById("unitFirmwareResult");
+			var cssClass = result.success ? "status-online-ready" : "status-offline";
+			var text = result.success ? (result.message || "Update erfolgreich.") : (result.error || "Update fehlgeschlagen.");
+
+			var html = '<p class="' + cssClass + '">' + escapeHtml(text) + '</p>';
+			if (typeof result.pagesWritten !== "undefined" && typeof result.totalPages !== "undefined") {
+				html += '<p>Seiten geschrieben/verifiziert: ' + result.pagesWritten + ' von ' + result.totalPages + '</p>';
+			}
+
+			resultEl.innerHTML = html;
+		}
+
+		//Fakes a firmware upload for local development mode, mirrors localDevelopment handling elsewhere
+		function simulateFirmwareUpload() {
+			var button = document.getElementById("firmwareUploadButton");
+			var progressContainer = document.getElementById("firmwareProgressContainer");
+			var progressBar = document.getElementById("firmwareProgressBar");
+			var statusEl = document.getElementById("firmwareStatus");
+
+			button.disabled = true;
+			progressContainer.classList.remove("hidden");
+			statusEl.innerText = "Wird hochgeladen (simuliert)...";
+			statusEl.className = "";
+
+			var percent = 0;
+			var interval = setInterval(function () {
+				percent += 20;
+				progressBar.style.width = percent + "%";
+				progressBar.innerText = percent + "%";
+
+				if (percent >= 100) {
+					clearInterval(interval);
+					statusEl.innerText = "Update erfolgreich (simuliert).";
+					statusEl.className = "status-online-ready";
+					button.disabled = false;
+				}
+			}, 300);
+		}
+
+		// Fetch and display serial log
+		function refreshLog() {
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4 && this.status == 200) {
+					var responseObject = JSON.parse(this.responseText);
+					displaySerialLog(responseObject);
+				}
+			};
+
+			xhrRequest.open("GET", "/log", true);
+			xhrRequest.send();
+		}
+
+		// Display serial log messages
+		function displaySerialLog(logData) {
+			var container = document.getElementById("containerSerialLog");
+			var countElement = document.getElementById("spanLogCount");
+
+			// Store full log data for copying
+			fullSerialLogData = logData;
+
+			countElement.innerText = logData.count || 0;
+
+			if (!logData.logs || logData.logs.length === 0) {
+				container.innerHTML = '<div style="color: #888;">No log messages yet.</div>';
+				return;
+			}
+
+			var html = "";
+			for (var i = 0; i < logData.logs.length; i++) {
+				var logEntry = logData.logs[i];
+				// Timestamp is in milliseconds since boot, format as seconds with 1 decimal
+				var timestampSec = (logEntry.timestamp / 1000).toFixed(1) + "s";
+				var message = logEntry.message || "";
+
+				// Escape HTML and add some color coding
+				message = escapeHtml(message);
+				if (message.indexOf("DEBUG:") >= 0) {
+					message = '<span style="color: #4ec9b0;">' + message + '</span>';
+				} else if (message.indexOf("ERROR") >= 0 || message.indexOf("Error") >= 0) {
+					message = '<span style="color: #f48771;">' + message + '</span>';
+				} else if (message.indexOf("WARNING") >= 0 || message.indexOf("Warning") >= 0) {
+					message = '<span style="color: #dcdcaa;">' + message + '</span>';
+				}
+
+				html += '<div style="margin-bottom: 4px; padding: 2px 0; border-bottom: 1px solid #333;">';
+				html += '<span style="color: #808080; margin-right: 10px;">[' + timestampSec + ']</span>';
+				html += message;
+				html += '</div>';
+			}
+
+			container.innerHTML = html;
+			// Auto-scroll to bottom
+			container.scrollTop = container.scrollHeight;
+		}
+
+		// Toggle serial log visibility - starts/stops the auto-refresh poll along with the panel itself
+		// (see BUGFIX_LOG.md #56 for why that matters: it used to keep polling /log every 2s even while
+		// hidden).
+		function toggleSerialLog() {
+			var container = document.getElementById("containerSerialLog");
+			var button = document.getElementById("btnToggleSerialLog");
+
+			if (container.style.display === "none") {
+				container.style.display = "block";
+				if (button) button.textContent = "Hide";
+				refreshLog(); // Refresh immediately when showing
+				if (!serialLogInterval) {
+					serialLogInterval = setInterval(refreshLog, 2000);
+				}
+			} else {
+				container.style.display = "none";
+				if (button) button.textContent = "Show";
+				if (serialLogInterval) {
+					clearInterval(serialLogInterval);
+					serialLogInterval = null;
+				}
+			}
+		}
+
+		// Copy full serial log to clipboard
+		function copySerialLog() {
+			if (!fullSerialLogData || !fullSerialLogData.logs || fullSerialLogData.logs.length === 0) {
+				alert("No log data available to copy.");
+				return;
+			}
+
+			var logText = "";
+			for (var i = 0; i < fullSerialLogData.logs.length; i++) {
+				var logEntry = fullSerialLogData.logs[i];
+				var timestampSec = (logEntry.timestamp / 1000).toFixed(1) + "s";
+				var message = logEntry.message || "";
+				logText += "[" + timestampSec + "] " + message + "\n";
+			}
+
+			// Copy to clipboard
+			var textArea = document.createElement("textarea");
+			textArea.value = logText;
+			textArea.style.position = "fixed";
+			textArea.style.opacity = "0";
+			document.body.appendChild(textArea);
+			textArea.select();
+			try {
+				document.execCommand('copy');
+				alert("Serial log copied to clipboard!");
+			} catch (err) {
+				alert("Failed to copy log. Please select and copy manually.");
+			}
+			document.body.removeChild(textArea);
+		}
+	</script>
 </body>
 
 </html>

@@ -2,6 +2,8 @@
 
 This is a modified version of the ESPMaster code with improvements for better web server responsiveness and debugging capabilities.
 
+See [`API.md`](API.md) in this folder for a full reference of every HTTP endpoint this firmware exposes.
+
 ## Major Changes from the Base v2.3.0 Release
 
 - Added LED-driven setup/debug indicators that map each initialization stage to a blink pattern for quick diagnosis in the field.
@@ -50,7 +52,7 @@ Added LED blink codes on GPIO 2 (configurable) to indicate system status:
   - **Error Status Panel**: Displays JavaScript errors, network errors, and page load issues at the top of the main page
   - **Page Load Debug Log**: Shows debug messages during page initialization (collapsible viewer)
   - **Serial Debug Log**: Real-time serial output at the bottom of the main page with hide/show toggle
-- All debug features can be enabled/disabled via `/enable-debug-mode` and `/exit-debug-mode` endpoints
+- All debug features can be enabled/disabled via `POST /api/debug-mode` (`enabled=true`/`false`) - see [`API.md`](API.md)
 
 ### 5. WiFi Strength Indicator
 - `getCurrentSettingValues()` now samples RSSI multiple times and returns both the raw dBm value and connection state.

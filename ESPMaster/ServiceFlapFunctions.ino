@@ -1,5 +1,13 @@
-//Shows a new message on the display
-void showText(String message) {  
+//Shows a new message on the display.
+//BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #40/#81): this used to block synchronously for up to 90s
+//twice per update (via waitForAllUnitsReady()) - live-confirmed this starves the "deferred to
+//loop()" web request pattern, since that's only ever checked at the very top of loop(), which a
+//blocked showText() call never lets loop() return to. Now just starts a non-blocking job (see
+//ServiceDisplayJobFunctions.ino) and returns immediately; updateDisplayJob(), called once per
+//loop() iteration, does the actual work incrementally. Signature/dedup-guard/caller-visible
+//behavior are unchanged - every existing call site (main text/date/clock display, scheduled
+//messages, the units reset sequence) keeps working the same way from the outside.
+void showText(String message) {
   showText(message, 0);
 }
 
@@ -11,124 +19,13 @@ void showText(String message, int delayMillis) {
   }
 
   if (lastWrittenText != message || alignmentUpdated) {
-    String messageDisplay = message == "" ? "<Blank>" : message;
-    String alignmentUpdatedDisplay = alignmentUpdated ? "Yes" : "No";
-
-    SerialPrintln("Showing new Message");
-    SerialPrintln("New Message: " + messageDisplay);
-    SerialPrintln("Alignment Updated: " + alignmentUpdatedDisplay);
-  
-    LList<String> messageLines = processSentenceToLines(message);
-
-    if (messageLines.size() > 1) {
-      SerialPrintln("Showing a split down message");
-    
-      //Iterate over all the message lines we've got
-      for (int linesIndex = 0; linesIndex < messageLines.size(); linesIndex++) {
-        String line = messageLines[linesIndex];
-
-        SerialPrint("-- Message Line: ");
-        SerialPrintln(line);
-
-        showMessage(line, convertSpeed(flapSpeed));
-    
-        //If the lines index isn't the last, delay showing the next message to give time to read
-        // Use non-blocking delay with yield to allow web server to process
-        if (linesIndex <= messageLines.size()) {
-          unsigned long delayStart = millis();
-          while (millis() - delayStart < 3000) {
-            yield(); // Allow web server to process requests
-            delay(100);
-          }
-        }
-      }  
-    }
-    else {
-      SerialPrintln("Showing a simple message: " + message);
-      
-      showMessage(message, convertSpeed(flapSpeed));
-    }  
-
-    //If the device wasn't previously in text mode, delay for a short time so can read!
-    // Use non-blocking delay with yield
-    if (delayMillis != 0) {
-      SerialPrintln("Pausing for a small duration. Delay: " + String(delayMillis));
-      unsigned long delayStart = millis();
-      while (millis() - delayStart < delayMillis) {
-        yield(); // Allow web server to process requests
-        delay(100);
-      }
-    }
-
-    //Save what we last did
-    lastWrittenText = message;
-
-    //Alignment definitely has not changed now
-    alignmentUpdated = false;
-    
-    SerialPrintln("Done showing message");
+    //If a previous job is still running (e.g. a still-in-progress calibration search), this
+    //attempt is silently skipped - lastWrittenText hasn't been updated yet, so the very next
+    //loop() tick (showText() is called every ~1s from the main mode-display logic) naturally
+    //retries once the current job finishes. Nothing is lost, just delayed until the display is
+    //actually free.
+    startDisplayJob(message, convertSpeed(flapSpeed), (unsigned long)delayMillis);
   }
-}
-
-//Pushes message to units
-void showMessage(String message, int flapSpeed) {
-  //Format string per alignment choice
-  if (alignment == ALIGNMENT_MODE_LEFT) {
-    message = leftString(message);
-  } 
-  else if (alignment == ALIGNMENT_MODE_RIGHT) {
-    message = rightString(message);
-  } 
-  else if (alignment == ALIGNMENT_MODE_CENTER) {
-    message = centerString(message);
-  }
-
-  SerialPrint("Showing Aligned Message: \"");
-  SerialPrint(message);
-  SerialPrintln("\"");
-
-#if UNIT_CALLS_DISABLE == true
-  SerialPrintln("Unit Calls are disabled for debugging. Will delay to simulate calls...");
-  unsigned long delayStart = millis();
-  while (millis() - delayStart < 2000) {
-    yield();
-    delay(100);
-  }
-#else
-  //Wait while display is still moving - ADD YIELD TO PREVENT HANGING
-  SerialPrintln("Unit calls are enabled. Will display message");
-  //DIAGNOSTIC, 2026-08-13: was a fixed 30s timeout regardless of what the unit was actually
-  //doing - too short for a legitimate worst-case calibration search + rotation (can add up to
-  //20-30s+ by itself), which made the code give up and send the *next* letter while the unit
-  //was still finishing the current one. Now waits as long as the unit keeps reporting genuine
-  //progress (see waitForAllUnitsReady()), up to a generous 90s hard cap, and only gives up
-  //early if there's truly been no progress for 15s.
-  waitForAllUnitsReady(90000, 15000);
-
-  for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
-    char currentLetter = message[unitIndex];
-    int currentLetterPosition = translateLettertoInt(currentLetter);
-    
-    SerialPrint("Unit Nr.: ");
-    SerialPrint(unitIndex);
-    SerialPrint(" Letter: ");
-    SerialPrint(message[unitIndex]);
-    SerialPrint(" Letter position: ");
-    SerialPrintln(currentLetterPosition);
-
-    //only write to unit if char exists in letter array
-    if (currentLetterPosition != -1) {
-      writeToUnit(unitIndex, currentLetterPosition, flapSpeed);
-    }
-    
-    // Small yield between units to keep web server responsive
-    yield();
-  }
-
-  //Wait for the display to stop moving before exit - ADD YIELD TO PREVENT HANGING
-  //DIAGNOSTIC, 2026-08-13: same progress-aware wait as above, same reasoning.
-  waitForAllUnitsReady(90000, 15000);
-#endif
 }
 
 //Translates char to letter position
@@ -177,10 +74,29 @@ void writeOffsetToUnit(int address, uint16_t offset) {
   Wire.endTransmission();
 }
 
-//Convenience overload for callers that only care about status/offset, not phase/progress.
+//Lightweight version for callers that only care about status/offset, not phase/progress -
+//requests only ANSWER_SIZE_LIGHT (3) bytes instead of the full ANSWER_SIZE (6), so the Unit's
+//TWI interrupt only fires 3 times per read instead of 6 (see the comment on ANSWER_SIZE_LIGHT
+//in ESPMaster.ino). Used by /api/units (the Administration page's unit list, which never
+//displayed phase/progress anyway) - waitForUnitReady() below still uses the full 4-out-param
+//version, since it genuinely needs phase/progress to tell "still working" from "actually stuck".
 bool readUnitInfo(int address, int &statusOut, int &offsetOut) {
-  int phaseOut, progressOut;
-  return readUnitInfo(address, statusOut, offsetOut, phaseOut, progressOut);
+  Wire.requestFrom(address, ANSWER_SIZE_LIGHT, 1);
+
+  if (Wire.available() < ANSWER_SIZE_LIGHT) {
+    SerialPrint("ERROR: Unit ");
+    SerialPrint(address);
+    SerialPrintln(" - No/incomplete response reading status+offset (light)");
+    recoverI2CBus();
+    return false;
+  }
+
+  statusOut = Wire.read();
+  int offsetLow = Wire.read();
+  int offsetHigh = Wire.read();
+  offsetOut = offsetLow + (offsetHigh << 8);
+
+  return true;
 }
 
 //Reads status, calibration offset, and (DIAGNOSTIC, 2026-08-13) phase/progress from a single
@@ -216,73 +132,14 @@ bool readUnitInfo(int address, int &statusOut, int &offsetOut, int &phaseOut, in
   return true;
 }
 
-//DIAGNOSTIC, 2026-08-13: waits for one unit to report "not moving", but instead of betting on
-//a single guessed timeout, extends the wait as long as we see genuine progress (phase/step
-//count actually changing between polls - see currentPhase/currentPhaseProgress in Unit.ino).
-//Only gives up if there's been no progress at all for stuckTimeoutMs (a real stuck/hung unit),
-//or the hard maxTotalWaitMs safety cap is hit regardless (never wait literally forever).
-//Replaces the old fixed-30s-timeout loops, which turned out to be too short for a legitimate
-//worst-case calibration search + rotation, causing the code to give up and send the *next*
-//letter command while the unit was still finishing the previous one.
-//Returns true if the unit reported idle, false if we gave up.
-bool waitForUnitReady(int unitIndex, unsigned long maxTotalWaitMs, unsigned long stuckTimeoutMs) {
-  unsigned long waitStart = millis();
-  unsigned long lastProgressSeenAt = waitStart;
-  int lastPhase = -1;
-  int lastProgress = -1;
-
-  while (millis() - waitStart < maxTotalWaitMs) {
-    int status, offset, phase, progress;
-    bool ok = readUnitInfo(unitIndex, status, offset, phase, progress);
-
-    if (ok && status != 1) {
-      //0 = ready, -1 = sleeping - either way, not actively moving, nothing to wait for
-      return true;
-    }
-
-    if (ok) {
-      SerialPrintln("Unit " + String(unitIndex) + " busy - phase " + String(phase) + ", progress " + String(progress) +
-        " (" + String((millis() - waitStart) / 1000) + "s waited)");
-
-      if (phase != lastPhase || progress != lastProgress) {
-        lastPhase = phase;
-        lastProgress = progress;
-        lastProgressSeenAt = millis();
-      }
-      //BUG FIX, 2026-08-13: the stuck-timeout check used to live inside this `if (ok)` branch,
-      //so it only ever fired when reads were succeeding but showing static phase/progress. A
-      //unit whose reads keep failing outright (not hanging, just erroring - a real, previously
-      //observed failure mode) never hit this check at all, and would only be caught by the much
-      //slower maxTotalWaitMs cap. Moved out so read failures count the same as "no progress".
-    } else {
-      SerialPrintln("Unit " + String(unitIndex) + " - read failed while waiting, retrying");
-    }
-
-    if (millis() - lastProgressSeenAt > stuckTimeoutMs) {
-      SerialPrintln("WARNING: Unit " + String(unitIndex) + " - no progress for " + String(stuckTimeoutMs / 1000) + "s, giving up");
-      forceUnitRecoveryReset(unitIndex);
-      return false;
-    }
-
-    yield(); // CRITICAL: Allow web server to process requests
-    delay(1000);
-  }
-
-  SerialPrintln("WARNING: Unit " + String(unitIndex) + " - hit max wait time (" + String(maxTotalWaitMs / 1000) + "s), giving up");
-  forceUnitRecoveryReset(unitIndex);
-  return false;
-}
-
-//Same as waitForUnitReady(), but for every currently-known unit in sequence.
-bool waitForAllUnitsReady(unsigned long maxTotalWaitMs, unsigned long stuckTimeoutMs) {
-  bool allReady = true;
-  for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
-    if (!waitForUnitReady(unitIndex, maxTotalWaitMs, stuckTimeoutMs)) {
-      allReady = false;
-    }
-  }
-  return allReady;
-}
+//REMOVED, 2026-08-21 (see BUGFIX_LOG.md #40/#81): waitForUnitReady()/waitForAllUnitsReady()/
+//showMessage() used to live here - a blocking, up-to-90s-per-call wait loop plus its caller.
+//Replaced by the non-blocking pollDisplayJobWaitAllUnitsReady() state-machine step in
+//ServiceDisplayJobFunctions.ino, which does the exact same per-unit stuck/timeout logic (same
+//90s/15s constants, same forceUnitRecoveryReset() escalation) but advances at most one unit-poll
+//per loop() iteration instead of blocking loop() itself until the whole wait is done. No other
+//caller used these functions (verified by grep before removing them) - showText() above was the
+//only one.
 
 //Checks if unit in display is currently moving
 bool isDisplayMoving() {

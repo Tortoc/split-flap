@@ -144,11 +144,14 @@
   These are important to maintain normal system behaviour. Only change if you know 
   what your doing.
 */
-//DIAGNOSTIC, 2026-08-13: was 3 (status byte + 2 offset bytes). Unit.ino's requestEvent() now
-//also sends a phase byte + 2 progress bytes (see currentPhase there) so we can tell "still
-//legitimately busy, making progress" from "actually stuck" - must match Unit.ino exactly, a
-//unit still running the old 3-byte firmware will fail every read until it's reflashed too.
+//Status byte + 2 offset bytes + phase byte + 2 progress bytes - must match Unit.ino's requestEvent().
 #define ANSWER_SIZE         6
+//Status + offset only (first 3 bytes of the same response) - Unit.ino doesn't need to know which
+//size is being requested; Wire.requestFrom()'s length parameter alone controls how many bytes
+//actually get clocked out (I2C read length is purely master-controlled - the slave's TWI ISR
+//stops firing as soon as the master NACKs, regardless of how much more it queued via
+//Wire.write()). See readUnitInfo()'s 3-arg overload in ServiceFlapFunctions.ino.
+#define ANSWER_SIZE_LIGHT   3
 #define FLAP_AMOUNT         45      //Amount of Flaps in each unit
 #define MIN_SPEED           1       //Min Speed
 #define MAX_SPEED           12      //Max Speed
@@ -208,6 +211,7 @@
 #include <WiFiUdp.h>
 #include <Wire.h>
 #include <user_interface.h> // struct rst_info, for the on-device crash reporter (ServiceCrashLogFunctions.ino)
+#include <lwip/priv/tcp_priv.h> // internal lwIP header - exposes tcp_active_pcbs/etc. for /api/tcp-status
 #include "Classes.h"
 #include "LittleFS.h"
 
@@ -225,18 +229,14 @@
 const char* wifiDirectSsid = "";
 const char* wifiDirectPassword = "";
 
-//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #63): this used to be a compile-time const char* (fixed
-//value "0424", only changeable by re-flashing) - now runtime-changeable and persisted to
-//LittleFS, so it can be viewed/changed from the Administration page without needing the Arduino
-//toolchain. Default changed to "splitflap" on user request. Loaded from otaPasswordPath in
-//loadValuesFromFileSystem() (ServiceFileSystemFunctions.ino), same pattern as alignment/
-//flapSpeed/deviceMode.
+//Runtime-changeable OTA password, persisted to LittleFS (see /api/ota-password). Default "splitflap".
 String otaPassword = "";
 const char* otaPasswordPath = "/otapassword.txt";
 
-//Change this to your timezone, use the TZ database name
-//https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
-const char* timezoneString = "America/Los_Angeles";
+//Runtime-changeable timezone, persisted to LittleFS (see /api/timezone). Default "Europe/Berlin".
+//Use a TZ database name: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+String timezoneSetting = "";
+const char* timezonePath = "/timezone.txt";
 
 //If you want to have a different date or clock format change these two
 //Complete table with every char: https://github.com/ropg/ezTime#getting-date-and-time
@@ -281,35 +281,18 @@ int unitsAmount = 0; //Auto-detected at startup by scanning I2C for units 0,1,2,
                       //(stops at the first missing address, same "sequential from 0" requirement
                       //the DIP switches already have) - see scanI2CBus() in setup().
 
-//Bench-tested on real hardware (2026-08-11): triggering an I2C bus scan/read directly from
-//inside an AsyncWebServer request callback reliably hangs the ESP for several seconds and then
-//crashes/reboots it - even for a scan that finds zero devices (pure address probes, no actual
-//data read). The *identical* scanI2CBus()/readUnitInfo() calls are rock solid when made from
-//setup() or loop(). Suspected cause: AsyncTCP callbacks run nested inside loop()'s own call
-//stack with much less headroom, and Wire's clock-stretch handling wants more of it than that
-//leaves free. Fix: handlers that need to touch the I2C bus never call Wire themselves - they
-//just remember the pending AsyncWebServerRequest here, and loop() (top-level stack) does the
-//actual bus work and calls request->send() itself once done. Only one of each can be in flight
-//at a time (single-operator admin page); a second request while one is pending gets an
-//immediate 503 rather than silently replacing/dropping the first.
+//Calling Wire directly from an AsyncWebServer callback crashes the ESP (nested call stack has too
+//little headroom for I2C clock-stretch handling) - these handlers just stash the request here,
+//loop() does the actual I2C work and calls send() itself. One in flight at a time; a second
+//request while one's pending gets 503 instead of silently replacing it.
 AsyncWebServerRequest* pendingRescanRequest = nullptr;
 AsyncWebServerRequest* pendingUnitsInfoRequest = nullptr;
 AsyncWebServerRequest* pendingLegacyI2CScanRequest = nullptr;
 
-//BUG FIX, 2026-08-13: ESPAsyncWebServer deletes the AsyncWebServerRequest object as soon as the
-//underlying client disconnects (AsyncWebServer::_handleDisconnect() in the library's
-//WebServer.cpp calls `delete request` unconditionally, whether or not a response was ever
-//sent) - found while double-checking this exact deferred-request pattern for other bugs. If a
-//client gives up/times out (very plausible now that a wait can legitimately take up to 90s, see
-//waitForAllUnitsReady()) while its request is sitting in one of the pendingXxxRequest globals
-//above, or *while loop() is already in the middle of the I2C work for it*, the request object
-//can be freed out from under us - a use-after-free the moment loop() later calls
-//deferredRequest->send() on it. A plain "null the pointer on disconnect" only covers the first
-//case (still queued); once loop() has taken its own local copy of the pointer and started work,
-//nulling the global doesn't help. So each pendingXxxRequest gets a matching *Disconnected flag:
-//the onDisconnect handler sets both (clearing the global so a still-queued request is skipped
-//entirely, and setting the flag so loop() can tell mid-flight that the object it's holding is
-//no longer safe to call send() on, even though its own local copy of the pointer looks fine).
+//ESPAsyncWebServer deletes the request object on client disconnect, even mid-flight while loop()
+//is doing the deferred I2C work for it - a plain null-the-pointer-on-disconnect only catches the
+//still-queued case. Each pendingXxxRequest gets a matching *Disconnected flag so loop() can tell
+//its local copy of the pointer is no longer safe to call send() on.
 bool pendingRescanRequestDisconnected = false;
 bool pendingUnitsInfoRequestDisconnected = false;
 bool pendingLegacyI2CScanRequestDisconnected = false;
@@ -367,21 +350,8 @@ bool alignmentUpdated = false;
 bool isPendingReboot = false;
 bool isPendingUnitsReset = false;
 bool isWifiConfigured = false;
-//BUG FIX, 2026-08-14: was `true` by default. That startup debug page is built via ~60
-//sequential String `+=` concatenations into one large (~3-4KB) heap-allocated String, then
-//sent via request->send(200, "text/html", html) - live-observed today serving genuinely
-//corrupted/binary content instead of valid HTML (confirmed: /index.html served directly via
-//request->send(LittleFS, ...) was always fine; only this dynamically-built debug page was
-//broken), most likely ESP8266 heap fragmentation from the large number of small, repeated
-//reallocations this concatenation pattern causes - not conclusively root-caused (would need
-//live serial access at the exact moment of corruption, unreliable all session - see
-//BUGFIX_LOG.md). Since debugModePath defaults to "true" whenever it doesn't exist yet
-//(readFile()'s fallback), *every* fresh boot/reflash was hitting this broken page first,
-//showing the user a blank white page at "/" until they happened to already know to visit
-///exit-debug-mode. The regular UI's own Serial Log panel already covers ordinary debugging
-//needs, so defaulting this off is a safe, low-risk fix even without a fully isolated root
-//cause - regular diagnostics aren't lost, just this specific fragile code path is no longer
-//exercised by default.
+//Defaults off - the dynamically-built startup debug page caused blank/corrupted pages on fresh
+//boots (see BUGFIX_LOG.md). Toggle via POST /api/debug-mode.
 bool showDebugPage = false;
 volatile bool webRequestActive = false; // Flag to skip display updates during web requests
 LList<ScheduledMessage> scheduledMessages;
@@ -404,13 +374,47 @@ bool isInOtaMode = false;
 //Used to reject a browser firmware upload part-way through if the password didn't match
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
 bool firmwareUpdateAuthFailed = false;
+
+//BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #79): Update.begin()/write() used to run directly inside
+//the AsyncWebServer upload callback - live-confirmed to crash the ESP with a real stack-overflow
+//panic (`Panic core_esp8266_main.cpp:191 __yield`, ctx: sys) on the very first chunk, every time.
+//Same root cause this project already hit once with I2C calls in an AsyncWebServer callback (see
+//pendingRescanRequest etc. above) - that context's stack is too small for this kind of work.
+//Fix: the callback below only copies bytes into this ring buffer; loop() does all the actual
+//Update.begin()/write()/end() calls in its own large, safe stack. Sized well above what a single
+//upload chunk plus whatever accumulates during one Update.write() call's internal yield()s should
+//ever need, with graceful abort (not memory corruption) if it's ever not enough.
+//Allocated with new[] only while an upload is actually in progress (see index==0 below) and freed
+//right after - this device's free heap is chronically tight (see BUGFIX_LOG.md #41-43), a 4KB
+//buffer held statically for a rarely-used feature would eat noticeably into that budget for no
+//benefit the other 99% of the time this device is running.
+//Live-tested progression: 4096 overflowed early. 8192 got a full transfer through the network at
+//~150KB/s but the ring still overflowed partway (flash erase/write apparently can't always keep
+//up with that network speed on this device - a genuine throughput limit, not just a buffer-size
+//one). 16384 sounded like the fix but simply failed to allocate - this device's free heap is only
+//~15KB total (see BUGFIX_LOG.md #41-43), so a 16KB request never had headroom to succeed. 8192 is
+//close to the practical ceiling here: big enough to ride out normal short bursts, small enough to
+//reliably allocate. On a sufficiently fast connection this can still legitimately run out of
+//buffer - that now fails cleanly (a proper error response, old firmware stays active, no crash)
+//instead of the original stack-overflow panic, which is the actual bug this fix targets.
+#define OTA_RING_SIZE 8192
+uint8_t* otaRingBuffer = nullptr;
+volatile size_t otaRingHead = 0;   //next write index (callback advances this)
+volatile size_t otaRingTail = 0;   //next read index (loop() advances this)
+volatile size_t otaRingCount = 0;  //bytes currently queued, valid range 0..OTA_RING_SIZE
+volatile bool otaUpdateActive = false;    //true from the first chunk until fully finished
+volatile bool otaUpdateBegun = false;     //Update.begin() has been called for this upload
+volatile bool otaFinalChunkQueued = false;//callback has queued the last chunk (final==true)
+volatile bool otaRingOverflowed = false;  //callback had no room to queue a chunk - abort
+volatile bool otaClientDisconnected = false; //client left before the upload finished
+volatile bool otaResultReady = false;     //loop() has finished Update.end() (success or not)
+volatile bool otaResultSuccess = false;   //valid once otaResultReady is true
+AsyncWebServerRequest* pendingFirmwareUploadRequest = nullptr;
+bool pendingFirmwareUploadRequestDisconnected = false;
 #endif
-//SECURITY FIX, 2026-08-13: same reasoning, for /unit-firmware-upload - see the comment there.
 #if UNIT_BOOTLOADER_ENABLE == true
 bool unitFirmwareUploadAuthFailed = false;
 #endif
-//BUG FIX, 2026-08-15: same reasoning, for /admin/upload-web-file - see the comment there
-//(BUGFIX_LOG.md #56).
 bool webFileUploadAuthFailed = false;
 
 // LED Debugging variables
@@ -519,6 +523,12 @@ void setup() {
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
 #endif
 
+  //I2C Fast Mode (400kHz) instead of the 100kHz default - every I2C read runs inside the Unit's
+  //TWI interrupt handler (briefly blocking its main loop, e.g. mid-stepper-timing during
+  //calibration), so a faster bus means less time stolen per transaction. Units run at 16MHz and
+  //already have 4.7k pull-ups on SDA/SCL, both comfortably support Fast Mode. See BUGFIX_LOG.md.
+  Wire.setClock(400000);
+
 #if UNIT_BOOTLOADER_ENABLE == true
   //twiboot (compiled with USE_CLOCKSTRETCH=1, see Unit/BOOTLOADER_SETUP.md) holds SCL low
   //while a flash page write is in progress. Give it comfortably more time than the ATmega328p's
@@ -533,20 +543,16 @@ void setup() {
   blinkLed(1, 100, 50); // Quick blink to show startup
 #endif
 
-  // I2C bus scan on startup - determines unitsAmount. Retry a few times in case the bus
-  // hasn't fully settled yet (500ms should normally be plenty, this is just extra slack).
-  delay(500); // Give I2C bus time to stabilize
-  SerialPrintln("");
-  SerialPrintln("=== I2C Bus Scan on Startup ===");
-  for (int scanAttempt = 0; scanAttempt < 3 && unitsAmount == 0; scanAttempt++) {
-    if (scanAttempt > 0) {
-      SerialPrintln("No units found, retrying scan...");
-      delay(300);
-    }
-    scanI2CBus();
-  }
-  SerialPrintln("");
-
+  // DIAGNOSTIC, 2026-08-16 (see BUGFIX_LOG.md #73/#76): the first I2C scan used to happen right
+  // here, blocking setup() with a delay(500) ("give the I2C bus time to stabilize") - later
+  // pushed to delay(30000) as a live experiment (individual Units have repeatedly been observed
+  // spinning endlessly trying to calibrate right after an ESPMaster reboot, see BUGFIX_LOG.md's
+  // Offene Punkte), which also pushed WiFi/web server startup back by the same ~29.5s as an
+  // unwanted side effect. Nothing else in setup() actually depends on unitsAmount being known
+  // yet (the web server and display logic already treat unitsAmount==0 as "no units found so
+  // far" gracefully) - so the scan is now deferred to loop() instead, see the
+  // firstUnitScanDone block there. Same 30s delay before the first real I2C transaction, but
+  // WiFi/the web server start immediately as before #73.
   SerialPrintln("");
   SerialPrintln("#######################################################");
   SerialPrintln("..............Split Flap Display Starting..............");
@@ -573,24 +579,19 @@ void setup() {
     SerialPrintln("DEBUG: Status = " + debugStatus);
     blinkLed(3, 200, 100); // 3 blinks = NTP syncing
     
-    // Set sync interval but don't block
-    setInterval(60); // Sync every 60 seconds
+    // BUG FIX, 2026-08-16 (see BUGFIX_LOG.md #78): was setInterval(60). ezTime's vendored
+    // NTP_RETRY constant (ezTime.h) unconditionally reschedules a retry 20s after any failed
+    // sync, independent of this interval - resyncing every 60s gave that retry path frequent
+    // chances to fire and, per live monitoring, correlated with a recurring ~50-65s
+    // unreachable/reachable WiFi cycle. A wall-clock display doesn't need minute-level NTP
+    // freshness, so we back off hard to shrink that exposure window. setInterval() takes a
+    // uint16_t (max 65535s / ~18.2h), so a true 24h interval isn't representable - 6h is the
+    // most conservative round value comfortably in range.
+    setInterval(21600); // Sync every 6 hours
 
-    //BUG FIX, 2026-08-15: was setDebug(INFO). Live-caught via the new, reliable FTDI serial
-    //adapter (the old CH340 dropped too often to ever capture enough sustained output to
-    //notice this): ezTime's own internal INFO-level logging (updateNTP()'s "Received time: ...
-    //ms fast)" message, ezTime.cpp) was printing at an extreme rate - one 60s capture showed
-    //the same message's tail fragment (" ms fast)") repeated 44000+ times in a few minutes,
-    //right after a "Querying pool.ntp.org ... ERROR: No network" line (i.e. right around a
-    //WiFi hiccup) - while the full message's actual prefix only appeared 3 times, matching the
-    //genuine ~60s sync interval. Root cause not fully isolated inside ezTime's own event-
-    //scheduling code, but the practical effect is real regardless of the exact mechanism: tens
-    //of thousands of Serial writes per minute is real, wasted loop()/UART time that could
-    //plausibly starve everything else (web server responsiveness, I2C timing) - a strong
-    //candidate for a chunk of this whole project's hard-to-pin-down instability history.
-    //setDebug(NONE) stops ezTime's own internal logging at the source, regardless of how many
-    //times the underlying code path actually re-fires - our own SerialPrintln()-based DEBUG:
-    //logging elsewhere is unaffected.
+    //Was setDebug(INFO) - ezTime's own internal logging was firing 44000+ times in a few
+    //minutes around WiFi hiccups, wasting loop()/UART time. Our own SerialPrintln() logging is
+    //unaffected. See BUGFIX_LOG.md.
     setDebug(NONE);
     
     // Try to sync with timeout (non-blocking)
@@ -618,9 +619,6 @@ void setup() {
       SerialPrintln("DEBUG: WARNING - NTP sync failed or timed out, continuing anyway");
     }
     
-    timezone.setLocation(timezoneString);
-    SerialPrintln("DEBUG: Timezone set to: " + String(timezoneString));
-    
     //Load various variables
     debugStatus = "File System Init";
     SerialPrintln("DEBUG: Status = " + debugStatus);
@@ -628,11 +626,14 @@ void setup() {
     initialiseFileSystem();
     loadValuesFromFileSystem();
     checkAndPersistCrashLog(); // see ServiceCrashLogFunctions.ino - must run after LittleFS mounts
+
+    // Moved here (see BUGFIX_LOG.md #78): needs timezoneSetting, which loadValuesFromFileSystem()
+    // just populated from LittleFS (or its "Europe/Berlin" default on first boot).
+    timezone.setLocation(timezoneSetting);
+    SerialPrintln("DEBUG: Timezone set to: " + timezoneSetting);
     
     // Load debug mode setting
 #if DEBUG_ENABLE == true
-    //BUG FIX, 2026-08-14: default changed from "true" to "false" - see the comment on the
-    //showDebugPage declaration above.
     String debugModeSetting = readFile(LittleFS, debugModePath, "false");
     showDebugPage = (debugModeSetting == "true");
     SerialPrintln("DEBUG: Debug mode: " + String(showDebugPage ? "enabled" : "disabled") + " (controls startup page, error status, page load log, and serial log)");
@@ -647,19 +648,14 @@ void setup() {
     SerialPrintln("DEBUG: Status = " + debugStatus);
     blinkLed(7, 200, 100); // 7 blinks = Web server starting
     
-    //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #60): this used to set .setCacheControl("no-cache")
-    //here to fix browsers serving a stale cached copy after a web-file update - worked, but
-    //REVERTED (see BUGFIX_LOG.md #69) after the user reported ERR_EMPTY_RESPONSE happening too
-    //often, live-reproduced as heap fragmentation climbing unusually fast (10%->20% within
-    //minutes) under repeated requests. AsyncStaticWebHandler's cache-control path adds real
-    //per-request overhead (If-None-Match header tracking, ETag computation, an extra
-    //AsyncBasicResponse allocation on 304s) - on this heap-constrained device that's a
-    //meaningfully worse trade than the (comparatively minor, dev-time-only) stale-cache
-    //inconvenience it was fixing. Taking the user's regression report seriously and reverting
-    //rather than defending the change - see the "take user regression reports seriously" lesson
-    //from earlier in this project. A manual hard-refresh after updating a web file is back to
-    //being necessary, same as before #60.
+    //No .setCacheControl() - it drove heap fragmentation up fast on repeated requests (reverted,
+    //see BUGFIX_LOG.md #69). Hard-refresh needed after updating a web file.
     webServer.serveStatic("/", LittleFS, "/");
+
+    //All API routes below live under a single "/api/" prefix (was a mix of "/admin/..." and
+    //no-prefix paths) - full endpoint reference in API.md, rename rationale in BUGFIX_LOG.md #74.
+    //Not yet flash-tested on hardware as of the #74 rename (programmer was broken) - treat as
+    //"ready to test" until the next successful flash confirms it.
     webServer.on("/", HTTP_GET, [](AsyncWebServerRequest * request) {
       unsigned long pageRequestStart = millis();
       SerialPrintln("DEBUG: Request Home Page Received");
@@ -744,8 +740,9 @@ void setup() {
         html += "      window.location.href = '/';";
         html += "    }";
         html += "  };";
-        html += "  xhr.open('GET', '/exit-debug-mode', true);";
-        html += "  xhr.send();";
+        html += "  xhr.open('POST', '/api/debug-mode', true);";
+        html += "  xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');";
+        html += "  xhr.send('enabled=false');";
         html += "}";
         html += "loadLog();";
         html += "setInterval(loadLog, 1000);"; // Auto-refresh every second
@@ -763,7 +760,7 @@ void setup() {
       SerialPrintln("DEBUG: index.html sent (total: " + String(millis() - pageRequestStart) + "ms)");
     });
 
-    webServer.on("/settings", HTTP_GET, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/settings", HTTP_GET, [](AsyncWebServerRequest * request) {
       unsigned long settingsStart = millis();
       SerialPrintln("DEBUG: Request for Settings Received at " + String(settingsStart) + "ms");
       
@@ -787,6 +784,12 @@ void setup() {
       minimalDoc["scheduledMessages"] = JsonArray();
       minimalDoc["wifiSettingsResettable"] = true;
       minimalDoc["otaEnabled"] = false;
+      //Folded in here (see BUGFIX_LOG.md #80) so the Administration view can populate its OTA
+      //password/timezone displays from the one /api/settings fetch it already does, instead of
+      //two more separate XHRs - opening that view used to fire 4 near-simultaneous requests
+      //against this device's hard 5-connection TCP limit (see #70).
+      minimalDoc["otaPassword"] = otaPassword;
+      minimalDoc["timezone"] = timezoneSetting;
       
       // Try to get scheduled messages quickly (with timeout)
       unsigned long beforeScheduled = millis();
@@ -801,13 +804,8 @@ void setup() {
         }
       }
       
-      //HARDENING, 2026-08-15: switched from building a contiguous String (then handing it to
-      //send(), which copied it again) to beginResponseStream() - same fix as /log (BUGFIX_LOG.md
-      //#42/#44), applied here because this is the actual live equivalent of that bug: this is the
-      //response getCurrentSettingValues() *used to* build before something (predating this
-      //session) inlined the same logic directly into this handler instead - the standalone
-      //function is now dead code, never called. measureJson() gives the same size figure for the
-      //debug log without needing a full contiguous buffer just to measure it. See BUGFIX_LOG.md #52.
+      //beginResponseStream() avoids building the JSON into one contiguous String first (same fix
+      //as /api/log, see BUGFIX_LOG.md #42/#44/#52).
       unsigned long totalTime = millis() - settingsStart;
       SerialPrintln("DEBUG: Settings response ready in " + String(totalTime) + "ms, JSON size: " + String(measureJson(minimalDoc)) + " bytes");
 
@@ -821,7 +819,7 @@ void setup() {
       webRequestActive = false;
     });
     
-    webServer.on("/health", HTTP_GET, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/health", HTTP_GET, [](AsyncWebServerRequest * request) {
       SerialPrintln("DEBUG: Request for Health Check Received");
       request->send(200, "text/plain", "Healthy");
     });
@@ -831,19 +829,42 @@ void setup() {
     // permanently, unlike the one-off /debug/trigger-crash endpoint from #38 - this one is
     // read-only, has no allocation/crash risk of its own (plain text, stack-only char buffer),
     // and is cheap, ongoing insight worth having if heap pressure ever creeps back up.
-    webServer.on("/heap", HTTP_GET, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/heap", HTTP_GET, [](AsyncWebServerRequest * request) {
       char buf[96];
       snprintf(buf, sizeof(buf), "free=%u frag=%u%% maxBlock=%u", ESP.getFreeHeap(), ESP.getHeapFragmentation(), ESP.getMaxFreeBlockSize());
       request->send(200, "text/plain", buf);
     });
-    
+
+    // DIAGNOSTIC, 2026-08-15 (see BUGFIX_LOG.md #70): added while investigating the residual,
+    // self-recovering "ERR_EMPTY_RESPONSE" pattern noted in #69. This board's lwIP build
+    // (verified in lwipopts.h, all 8 board-menu "lwIP variant" choices share this same value)
+    // hard-caps MEMP_NUM_TCP_PCB at 5 - only 5 simultaneously *active* TCP connections, with a
+    // *separate* 5-slot pool for connections in TIME-WAIT after closing (ESPAsyncWebSrv sets
+    // "Connection: close" on every response, so every request opens a fresh connection). Read-
+    // only, no allocation, same risk profile as /heap - walks lwIP's own linked lists.
+    webServer.on("/api/tcp-status", HTTP_GET, [](AsyncWebServerRequest * request) {
+      int activeCount = 0;
+      for (struct tcp_pcb *p = tcp_active_pcbs; p != NULL; p = p->next) activeCount++;
+      int timeWaitCount = 0;
+      for (struct tcp_pcb *p = tcp_tw_pcbs; p != NULL; p = p->next) timeWaitCount++;
+      int boundCount = 0;
+      for (struct tcp_pcb *p = tcp_bound_pcbs; p != NULL; p = p->next) boundCount++;
+      int listenCount = 0;
+      for (struct tcp_pcb_listen *p = tcp_listen_pcbs.listen_pcbs; p != NULL; p = p->next) listenCount++;
+
+      char buf[128];
+      snprintf(buf, sizeof(buf), "active=%d/5 timeWait=%d/5 bound=%d listen=%d", activeCount, timeWaitCount, boundCount, listenCount);
+      request->send(200, "text/plain", buf);
+    });
+
+
     // Simple test endpoint that responds immediately
-    webServer.on("/test", HTTP_GET, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/test", HTTP_GET, [](AsyncWebServerRequest * request) {
       SerialPrintln("DEBUG: Test endpoint called");
       request->send(200, "application/json", "{\"status\":\"ok\",\"time\":" + String(millis()) + "}");
     });
     
-    webServer.on("/log", HTTP_GET, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/log", HTTP_GET, [](AsyncWebServerRequest * request) {
       // DIAGNOSTIC FIX, 2026-08-13: this used to be `StaticJsonDocument<25000> document;` -
       // as a *local* variable, that puts a 25000-byte buffer on the stack of this very
       // AsyncWebServer callback, which (see the pendingRescanRequest comment near unitsAmount)
@@ -905,7 +926,7 @@ void setup() {
     // On-device crash log (added 2026-08-13, see ServiceCrashLogFunctions.ino) - survives
     // even if the live serial connection wasn't available/reliable at the moment of a
     // crash. One JSON object per line (JSON Lines), oldest first, newest last.
-    webServer.on("/crash-log", HTTP_GET, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/crash-log", HTTP_GET, [](AsyncWebServerRequest * request) {
       if (!LittleFS.exists(CRASH_LOG_PATH)) {
         request->send(200, "application/jsonl", "");
         return;
@@ -915,7 +936,7 @@ void setup() {
 
     // Clears the persisted crash log. POST (not GET) per this project's CSRF-hardening
     // convention (see the 2026-08-13 BUGFIX_LOG entry on GET-triggered state changes).
-    webServer.on("/crash-log/clear", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/crash-log", HTTP_DELETE, [](AsyncWebServerRequest * request) {
       if (LittleFS.exists(CRASH_LOG_PATH)) {
         LittleFS.remove(CRASH_LOG_PATH);
       }
@@ -923,17 +944,15 @@ void setup() {
     });
 
     // I2C bus scanner endpoint for diagnostics
-    webServer.on("/i2c-scan", HTTP_GET, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/i2c-scan", HTTP_GET, [](AsyncWebServerRequest * request) {
       SerialPrintln("DEBUG: I2C scan requested");
-      //Deferred to loop() - see the comment on pendingLegacyI2CScanRequest near unitsAmount.
+      //Deferred to loop().
       if (pendingLegacyI2CScanRequest != nullptr) {
         request->send(503, "text/plain", "Another I2C scan is already in progress, try again shortly");
         return;
       }
       pendingLegacyI2CScanRequestDisconnected = false;
       pendingLegacyI2CScanRequest = request;
-      //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near
-      //unitsAmount - guards against both a still-queued and a mid-flight disconnect.
       request->onDisconnect([]() {
         pendingLegacyI2CScanRequest = nullptr;
         pendingLegacyI2CScanRequestDisconnected = true;
@@ -941,8 +960,8 @@ void setup() {
     });
 
     // Admin: read live status + calibration offset for every unit.
-    //Deferred to loop() - see the comment on pendingUnitsInfoRequest near unitsAmount.
-    webServer.on("/admin/units", HTTP_GET, [](AsyncWebServerRequest * request) {
+    //Deferred to loop().
+    webServer.on("/api/units", HTTP_GET, [](AsyncWebServerRequest * request) {
       SerialPrintln("DEBUG: Admin units request received");
       if (pendingUnitsInfoRequest != nullptr) {
         request->send(503, "text/plain", "Another units request is already in progress, try again shortly");
@@ -950,8 +969,6 @@ void setup() {
       }
       pendingUnitsInfoRequestDisconnected = false;
       pendingUnitsInfoRequest = request;
-      //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near
-      //unitsAmount - guards against both a still-queued and a mid-flight disconnect.
       request->onDisconnect([]() {
         pendingUnitsInfoRequest = nullptr;
         pendingUnitsInfoRequestDisconnected = true;
@@ -960,8 +977,8 @@ void setup() {
 
     // Admin: re-run the I2C scan to pick up units that were connected/fixed after boot,
     // without needing a full reboot. Updates the global unitsAmount used everywhere else.
-    //Deferred to loop() - see the comment on pendingRescanRequest near unitsAmount.
-    webServer.on("/admin/rescan-units", HTTP_POST, [](AsyncWebServerRequest * request) {
+    //Deferred to loop().
+    webServer.on("/api/units/rescan", HTTP_POST, [](AsyncWebServerRequest * request) {
       SerialPrintln("DEBUG: Admin rescan-units request received");
       if (pendingRescanRequest != nullptr) {
         request->send(503, "text/plain", "Another rescan is already in progress, try again shortly");
@@ -969,8 +986,6 @@ void setup() {
       }
       pendingRescanRequestDisconnected = false;
       pendingRescanRequest = request;
-      //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near
-      //unitsAmount - guards against both a still-queued and a mid-flight disconnect.
       request->onDisconnect([]() {
         pendingRescanRequest = nullptr;
         pendingRescanRequestDisconnected = true;
@@ -978,7 +993,7 @@ void setup() {
     });
 
     // Admin: set a new calibration offset on a single unit, unit recalibrates immediately
-    webServer.on("/admin/unit-offset", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/units/offset", HTTP_POST, [](AsyncWebServerRequest * request) {
       if (!request->hasParam(PARAM_ID, true) || !request->hasParam(PARAM_UNIT_OFFSET, true)) {
         SerialPrintln("Admin unit-offset request missing parameters");
         request->send(400, "text/plain", "Both 'id' and 'offset' are required");
@@ -1015,14 +1030,9 @@ void setup() {
       request->send(202, "text/plain", "Offset sent. Unit is recalibrating now, this can take a few seconds.");
     });
 
-    //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #56): updating a static web UI file used to mean
-    //rebuilding and reflashing the *entire* littlefs.bin image - which would silently wipe every
-    //runtime file living in the same filesystem (alignment.txt, flapspeed.txt, devicemode.txt,
-    //countdown.txt, scheduled-messages.txt, debugmode.txt, crash-log.jsonl, unit-firmware.bin).
-    //This lets a single known static asset be replaced in place instead. Restricted to a fixed
-    //allowlist of the actual filenames in ESPMaster/data/ - deliberately NOT an arbitrary path,
-    //so this can never become a way to overwrite one of those runtime files.
-    webServer.on("/admin/upload-web-file", HTTP_POST,
+    //Replaces a single static web UI file in place, without a full littlefs.bin reflash (which
+    //would wipe runtime settings files). Filename allowlisted, not an arbitrary path.
+    webServer.on("/api/web-file", HTTP_POST,
       [](AsyncWebServerRequest * request) {
         if (webFileUploadAuthFailed) {
           webFileUploadAuthFailed = false;
@@ -1046,8 +1056,8 @@ void setup() {
             }
           }
 
-          webUploadFilenameValid = (filename == "index.html" || filename == "script.js" ||
-            filename == "admin.html" || filename == "admin.js" || filename == "style.css");
+          //"index.html" is the only valid target - the whole UI is one file now (BUGFIX_LOG.md #72).
+          webUploadFilenameValid = (filename == "index.html");
           if (!webUploadFilenameValid) {
             SerialPrintln("Web file upload rejected: filename not in allowlist: " + filename);
             request->send(400, "text/plain", "Filename must be one of the known static assets");
@@ -1080,12 +1090,10 @@ void setup() {
 
 #if UNIT_BOOTLOADER_ENABLE == true
     // Admin: upload a compiled Unit.ino firmware image (raw AVR flash .bin, NOT the ESPMaster's own
-    // .bin) to be pushed to a unit afterwards via /unit-firmware-push. See Unit/BOOTLOADER_SETUP.md.
-    //SECURITY FIX, 2026-08-13: this (and /unit-firmware-push below) had no access control at all,
-    //unlike /firmware-update (the ESPMaster's own OTA endpoint), which already requires
-    //X-OTA-Password when one is configured. Anyone on the LAN could push arbitrary code to run on
-    //the Unit's AVR - now gated the same way, reusing the same password/header for consistency.
-    webServer.on("/unit-firmware-upload", HTTP_POST,
+    // .bin) to be pushed to a unit afterwards via /api/units/firmware/push. See Unit/BOOTLOADER_SETUP.md.
+    // Requires X-OTA-Password, same as /api/firmware - anyone on the LAN could otherwise push
+    // arbitrary code to the unit's AVR.
+    webServer.on("/api/units/firmware", HTTP_POST,
       [](AsyncWebServerRequest * request) {
         if (unitFirmwareUploadAuthFailed) {
           unitFirmwareUploadAuthFailed = false;
@@ -1133,11 +1141,8 @@ void setup() {
     );
 
     // Admin: push the currently stored unit firmware to a single unit over I2C (twiboot).
-    // Deferred to loop() - see the comment on pendingRescanRequest near unitsAmount; this does
-    // I2C reads (verify-after-write) just like the endpoints fixed there, so the same handler-
-    // stack crash applies here too.
-    //SECURITY FIX, 2026-08-13: was unauthenticated - see the comment on /unit-firmware-upload.
-    webServer.on("/unit-firmware-push", HTTP_POST, [](AsyncWebServerRequest * request) {
+    // Deferred to loop(), same reasoning as pendingRescanRequest above. Requires X-OTA-Password.
+    webServer.on("/api/units/firmware/push", HTTP_POST, [](AsyncWebServerRequest * request) {
       if (String(otaPassword) != "") {
         String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
         if (providedPassword != String(otaPassword)) {
@@ -1177,14 +1182,8 @@ void setup() {
       pendingFirmwarePushUnitIndex = unitId;
       pendingFirmwarePushRequestDisconnected = false;
       pendingFirmwarePushRequest = request;
-      //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near
-      //unitsAmount - guards against both a still-queued and (especially likely here, a real
-      //firmware push can take several seconds) a mid-flight disconnect. Note: this only
-      //controls whether we call send() on the (possibly now-freed) request object afterwards -
-      //an in-flight pushFirmwareToUnit() call already running in loop() always finishes what it
-      //started regardless (by design, see the safety property documented on
-      //pushFirmwareToUnit()), it just won't have anywhere to report the result if the client is
-      //already gone.
+      //Note: an in-flight pushFirmwareToUnit() always runs to completion regardless of this flag
+      //(by design) - it just has nowhere to report the result if the client already left.
       request->onDisconnect([]() {
         pendingFirmwarePushRequest = nullptr;
         pendingFirmwarePushRequestDisconnected = true;
@@ -1195,7 +1194,7 @@ void setup() {
     // on, without writing anything to flash. Used to verify the DIP-jumper address is read live
     // by twiboot (see BOOTLOADER_SETUP.md's jumper-live-test) without risking a real firmware
     // push. Deferred to loop() for the same reason as /unit-firmware-push above.
-    webServer.on("/admin/unit-bootloader-probe", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/units/bootloader-probe", HTTP_POST, [](AsyncWebServerRequest * request) {
       if (!request->hasParam(PARAM_ID, true)) {
         request->send(400, "text/plain", "'id' is required");
         return;
@@ -1221,8 +1220,6 @@ void setup() {
       pendingBootloaderProbeUnitIndex = unitId;
       pendingBootloaderProbeRequestDisconnected = false;
       pendingBootloaderProbeRequest = request;
-      //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near
-      //unitsAmount - guards against both a still-queued and a mid-flight disconnect.
       request->onDisconnect([]() {
         pendingBootloaderProbeRequest = nullptr;
         pendingBootloaderProbeRequestDisconnected = true;
@@ -1234,32 +1231,49 @@ void setup() {
     // Admin: browser-based firmware upload (no Arduino IDE required).
     // Password (if otaPassword is set) is passed via the X-OTA-Password header so it's available
     // before the file data starts streaming in, regardless of multipart field order.
-    webServer.on("/firmware-update", HTTP_POST,
+    //
+    // BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #79): Update.begin()/write()/end() used to be called
+    // directly from the upload callback below - live-confirmed to crash the ESP on the very first
+    // chunk every time (`Panic core_esp8266_main.cpp:191 __yield`, ctx: sys - a stack overflow,
+    // this callback's stack is too small for what Update.begin()'s flash erase needs). Fix: this
+    // callback ONLY copies bytes into otaRingBuffer; loop() does all the actual Update.* calls in
+    // its own large, safe stack. See the ring-buffer globals near firmwareUpdateAuthFailed above.
+    webServer.on("/api/firmware", HTTP_POST,
       [](AsyncWebServerRequest * request) {
-        //Runs once the full upload has been received and handled by the upload callback below
+        //Runs once AsyncWebServer has received the whole body (every chunk already handed to the
+        //upload callback below). The actual flash write may still be draining in loop() at this
+        //point - don't respond here, just hand off the request; loop() sends the real response
+        //once Update.end() has actually run (see the pendingFirmwareUploadRequest block below).
         if (firmwareUpdateAuthFailed) {
           firmwareUpdateAuthFailed = false;
           request->send(401, "text/plain", "Invalid password");
           return;
         }
-
-        bool success = !Update.hasError();
-        AsyncWebServerResponse* response = request->beginResponse(success ? 200 : 500, "text/plain",
-          success ? "OK - Firmware written, rebooting now" : "Update failed, check the serial log for details");
-        response->addHeader("Connection", "close");
-        request->send(response);
-
-        if (success) {
-          SerialPrintln("Firmware update successful, rebooting...");
-          isPendingReboot = true;
-        } else {
-          SerialPrintln("Firmware update failed");
-        }
+        pendingFirmwareUploadRequestDisconnected = false;
+        pendingFirmwareUploadRequest = request;
       },
       [](AsyncWebServerRequest * request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
         if (index == 0) {
           SerialPrintln("DEBUG: Firmware upload starting: " + filename);
           firmwareUpdateAuthFailed = false;
+          otaRingHead = 0;
+          otaRingTail = 0;
+          otaRingCount = 0;
+          otaUpdateBegun = false;
+          otaFinalChunkQueued = false;
+          otaClientDisconnected = false;
+          otaResultReady = false;
+          //Freed by loop() once it's done with the upload (success or not) - see below. Allocated
+          //fresh per upload rather than held statically, see the comment on the declaration above.
+          if (otaRingBuffer != nullptr) {
+            delete[] otaRingBuffer; //shouldn't happen (loop() always frees before the next upload
+                                    //could start), but don't leak if it somehow does
+          }
+          otaRingBuffer = new (std::nothrow) uint8_t[OTA_RING_SIZE];
+          otaRingOverflowed = (otaRingBuffer == nullptr);
+          if (otaRingOverflowed) {
+            SerialPrintln("Firmware upload: could not allocate ring buffer, aborting");
+          }
 
           //Only enforce the password if one has actually been configured
           if (String(otaPassword) != "") {
@@ -1271,58 +1285,72 @@ void setup() {
             }
           }
 
-          uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
-          if (!Update.begin(maxSketchSpace, U_FLASH)) {
-            SerialPrintln("Firmware upload: Update.begin() failed");
-            Update.printError(Serial);
+          //Registered here (not just in the completion callback above) so a client that
+          //disconnects mid-upload - before AsyncWebServer ever considers the request "complete" -
+          //still gets noticed by loop(), instead of leaving otaUpdateActive stuck forever.
+          request->onDisconnect([]() {
+            otaClientDisconnected = true;
+            pendingFirmwareUploadRequest = nullptr;
+            pendingFirmwareUploadRequestDisconnected = true;
+          });
+
+          otaUpdateActive = true; //loop() calls Update.begin() itself, see below
+        }
+
+        if (firmwareUpdateAuthFailed || !otaUpdateActive || otaRingOverflowed) {
+          return; //Password rejected, ring buffer alloc failed, or a stray chunk after we gave up
+        }
+
+        if (len > 0) {
+          if (otaRingCount + len > OTA_RING_SIZE) {
+            SerialPrintln("Firmware upload: ring buffer overflow, aborting");
+            otaRingOverflowed = true;
+          } else {
+            size_t firstPart = OTA_RING_SIZE - otaRingHead;
+            if (firstPart >= len) {
+              memcpy(otaRingBuffer + otaRingHead, data, len);
+            } else {
+              memcpy(otaRingBuffer + otaRingHead, data, firstPart);
+              memcpy(otaRingBuffer, data + firstPart, len - firstPart);
+            }
+            otaRingHead = (otaRingHead + len) % OTA_RING_SIZE;
+            otaRingCount += len;
           }
-        }
-
-        if (firmwareUpdateAuthFailed) {
-          return; //Password rejected, ignore the rest of the upload - final response already handled above
-        }
-
-        if (Update.write(data, len) != len) {
-          SerialPrintln("Firmware upload: Update.write() failed");
-          Update.printError(Serial);
         }
 
         if (final) {
-          if (Update.end(true)) {
-            SerialPrintln("DEBUG: Firmware upload finished successfully. Total bytes: " + String(index + len));
-          } else {
-            SerialPrintln("Firmware upload: Update.end() failed");
-            Update.printError(Serial);
-          }
+          otaFinalChunkQueued = true;
         }
       }
     );
 #endif
 
 #if DEBUG_ENABLE == true
-    webServer.on("/exit-debug-mode", HTTP_GET, [](AsyncWebServerRequest * request) {
-      SerialPrintln("DEBUG: Request to exit debug mode received");
-      showDebugPage = false;
-      writeFile(LittleFS, debugModePath, "false");
-      request->send(200, "text/plain", "OK - Debug mode disabled. Startup debug page, error status, and debug logs will be hidden.");
-    });
-    
-    webServer.on("/enable-debug-mode", HTTP_GET, [](AsyncWebServerRequest * request) {
-      SerialPrintln("DEBUG: Request to enable debug mode received");
-      showDebugPage = true;
-      writeFile(LittleFS, debugModePath, "true");
-      request->send(200, "text/plain", "OK - Debug mode enabled. This enables: startup debug page, error status panel, page load debug log, and serial debug log. Refresh page to see changes.");
+    //Used to be two CSRF-via-GET endpoints (/exit-debug-mode, /enable-debug-mode) - merged into
+    //one POST with an "enabled" param (see BUGFIX_LOG.md #74).
+    webServer.on("/api/debug-mode", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (!request->hasParam("enabled", true)) {
+        request->send(400, "text/plain", "'enabled' is required (true/false)");
+        return;
+      }
+
+      bool enabled = request->getParam("enabled", true)->value() == "true";
+      showDebugPage = enabled;
+      writeFile(LittleFS, debugModePath, enabled ? "true" : "false");
+
+      if (enabled) {
+        SerialPrintln("DEBUG: Request to enable debug mode received");
+        request->send(200, "text/plain", "OK - Debug mode enabled. This enables: startup debug page, error status panel, page load debug log, and serial debug log. Refresh page to see changes.");
+      } else {
+        SerialPrintln("DEBUG: Request to exit debug mode received");
+        request->send(200, "text/plain", "OK - Debug mode disabled. Startup debug page, error status, and debug logs will be hidden.");
+      }
     });
 #endif
     
-    //SECURITY FIX, 2026-08-13: this and reset-units/ota/reset-wifi below used to be HTTP_GET,
-    //reachable via a plain <a href> link with only a client-side confirm() as a safety net.
-    //That's not real protection - any page loaded in the same browser (e.g. an <img> tag
-    //pointing here on a totally unrelated site) could trigger these state-changing actions
-    //without any user interaction at all (classic CSRF-via-GET). Switched to POST; index.html's
-    //links became small <form method="post"> submissions instead, which browsers still
-    //navigate on submit exactly like the old GET links did, so the response pages are unchanged.
-    webServer.on("/reboot", HTTP_POST, [](AsyncWebServerRequest * request) {
+    //This and reset-units/ota/reset-wifi below are POST, not GET - a GET link is triggerable
+    //cross-site (e.g. an <img> tag on any page) without user interaction (CSRF-via-GET).
+    webServer.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest * request) {
       SerialPrintln("Request to Reboot Received");
       
       //Create HTML page to explain the system is rebooting
@@ -1341,21 +1369,16 @@ void setup() {
       isPendingReboot = true;
     });
     
-    webServer.on("/reset-units", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/units/reset", HTTP_POST, [](AsyncWebServerRequest * request) {
       SerialPrintln("Request to Reset Units Received");
 
       //This will be picked up in the loop
       isPendingUnitsReset = true;
 
-      //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #67): this used to redirect to
-      //"/?is-resetting-units=true" for a classic full-page-navigation <form> submission on
-      //index.html - that form moved to the Administration page and now calls this via AJAX (see
-      //triggerResetUnits() in admin.js), so a redirect just meant an extra, pointless background
-      //fetch of index.html. Plain text response instead.
       request->send(200, "text/plain", "Units are resetting/recalibrating now.");
     });
 
-    webServer.on("/scheduled-message/remove", HTTP_DELETE, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/scheduled-messages", HTTP_DELETE, [](AsyncWebServerRequest * request) {
       SerialPrintln("Request to Remove Scheduled Message Received");
       
       if (request->hasParam(PARAM_ID)) {
@@ -1384,17 +1407,12 @@ void setup() {
       }
     });
 
-    webServer.on("/", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/settings", HTTP_POST, [](AsyncWebServerRequest * request) {
       SerialPrintln("DEBUG: Request Post of Form Received");    
 
       bool submissionError = false;
       
-      //DIAGNOSTIC FIX, 2026-08-13: this used to be
-      //`bool newMessageScheduleEnabledValue, newMessageScheduleShowIndefinitely = false;` -
-      //in C++ that only initializes the *second* variable; newMessageScheduleEnabledValue was
-      //left as uninitialized stack garbage, so `if (newMessageScheduleEnabledValue)` further
-      //down could unpredictably take the "it's a scheduled message" branch on a plain text
-      //update, depending on whatever was previously on this handler's stack frame.
+      //Separate declarations - `bool a, b = false;` only initializes b, not a.
       bool newMessageScheduleEnabledValue = false;
       bool newMessageScheduleShowIndefinitely = false;
       long newMessageScheduleDateTimeUnixValue = -1;
@@ -1510,10 +1528,6 @@ void setup() {
       //If there was an error, report back to check what has been input
       if (submissionError) {
         SerialPrintln("Finished Processing Request with Error");
-        //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #68): this used to redirect to
-        //"/?invalid-submission=true" for a classic full-page-navigation <form> submission - every
-        //Enter-to-submit or Submit-click caused a visible full-page reload ("blinks", per user
-        //report). The form now submits via AJAX (see script.js) and shows this inline instead.
         request->send(400, "text/plain", "Invalid submission - check the values you entered (e.g. schedule/countdown dates must be in the future).");
       }
       else {
@@ -1567,17 +1581,12 @@ void setup() {
           }
         }
 
-        //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #68): this used to redirect to "/" - a classic
-        //Post/Redirect/Get pattern specifically to dodge the browser's "resubmit form?" prompt on
-        //refresh. That concern doesn't apply anymore now that the form submits via AJAX (see
-        //script.js) instead of a real navigation - refreshing after an AJAX POST is just a normal
-        //GET, no resubmission possible. Plain success response instead.
         request->send(200, "text/plain", "OK");
       }
     });
 
 #if OTA_ENABLE == true
-    webServer.on("/ota", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/ota-mode", HTTP_POST, [](AsyncWebServerRequest * request) {
       SerialPrintln("Request to start OTA mode received");
       
       //Create HTML page to explain OTA
@@ -1589,12 +1598,8 @@ void setup() {
       html += "<p>Open your Arduino IDE and select the new port in \"Tools\" menu and upload the your sketch as normal!</p>";
       html += "<p>After you have carried out your update, the system will automatically be rebooted. You can go to the main home page after this time by clicking the button below or going to '/'.</p>";
       html += "<p>You can take the system out of this mode by clicking the button to reboot below.</p>";
-      //BUG FIX, 2026-08-13: both links here used to end with a stray `\")\"` before the closing
-      //quote (e.g. href="http://<ip>")" ) - a malformed URL with a literal trailing `")`. Also,
-      ///reboot is POST-only now (see the comment on that handler) so a plain <a href> link to it
-      //would just get a 404 - using a tiny inline form instead, same pattern as index.html.
       html += "<p><a href=\"http://" + ip.toString() + "\">Home</a></p>";
-      html += "<form action=\"/reboot\" method=\"post\" style=\"display:inline\"><button type=\"submit\">Reboot</button></form>";
+      html += "<form action=\"/api/reboot\" method=\"post\" style=\"display:inline\"><button type=\"submit\">Reboot</button></form>";
       html += "</font>";
       html += "</div>";
 
@@ -1606,8 +1611,6 @@ void setup() {
 
         //If there is a password set, disabled by default for ease
         if (otaPassword != "") {
-          //BUG FIX, 2026-08-15: otaPassword is now a String (was const char*, see the comment on
-          //its declaration) - .c_str() for the overload ArduinoOTA.setPassword() expects.
           ArduinoOTA.setPassword(otaPassword.c_str());
         }
         
@@ -1664,7 +1667,7 @@ void setup() {
 #endif
 
 #if WIFI_USE_DIRECT == false
-    webServer.on("/reset-wifi", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/wifi/reset", HTTP_POST, [](AsyncWebServerRequest * request) {
       SerialPrintln("Request to Reset WiFi Received");
       
       IPAddress ip = WiFi.localIP();
@@ -1683,13 +1686,9 @@ void setup() {
     });
 #endif
 
-    //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #63): lets the Administration page show/change the
-    //OTA password at runtime, now that it's a persisted setting instead of a compile-time
-    //constant. Freely readable without authentication (on user request - this device has no
-    //separate login of its own, every other admin action already just checks this same shared
-    //password per-request) - changing it still requires the current password, same as every
-    //other state-changing admin action on this page.
-    webServer.on("/admin/ota-password", HTTP_GET, [](AsyncWebServerRequest * request) {
+    //Freely readable without auth (this device has no separate login) - changing it still
+    //requires the current password.
+    webServer.on("/api/ota-password", HTTP_GET, [](AsyncWebServerRequest * request) {
       JsonDocument doc;
       doc["otaPassword"] = otaPassword;
       AsyncResponseStream *response = request->beginResponseStream("application/json");
@@ -1697,7 +1696,7 @@ void setup() {
       request->send(response);
     });
 
-    webServer.on("/admin/set-ota-password", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/ota-password", HTTP_POST, [](AsyncWebServerRequest * request) {
       if (!request->hasParam("currentPassword", true) || !request->hasParam("newPassword", true)) {
         request->send(400, "text/plain", "'currentPassword' and 'newPassword' are required");
         return;
@@ -1720,6 +1719,40 @@ void setup() {
       writeFile(LittleFS, otaPasswordPath, otaPassword.c_str());
       SerialPrintln("OTA password changed");
       request->send(200, "text/plain", "OTA password changed");
+    });
+
+    webServer.on("/api/timezone", HTTP_GET, [](AsyncWebServerRequest * request) {
+      JsonDocument doc;
+      doc["timezone"] = timezoneSetting;
+      AsyncResponseStream *response = request->beginResponseStream("application/json");
+      serializeJson(doc, *response);
+      request->send(response);
+    });
+
+    webServer.on("/api/timezone", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (!request->hasParam("timezone", true)) {
+        request->send(400, "text/plain", "'timezone' is required");
+        return;
+      }
+
+      String newTimezoneValue = request->getParam("timezone", true)->value();
+      if (newTimezoneValue.length() == 0) {
+        request->send(400, "text/plain", "Timezone cannot be empty");
+        return;
+      }
+
+      // setLocation() does a live lookup against ezTime's timezoned service, so an invalid/
+      // unknown TZ database name is rejected here instead of silently persisting garbage.
+      if (!timezone.setLocation(newTimezoneValue)) {
+        SerialPrintln("Timezone change rejected: '" + newTimezoneValue + "' not recognized");
+        request->send(400, "text/plain", "Timezone not recognized - use a TZ database name like Europe/Berlin");
+        return;
+      }
+
+      timezoneSetting = newTimezoneValue;
+      writeFile(LittleFS, timezonePath, timezoneSetting.c_str());
+      SerialPrintln("Timezone changed to: " + timezoneSetting);
+      request->send(200, "text/plain", "Timezone changed");
     });
 
     delay(250);
@@ -1759,6 +1792,31 @@ void setup() {
 /* |                          |___/               |_|   | */
 /* '----------------------------------------------------' */
 void loop() {
+  //DIAGNOSTIC, 2026-08-16 (see BUGFIX_LOG.md #76): the first I2C scan of the Units, deliberately
+  //delayed 30s after boot (see the comment in setup() for why) - runs here instead of blocking
+  //setup() with delay(30000), so WiFi/the web server start immediately. Fires exactly once.
+  static bool firstUnitScanDone = false;
+  if (!firstUnitScanDone && millis() >= 30000) {
+    firstUnitScanDone = true;
+    SerialPrintln("");
+    SerialPrintln("=== I2C Bus Scan on Startup (delayed 30s) ===");
+    for (int scanAttempt = 0; scanAttempt < 3 && unitsAmount == 0; scanAttempt++) {
+      if (scanAttempt > 0) {
+        SerialPrintln("No units found, retrying scan...");
+        delay(300);
+      }
+      scanI2CBus();
+    }
+    SerialPrintln("");
+  }
+
+  //BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #40/#81): advances the non-blocking display-update
+  //state machine by at most one small step (one I2C op at most) - called unconditionally, before
+  //any of the deferred-request handling below, so a display update in progress can never again
+  //prevent loop() from reaching this point (which is what used to make the deferred-request
+  //pattern below starve for up to 90s at a time).
+  updateDisplayJob();
+
   //Handle any I2C admin requests deferred here by the web handlers (see the comment on
   //pendingRescanRequest near unitsAmount for why this can't just run in the handler itself).
   //Checked first, before anything else in loop(), so a pending request gets served as soon as
@@ -1769,25 +1827,15 @@ void loop() {
 
     int detectedAmount = scanI2CBus();
 
-    //BUG FIX, 2026-08-15: don't release the guard slot until the (potentially slow) work above
-    //is actually done. Clearing it eagerly, before scanI2CBus() ran, left a window where a new
-    //incoming request's handler (line ~938) saw the slot as free and silently overwrote
-    //pendingRescanRequest with itself - orphaning *this* request (no send() ever called on it,
-    //client just times out) instead of getting the intended 503 "try again" rejection. Moving
-    //the reset here means new requests correctly see the slot as busy for the entire duration.
-    //See BUGFIX_LOG.md #50. Same fix applied to all 5 deferred-request handlers below.
+    //Guard slot released only now (not before scanI2CBus() ran) so a request arriving mid-scan
+    //correctly gets 503 instead of silently overwriting this one. Same pattern below. See
+    //BUGFIX_LOG.md #50.
     pendingRescanRequest = nullptr;
 
-    //BUG FIX, 2026-08-13: only call send() if the client is still actually there to receive it -
-    //see the comment on pendingRescanRequestDisconnected near unitsAmount. If it disconnected
-    //while scanI2CBus() was running, deferredRequest now points at freed memory.
+    //Client may have disconnected while scanI2CBus() ran, making deferredRequest a dangling pointer.
     if (!pendingRescanRequestDisconnected) {
       JsonDocument doc;
       doc["unitsAmount"] = detectedAmount;
-      //HARDENING, 2026-08-15: same beginResponseStream() switch as /log (BUGFIX_LOG.md #42/#44) -
-      //avoids building the JSON into one contiguous String before send() copies it again. This
-      //response was always small so the crash was never observed here, but the risk is the same
-      //shape. See BUGFIX_LOG.md #52.
       AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
       serializeJson(doc, *response);
       deferredRequest->send(response);
@@ -1803,31 +1851,25 @@ void loop() {
     for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
       int status = -2;
       int offset = -1;
-      int phase = -1;
-      int progress = -1;
-      bool online = readUnitInfo(unitIndex, status, offset, phase, progress);
+      //DIAGNOSTIC, 2026-08-16 (see BUGFIX_LOG.md #77): this used to also fetch phase/progress
+      //(6-byte I2C read) - dropped in favor of the lightweight 3-byte status+offset read, since
+      //the Administration page never displayed phase/progress anyway. Halves the number of TWI
+      //interrupts this endpoint costs the Unit per poll. The display-update state machine (used by
+      //showText(), unrelated to this endpoint - see ServiceDisplayJobFunctions.ino) still fetches
+      //the full data - it genuinely needs it.
+      bool online = readUnitInfo(unitIndex, status, offset);
 
       doc["units"][unitIndex]["index"] = unitIndex;
       doc["units"][unitIndex]["online"] = online;
       doc["units"][unitIndex]["status"] = status;
       doc["units"][unitIndex]["offset"] = offset;
-      //DIAGNOSTIC, 2026-08-13: phase (0=idle, 1=calibrating, 2=rotating) + progress (steps done
-      //in the current phase) - see currentPhase in Unit.ino.
-      doc["units"][unitIndex]["phase"] = phase;
-      doc["units"][unitIndex]["progress"] = progress;
 
       yield();
     }
 
-    //BUG FIX, 2026-08-15: see the comment on the matching line in the pendingRescanRequest
-    //block above - release the guard slot only once the (per-unit, I2C-bound, potentially slow)
-    //work above is actually finished, not before. See BUGFIX_LOG.md #50.
     pendingUnitsInfoRequest = nullptr;
 
-    //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near unitsAmount.
     if (!pendingUnitsInfoRequestDisconnected) {
-      //HARDENING, 2026-08-15: see the comment on the matching change in the pendingRescanRequest
-      //block above. See BUGFIX_LOG.md #52.
       AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
       serializeJson(doc, *response);
       deferredRequest->send(response);
@@ -1874,20 +1916,105 @@ void loop() {
     doc["foundCount"] = foundCount;
     doc["expectedCount"] = unitsAmount;
 
-    //BUG FIX, 2026-08-15: see the comment on the matching line in the pendingRescanRequest
-    //block above - release the guard slot only once the (I2C-bound, potentially slow) work
-    //above is actually finished, not before. See BUGFIX_LOG.md #50.
     pendingLegacyI2CScanRequest = nullptr;
 
-    //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near unitsAmount.
     if (!pendingLegacyI2CScanRequestDisconnected) {
-      //HARDENING, 2026-08-15: see the comment on the matching change in the pendingRescanRequest
-      //block above. See BUGFIX_LOG.md #52.
       AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
       serializeJson(doc, *response);
       deferredRequest->send(response);
     }
   }
+
+#if WEB_FIRMWARE_UPDATE_ENABLE == true
+  // Drains otaRingBuffer and does all the real Update.begin()/write()/end() work here, in loop()'s
+  // large safe stack - see BUGFIX_LOG.md #79 for why this can't run in the upload callback itself.
+  if (otaUpdateActive) {
+    if (!otaUpdateBegun && !otaRingOverflowed) {
+      uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+      if (!Update.begin(maxSketchSpace, U_FLASH)) {
+        SerialPrintln("Firmware upload: Update.begin() failed");
+        Update.printError(Serial);
+        otaRingOverflowed = true; //no dedicated "begin failed" flag - this also aborts cleanly
+      }
+      otaUpdateBegun = true;
+    }
+
+    if (otaRingCount > 0 && !otaRingOverflowed) {
+      size_t lenToWrite = otaRingCount;
+      size_t firstPart = OTA_RING_SIZE - otaRingTail;
+      bool writeOk;
+      if (firstPart >= lenToWrite) {
+        writeOk = Update.write(otaRingBuffer + otaRingTail, lenToWrite) == lenToWrite;
+      } else {
+        writeOk = Update.write(otaRingBuffer + otaRingTail, firstPart) == firstPart;
+        if (writeOk) {
+          writeOk = Update.write(otaRingBuffer, lenToWrite - firstPart) == (lenToWrite - firstPart);
+        }
+      }
+      if (!writeOk) {
+        SerialPrintln("Firmware upload: Update.write() failed");
+        Update.printError(Serial);
+        otaRingOverflowed = true;
+      }
+      otaRingTail = (otaRingTail + lenToWrite) % OTA_RING_SIZE;
+      otaRingCount -= lenToWrite;
+    }
+
+    if (!otaResultReady && (otaClientDisconnected || otaRingOverflowed || (otaFinalChunkQueued && otaRingCount == 0))) {
+      bool success = false;
+      if (!otaClientDisconnected && !otaRingOverflowed) {
+        success = Update.end(true);
+        if (!success) {
+          SerialPrintln("Firmware upload: Update.end() failed");
+          Update.printError(Serial);
+        }
+      } else {
+        //Must still call end() here (ignoring its result - we already know success is false):
+        //Update.begin() refuses to start a new update while the previous one is still marked
+        //"running" internally, and only end()/a premature end() clears that - skipping this call
+        //left every subsequent upload attempt failing with "Update.begin() failed" until a full
+        //reboot, live-confirmed while testing this fix.
+        if (otaUpdateBegun) {
+          Update.end(false);
+        }
+        if (otaClientDisconnected) {
+          SerialPrintln("Firmware upload: client disconnected mid-upload, aborting (old firmware stays active)");
+        } else {
+          SerialPrintln("Firmware upload: aborting (old firmware stays active)");
+        }
+      }
+      otaResultReady = true;
+      otaResultSuccess = success;
+      otaUpdateActive = false;
+      delete[] otaRingBuffer; //safe even if allocation itself failed - delete[] on nullptr is a no-op
+      otaRingBuffer = nullptr;
+    }
+  }
+
+  // Separate from the block above on purpose: the flash-side result and the deferred request can
+  // become ready in either order (e.g. an overflow can finish before AsyncWebServer even calls the
+  // completion callback that hands us pendingFirmwareUploadRequest).
+  if (otaResultReady && pendingFirmwareUploadRequest != nullptr) {
+    AsyncWebServerRequest* deferredRequest = pendingFirmwareUploadRequest;
+    bool wasDisconnected = pendingFirmwareUploadRequestDisconnected;
+    pendingFirmwareUploadRequest = nullptr;
+
+    if (!wasDisconnected) {
+      AsyncWebServerResponse* response = deferredRequest->beginResponse(otaResultSuccess ? 200 : 500, "text/plain",
+        otaResultSuccess ? "OK - Firmware written, rebooting now" : "Update failed, check the serial log for details");
+      response->addHeader("Connection", "close");
+      deferredRequest->send(response);
+    }
+
+    otaResultReady = false;
+    if (otaResultSuccess) {
+      SerialPrintln("Firmware update successful, rebooting...");
+      isPendingReboot = true;
+    } else {
+      SerialPrintln("Firmware update failed");
+    }
+  }
+#endif
 
 #if UNIT_BOOTLOADER_ENABLE == true
   if (pendingFirmwarePushRequest != nullptr) {
@@ -1901,12 +2028,8 @@ void loop() {
     //comment on the onDisconnect handler for /unit-firmware-push above.
     bool success = pushFirmwareToUnit(unitIndex, resultJson);
 
-    //BUG FIX, 2026-08-15: see the comment on the matching line in the pendingRescanRequest
-    //block above - release the guard slot only once the (potentially slow, minutes-long)
-    //firmware push above is actually finished, not before. See BUGFIX_LOG.md #50.
     pendingFirmwarePushRequest = nullptr;
 
-    //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near unitsAmount.
     if (!pendingFirmwarePushRequestDisconnected) {
       deferredRequest->send(success ? 200 : 500, "application/json", resultJson);
     }
@@ -1949,39 +2072,17 @@ void loop() {
       doc["pageSize"] = chipInfo.pageSize;
       doc["bootloaderStart"] = chipInfo.bootloaderStart;
 
-      //BUG FIX, 2026-08-15 (research-based, see BUGFIX_LOG.md #53): the first live attempts got
-      //endTransmission()==2 ("NACK on address") when calling twibootStartApplication() right
-      //after the scan above - neither a 20ms/300ms settle delay nor recoverI2CBus() fixed it
-      //reliably. Online research (esp8266/Arduino issues #5718/#5528/#1025) turned up a known
-      //ESP8266 core bug class: repeated-start reads (exactly what twibootReadChipInfo() does -
-      //endTransmission(false) + requestFrom()) can leave the *software* I2C state machine
-      //(core_esp8266_si2c.c's internal state, not the physical bus lines) stuck, causing "NACK on
-      //address" on every subsequent transaction. scanForBootloaderAddress() deliberately keeps
-      //scanning all 16 possible addresses even after finding a match (to detect an ambiguous
-      //multi-unit response), so after a real hit it immediately does up to 15 more failed
-      //repeated-start attempts against addresses nothing is listening at - a very plausible
-      //trigger. recoverI2CBus() alone didn't help because it only re-inits Wire on the branch
-      //where it detects an actual *electrically* stuck bus (SDA held low) - if the physical
-      //lines already look idle (likely here, since nothing is actively holding them down) it
-      //returns early and never touches Wire's software state at all. Forcing an unconditional
-      //Wire.begin() here - bypassing that conditional entirely - targets the software-state
-      //theory directly instead of the physical-bus theory.
+      //Unconditional re-init: repeated-start I2C reads (what the scan above just did) can leave
+      //the ESP8266 core's *software* I2C state stuck (NACK on every later transaction) even when
+      //the physical bus is idle - recoverI2CBus() alone doesn't catch that case. See BUGFIX_LOG.md #53.
       Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+      Wire.setClock(400000);
 #if UNIT_BOOTLOADER_ENABLE == true
       Wire.setClockStretchLimit(25000);
 #endif
 
-      //BUG FIX, 2026-08-15: this used to just rely on twiboot's own ~1000ms since-last-activity
-      //timeout to return to the app on its own, and deliberately never called
-      //twibootStartApplication() - live-tested today (first real end-to-end test of this whole
-      //code path) and the unit did NOT come back on its own even after 44+ real seconds of
-      //complete I2C silence (confirmed both via repeated /admin/units reads failing and via a
-      //visible LED the user could see stayed lit). A power cycle was needed to recover it. Root
-      //cause not fully isolated (twiboot's own timeout logic vs. something specific to this
-      //build/hardware), but the fix doesn't require understanding why - just stop depending on a
-      //timeout that isn't reliable in practice and explicitly ask the bootloader to jump to the
-      //app right away, exactly like the real push flow (pushFirmwareToUnit()) already does on
-      //success. See BUGFIX_LOG.md #53.
+      //Explicitly asked to return to the app - twiboot's own ~1000ms idle-timeout wasn't reliable
+      //in practice (unit stayed in the bootloader 44+s once, needed a power cycle). BUGFIX_LOG.md #53.
       bool returnedToApp = twibootStartApplication(bootAddress);
       doc["returnedToApp"] = returnedToApp;
       doc["note"] = returnedToApp
@@ -1989,15 +2090,9 @@ void loop() {
         : "Nothing was written, but the explicit return-to-app command failed - the unit may still be sitting in the bootloader. Check /admin/units, or power-cycle the unit if it doesn't come back on its own.";
     }
 
-    //BUG FIX, 2026-08-15: see the comment on the matching line in the pendingRescanRequest
-    //block above - release the guard slot only once the (multi-attempt, potentially slow)
-    //probe above is actually finished, not before. See BUGFIX_LOG.md #50.
     pendingBootloaderProbeRequest = nullptr;
 
-    //BUG FIX, 2026-08-13: see the comment on pendingRescanRequestDisconnected near unitsAmount.
     if (!pendingBootloaderProbeRequestDisconnected) {
-      //HARDENING, 2026-08-15: see the comment on the matching change in the pendingRescanRequest
-      //block above. See BUGFIX_LOG.md #52.
       AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
       serializeJson(doc, *response);
       deferredRequest->send(response);
@@ -2066,22 +2161,14 @@ void loop() {
   //Admin page's "Rescan Units" once wiring/addressing is fixed, no reboot required.
   bool unitsAvailable = (unitsAmount > 0);
 
+  //BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #40/#81): this used to be "showText(blank1);
+  //delay(2000); showText(blank2);", relying on showText() blocking until fully done to guarantee
+  //ordering. Now that showText() returns immediately, a real delay(2000) here would just freeze
+  //loop() (and updateDisplayJob() with it) for 2 real seconds - undermining the whole point of
+  //this change. updateUnitsResetSequence() (ServiceDisplayJobFunctions.ino) replicates the same
+  //blank1 -> pause -> blank2 ordering non-blockingly instead.
   if (unitsAvailable && isPendingUnitsReset) {
-    SerialPrintln("Reseting Units now...");
-
-    //Blank out the message
-    String blankOutText1 = createRepeatingString('-');
-    showText(blankOutText1);
-    delay(2000);
-
-    //Do just enough to do a full iteration which triggers the re-calibration
-    String blankOutText2 = createRepeatingString('.');
-    showText(blankOutText2);
-
-    //We did a reset!
-    isPendingUnitsReset = false;
-
-    SerialPrintln("Done Units Reset!");
+    updateUnitsResetSequence();
   } else if (!unitsAvailable) {
     isPendingUnitsReset = false; //nothing to reset, don't leave this stuck pending
   }

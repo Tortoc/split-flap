@@ -17,6 +17,9 @@ void loadValuesFromFileSystem() {
   //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #63): otaPassword used to be a compile-time constant -
   //now loaded here like every other persisted setting, default "splitflap" on first boot.
   otaPassword = readFile(LittleFS, otaPasswordPath, "splitflap");
+  //BUG FIX, 2026-08-16 (see BUGFIX_LOG.md #78): timezone used to be a compile-time constant -
+  //now loaded here like every other persisted setting, default "Europe/Berlin" on first boot.
+  timezoneSetting = readFile(LittleFS, timezonePath, "Europe/Berlin");
 
   String scheduledMessagesJson = readFile(LittleFS, scheduledMessagesPath, "");
   if (scheduledMessagesJson != "") {    
