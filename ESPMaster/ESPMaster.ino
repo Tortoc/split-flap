@@ -27,7 +27,11 @@
 */
 #define SERIAL_ENABLE       true   //Option to enable serial debug messages
 #define UNIT_CALLS_DISABLE  false   //Option to disable the call to the units so can just debug the ESP with no connections
-#define OTA_ENABLE          false    //Option to enable OTA functionality via the Arduino IDE (same WiFi network + IDE required)
+#define OTA_ENABLE          true    //Option to enable OTA functionality via the Arduino IDE (same WiFi network + IDE required).
+                                     //BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #82): flipped from false to true on user request - going
+                                     //forward, prefer flashing over the network (this, or the always-on WEB_FIRMWARE_UPDATE_ENABLE
+                                     //endpoint below) and reserve the physical USB/serial programmer mainly for diagnostics
+                                     //(serial log capture) rather than routine updates.
 #define WEB_FIRMWARE_UPDATE_ENABLE true //Option to enable browser-based firmware upload from the Admin page, no Arduino IDE required
 #define UNIT_BOOTLOADER_ENABLE true //Option to enable pushing Unit.ino firmware updates to units over I2C via the twiboot bootloader.
                                      //Requires every unit to first be flashed with twiboot per Unit/BOOTLOADER_SETUP.md - leave false until that's done!
@@ -409,6 +413,10 @@ volatile bool otaRingOverflowed = false;  //callback had no room to queue a chun
 volatile bool otaClientDisconnected = false; //client left before the upload finished
 volatile bool otaResultReady = false;     //loop() has finished Update.end() (success or not)
 volatile bool otaResultSuccess = false;   //valid once otaResultReady is true
+//BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #82): captured from request->contentLength() at the start
+//of the upload so loop() can size Update.begin() to what's actually being uploaded instead of the
+//whole available OTA slot - see the comment where this is used, below.
+volatile size_t otaUploadContentLength = 0;
 AsyncWebServerRequest* pendingFirmwareUploadRequest = nullptr;
 bool pendingFirmwareUploadRequestDisconnected = false;
 #endif
@@ -783,7 +791,16 @@ void setup() {
       minimalDoc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
       minimalDoc["scheduledMessages"] = JsonArray();
       minimalDoc["wifiSettingsResettable"] = true;
+      //BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #82): this was hardcoded to false regardless of the
+      //actual OTA_ENABLE compile flag (a stale leftover from the #80 minimalDoc fast-path refactor -
+      //getCurrentSettingValues(), the older/fuller settings builder elsewhere in this file, already
+      //had the correct #if OTA_ENABLE check). Found while verifying OTA_ENABLE=true actually took
+      //effect after flashing - /api/settings kept reporting false either way.
+#if OTA_ENABLE == true
+      minimalDoc["otaEnabled"] = true;
+#else
       minimalDoc["otaEnabled"] = false;
+#endif
       //Folded in here (see BUGFIX_LOG.md #80) so the Administration view can populate its OTA
       //password/timezone displays from the one /api/settings fetch it already does, instead of
       //two more separate XHRs - opening that view used to fire 4 near-simultaneous requests
@@ -830,8 +847,22 @@ void setup() {
     // read-only, has no allocation/crash risk of its own (plain text, stack-only char buffer),
     // and is cheap, ongoing insight worth having if heap pressure ever creeps back up.
     webServer.on("/api/heap", HTTP_GET, [](AsyncWebServerRequest * request) {
-      char buf[96];
-      snprintf(buf, sizeof(buf), "free=%u frag=%u%% maxBlock=%u", ESP.getFreeHeap(), ESP.getHeapFragmentation(), ESP.getMaxFreeBlockSize());
+      char buf[220];
+      //DIAGNOSTIC, 2026-08-21 (see BUGFIX_LOG.md #82): getFlashChipRealSize() reads the physical
+      //chip's own SPI ID at boot (ground truth, independent of what this build was compiled for);
+      //getFlashChipSize() is what the current eesz board-menu choice assumes. Added while figuring
+      //out whether the flash layout can safely be widened for a bigger OTA slot (web-based
+      //firmware upload currently fails outright - this sketch already exceeds eesz=1M128's ~438KB
+      //OTA budget) - a mismatch between the two would mean the compiled layout doesn't match the
+      //real chip, which needs fixing before touching eesz at all. Read-only, no allocation.
+      //getFlashChipId()/getChipId() added on user request for full identification (manufacturer/
+      //device ID of the actual flash part, and the ESP8266's own unique chip ID) - useful
+      //documentation regardless of the eesz decision, and a second cross-check that FlashMode/
+      //FlashFreq (dout/40MHz, unchanged) still matches this real part.
+      snprintf(buf, sizeof(buf), "free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s",
+        ESP.getFreeHeap(), ESP.getHeapFragmentation(), ESP.getMaxFreeBlockSize(),
+        ESP.getFlashChipRealSize(), ESP.getFlashChipSize(), ESP.getFlashChipId(), ESP.getChipId(),
+        ESP.getSdkVersion(), ESP.getCoreVersion().c_str());
       request->send(200, "text/plain", buf);
     });
 
@@ -1256,6 +1287,13 @@ void setup() {
         if (index == 0) {
           SerialPrintln("DEBUG: Firmware upload starting: " + filename);
           firmwareUpdateAuthFailed = false;
+          //BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #82): request->contentLength() is the whole
+          //multipart body size (a few hundred bytes more than the raw firmware, for the boundary/
+          //headers) - close enough once rounded up to a flash sector below. Used so loop() only
+          //erases what this upload actually needs, not the full OTA slot (which grew from ~438KB
+          //to ~1019KB in this same change - erasing the full slot took long enough to overflow the
+          //ring buffer before Update.begin() even returned, live-reproduced testing this).
+          otaUploadContentLength = request->contentLength();
           otaRingHead = 0;
           otaRingTail = 0;
           otaRingCount = 0;
@@ -1931,7 +1969,21 @@ void loop() {
   if (otaUpdateActive) {
     if (!otaUpdateBegun && !otaRingOverflowed) {
       uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
-      if (!Update.begin(maxSketchSpace, U_FLASH)) {
+      //BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #82): only erase what this upload actually needs
+      //(rounded up to a flash sector), not the whole OTA slot - Update.begin()'s erase is
+      //synchronous and scales with the size passed in, and widening the OTA slot from ~438KB to
+      //~1019KB (same change) made a full-slot erase take long enough to overflow the small ring
+      //buffer before this call even returned. Falls back to the old full-slot behavior if
+      //contentLength() wasn't available for some reason, and is always clamped to maxSketchSpace
+      //as a safety ceiling either way.
+      uint32_t updateSize = maxSketchSpace;
+      if (otaUploadContentLength > 0) {
+        uint32_t rounded = (otaUploadContentLength + 0xFFF) & 0xFFFFF000;
+        if (rounded > 0 && rounded < maxSketchSpace) {
+          updateSize = rounded;
+        }
+      }
+      if (!Update.begin(updateSize, U_FLASH)) {
         SerialPrintln("Firmware upload: Update.begin() failed");
         Update.printError(Serial);
         otaRingOverflowed = true; //no dedicated "begin failed" flag - this also aborts cleanly

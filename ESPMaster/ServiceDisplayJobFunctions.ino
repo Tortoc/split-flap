@@ -73,6 +73,10 @@ struct DisplayJob {
   unsigned long waitNextPollAt = 0;
   int waitLastPhase = -1;
   int waitLastProgress = -1;
+  //BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #82): counts polls since resetDisplayJobWaitSubstate(),
+  //used to only fetch phase/progress (the heavy 6-byte read) every Nth poll instead of every poll -
+  //see the comment on pollDisplayJobWaitAllUnitsReady() for why.
+  unsigned long waitPollCount = 0;
 };
 
 DisplayJob displayJob;
@@ -88,6 +92,7 @@ void resetDisplayJobWaitSubstate() {
   displayJob.waitNextPollAt = millis();
   displayJob.waitLastPhase = -1;
   displayJob.waitLastProgress = -1;
+  displayJob.waitPollCount = 0;
 }
 
 //Starts a new display job. Returns false (does nothing) if one is already running - callers that
@@ -139,6 +144,23 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
 //exactly. Returns true once every currently-known unit has been waited on (ready, or given up on
 //via forceUnitRecoveryReset() - the old code didn't stop the whole sequence on one unit's failure
 //either, see waitForAllUnitsReady()'s plain for-loop).
+//BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #82): this used to call the heavy 6-byte readUnitInfo()
+//(status+offset+phase+progress) on every ~1s poll while waiting. The ATmega328p's TWI hardware
+//fires one interrupt PER BYTE transferred (not once per transaction), so a 6-byte read means 6 ISR
+//firings landing on the Unit right in the middle of whatever it's doing - including calibrate()'s
+//search loop (Unit.ino), which paces the stepper purely by micros() with zero feedback on whether
+//the rotor actually kept up. Diffed Unit.ino against upstream (scientress/split-flap) on user
+//request: requestEvent() grew from 1 byte (just currentlyrotating) to 6 bytes (+ calOffset lo/hi,
+//+ currentPhase, + currentPhaseProgress lo/hi) in the same timeframe the diagnostic phase/progress
+//fields were added - and the user independently confirmed the "unit spins very slowly" symptom
+//first appeared around that same twiboot-related work, after "hundreds of hours" of prior
+//trouble-free operation. A plausible, code-grounded mechanism (accumulated per-poll ISR jitter
+//against a busy-wait timing loop with no position feedback) that doesn't require a power-supply
+//theory. Mitigation: only fetch phase/progress every PHASE_READ_EVERY_N_POLLS-th poll (a light
+//3-byte status+offset read the rest of the time) - still frequent enough for the 15s stuck-timeout
+//to mean something, but cuts ISR firings during a wait by roughly 2/3.
+const int PHASE_READ_EVERY_N_POLLS = 3; //heavy 6-byte read roughly every 3s instead of every 1s
+
 bool pollDisplayJobWaitAllUnitsReady() {
   const unsigned long maxTotalWaitMs = 90000;
   const unsigned long stuckTimeoutMs = 15000;
@@ -151,19 +173,31 @@ bool pollDisplayJobWaitAllUnitsReady() {
     return false; //not due yet this tick
   }
 
-  int status, offset, phase, progress;
-  bool ok = readUnitInfo(displayJob.waitUnitIndex, status, offset, phase, progress);
+  bool wantPhaseRead = (displayJob.waitPollCount % PHASE_READ_EVERY_N_POLLS) == 0;
+  displayJob.waitPollCount++;
+
+  int status, offset;
+  int phase = displayJob.waitLastPhase;
+  int progress = displayJob.waitLastProgress;
+  bool ok = wantPhaseRead
+    ? readUnitInfo(displayJob.waitUnitIndex, status, offset, phase, progress)
+    : readUnitInfo(displayJob.waitUnitIndex, status, offset);
   bool unitDone = false;
 
   if (ok && status != 1) {
     unitDone = true; //0 = ready, -1 = sleeping - either way, nothing to wait for
   } else if (ok) {
-    SerialPrintln("Unit " + String(displayJob.waitUnitIndex) + " busy - phase " + String(phase) +
-      ", progress " + String(progress) + " (" + String((millis() - displayJob.waitUnitStart) / 1000) + "s waited)");
-    if (phase != displayJob.waitLastPhase || progress != displayJob.waitLastProgress) {
-      displayJob.waitLastPhase = phase;
-      displayJob.waitLastProgress = progress;
-      displayJob.waitLastProgressAt = millis();
+    if (wantPhaseRead) {
+      SerialPrintln("Unit " + String(displayJob.waitUnitIndex) + " busy - phase " + String(phase) +
+        ", progress " + String(progress) + " (" + String((millis() - displayJob.waitUnitStart) / 1000) + "s waited)");
+      if (phase != displayJob.waitLastPhase || progress != displayJob.waitLastProgress) {
+        displayJob.waitLastPhase = phase;
+        displayJob.waitLastProgress = progress;
+        displayJob.waitLastProgressAt = millis();
+      }
+    } else {
+      SerialPrintln("Unit " + String(displayJob.waitUnitIndex) + " busy (light check, " +
+        String((millis() - displayJob.waitUnitStart) / 1000) + "s waited)");
     }
   } else {
     SerialPrintln("Unit " + String(displayJob.waitUnitIndex) + " - read failed while waiting, retrying");
@@ -186,6 +220,7 @@ bool pollDisplayJobWaitAllUnitsReady() {
     displayJob.waitNextPollAt = millis(); //move to the next unit right away, don't wait another 1s
     displayJob.waitLastPhase = -1;
     displayJob.waitLastProgress = -1;
+    displayJob.waitPollCount = 0;
   } else {
     displayJob.waitNextPollAt = millis() + 1000; //match the old 1s poll interval
   }

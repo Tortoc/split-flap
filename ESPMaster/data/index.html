@@ -2069,7 +2069,29 @@
 			var intervalId = setInterval(function () {
 				attempts++;
 
+				//BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #82): this used to be checked only inside
+				//onreadystatechange below - which never fires at all if a request hangs indefinitely
+				//instead of erroring out cleanly (e.g. a dropped connection under this device's
+				//5-concurrent-TCP-connection ceiling, #70). When that happened, this whole interval
+				//kept running forever - a new XHR stacked on top every 5s, with no way to ever stop -
+				//live-confirmed via the serial log: one open Administration tab had generated over
+				//117,000 "/api/units" requests over this multi-day session, almost certainly one
+				//stuck poll loop from days ago that never cleared. Checked unconditionally here, at
+				//the top of every interval tick, so it always self-terminates after maxAttempts
+				//regardless of whether any individual request ever completes.
+				if (attempts > maxAttempts) {
+					clearInterval(intervalId);
+					recalibrationInProgress = false;
+					setAllUnitButtonsDisabled(false);
+					button.innerText = "Save & Recalibrate";
+					showAdminBannerMessage("Timed out waiting for Unit " + unitIndex + " to finish recalibrating. Hit Refresh to check its status.");
+					return;
+				}
+
 				var xhrRequest = new XMLHttpRequest();
+				//Belt-and-suspenders alongside the fix above: don't let one individual request hang
+				//past the next interval tick either.
+				xhrRequest.timeout = 4000;
 				xhrRequest.onreadystatechange = function () {
 					if (this.readyState == 4 && this.status == 200) {
 						try {
@@ -2087,14 +2109,6 @@
 						} catch (e) {
 							// ignore and try again on next poll
 						}
-					}
-
-					if (attempts >= maxAttempts) {
-						clearInterval(intervalId);
-						recalibrationInProgress = false;
-						setAllUnitButtonsDisabled(false);
-						button.innerText = "Save & Recalibrate";
-						showAdminBannerMessage("Timed out waiting for Unit " + unitIndex + " to finish recalibrating. Hit Refresh to check its status.");
 					}
 				};
 
