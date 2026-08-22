@@ -214,6 +214,21 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <Wire.h>
+//BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #86): a twiboot flash-page write needs one unbroken I2C
+//transaction of 4 header bytes + a full 128-byte page = 132 bytes - but Wire's internal TX buffer
+//(I2C_BUFFER_LENGTH, Wire.h) defaults to 128 bytes, so the last 4 bytes of every page write
+//silently never queue (Wire.write() drops anything past the buffer, no error returned) - twiboot's
+//own byte-count trigger for actually committing the page write is never reached, so the write does
+//*nothing* at all. (An attempted #define I2C_BUFFER_LENGTH override before this include did NOT
+//fix it - Wire.cpp is compiled as its own separate translation unit with its own default,
+//unaffected by a #define in this one.) This went undetected since the feature's original test
+//(BUGFIX_LOG #54) happened to push firmware byte-identical to what was already running, so even a
+//fully inert write still "verified" successfully - a live-reproduced, byte-level diff against the
+//old firmware (BUGFIX_LOG #86) proved the "new" flash content was actually just the untouched old
+//content. Fixed in ServiceUnitFirmwareFunctions.ino by using twi_writeTo() (twi.h) directly for
+//flash-page writes - a raw, unbuffered write with no size limit, bypassing Wire's TX buffer
+//entirely.
+#include <twi.h>
 #include <user_interface.h> // struct rst_info, for the on-device crash reporter (ServiceCrashLogFunctions.ino)
 #include <lwip/priv/tcp_priv.h> // internal lwIP header - exposes tcp_active_pcbs/etc. for /api/tcp-status
 #include "Classes.h"
@@ -300,6 +315,10 @@ AsyncWebServerRequest* pendingLegacyI2CScanRequest = nullptr;
 bool pendingRescanRequestDisconnected = false;
 bool pendingUnitsInfoRequestDisconnected = false;
 bool pendingLegacyI2CScanRequestDisconnected = false;
+//DIAGNOSTIC, 2026-08-22 (see BUGFIX_LOG.md #84): captured from the "detail" query param at
+//request time (query params aren't available anymore once loop() picks this up later) - see the
+//comment where this is used, below.
+bool pendingUnitsInfoRequestDetail = false;
 
 //Same reasoning, for the twiboot/bootloader endpoints (only relevant when
 //UNIT_BOOTLOADER_ENABLE is true - see ServiceUnitFirmwareFunctions.ino).
@@ -515,6 +534,17 @@ void blinkLed(int count, int onTime, int offTime) {
 }
 
 void setup() {
+  //HARDENING, 2026-08-22 (see BUGFIX_LOG.md #85): the very first thing this firmware does, before
+  //anything else (even Serial.begin()) - pull SDA/SCL to a defined idle-high state as early as
+  //physically possible. Between a hard ESP reset and this point, these pins sit in an undefined
+  //hardware-default state while the Unit's TWI hardware (which does NOT reset when the ESP does)
+  //stays continuously armed and listening - any glitch during that gap could be misread as a
+  //start condition. This doesn't close the gap entirely (nothing runs before setup() at all), but
+  //shrinks it to a minimum and gets the lines into a safe state before anything else in setup()
+  //could plausibly toggle them further.
+  pinMode(I2C_SDA_PIN, INPUT_PULLUP);
+  pinMode(I2C_SCL_PIN, INPUT_PULLUP);
+
 #if SERIAL_ENABLE == true
   //Setup so we can see serial messages
   Serial.begin(SERIAL_BAUDRATE);
@@ -543,6 +573,15 @@ void setup() {
   //worst-case erase+write duration so a page write never gets misread as a bus error.
   Wire.setClockStretchLimit(25000);
 #endif
+
+  //HARDENING, 2026-08-22 (see BUGFIX_LOG.md #85): recoverI2CBus() (ServiceI2CRecoveryFunctions.ino)
+  //used to only run reactively, after a read already failed (see #45). Called here too, proactively,
+  //right after Wire.begin() but before any real transaction - clocks SCL up to 9 times and forces a
+  //clean STOP condition (AN10216), cleaning up any bus state left over from whatever happened
+  //between the ESP's reset and this point (a Unit's TWI hardware never resets when the ESP does, so
+  //it's been listening the whole time). Cheap (a few ms at most) and a no-op if the bus already
+  //looks idle - safe to always run.
+  recoverI2CBus();
 
   // Initialize LED for debugging
 #if LED_ENABLE == true
@@ -998,6 +1037,15 @@ void setup() {
         request->send(503, "text/plain", "Another units request is already in progress, try again shortly");
         return;
       }
+      //DIAGNOSTIC, 2026-08-22 (see BUGFIX_LOG.md #84): opt-in heavy 6-byte read (adds phase/
+      //progress) instead of the default light 3-byte one (#77) - only when explicitly asked for
+      //via ?detail=1, so routine Administration-page polling stays on the cheaper path. Added to
+      //investigate a Unit spontaneously rotating slowly/never finishing homing with no ESPMaster-
+      //issued display job involved (see BUGFIX_LOG's Offene Punkte) - watching whether
+      //currentPhaseProgress climbs steadily (mechanical/torque theory) or keeps resetting toward 0
+      //(repeated-brownout-reset theory) distinguishes between the two live, without needing a
+      //multimeter/scope.
+      pendingUnitsInfoRequestDetail = request->hasParam("detail");
       pendingUnitsInfoRequestDisconnected = false;
       pendingUnitsInfoRequest = request;
       request->onDisconnect([]() {
@@ -1121,7 +1169,7 @@ void setup() {
 
 #if UNIT_BOOTLOADER_ENABLE == true
     // Admin: upload a compiled Unit.ino firmware image (raw AVR flash .bin, NOT the ESPMaster's own
-    // .bin) to be pushed to a unit afterwards via /api/units/firmware/push. See Unit/BOOTLOADER_SETUP.md.
+    // .bin) to be pushed to a unit afterwards via /api/units/firmware-push. See Unit/BOOTLOADER_SETUP.md.
     // Requires X-OTA-Password, same as /api/firmware - anyone on the LAN could otherwise push
     // arbitrary code to the unit's AVR.
     webServer.on("/api/units/firmware", HTTP_POST,
@@ -1173,7 +1221,15 @@ void setup() {
 
     // Admin: push the currently stored unit firmware to a single unit over I2C (twiboot).
     // Deferred to loop(), same reasoning as pendingRescanRequest above. Requires X-OTA-Password.
-    webServer.on("/api/units/firmware/push", HTTP_POST, [](AsyncWebServerRequest * request) {
+    //BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #86): this used to be "/api/units/firmware/push" -
+    //a URL that is a strict prefix-extension of "/api/units/firmware" (the upload endpoint just
+    //above, registered with the two-callback upload form). ESPAsyncWebServer's route matching for
+    //that form intercepted every request to this path too, so this handler was completely
+    //unreachable (silently "succeeding" with the upload endpoint's response instead) ever since
+    //the two endpoints were renamed from the old, non-overlapping "/unit-firmware-upload"/
+    //"/unit-firmware-push" scheme. Renamed to a sibling path instead of a sub-path so the two
+    //can never prefix-collide again.
+    webServer.on("/api/units/firmware-push", HTTP_POST, [](AsyncWebServerRequest * request) {
       if (String(otaPassword) != "") {
         String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
         if (providedPassword != String(otaPassword)) {
@@ -1889,13 +1945,24 @@ void loop() {
     for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
       int status = -2;
       int offset = -1;
+      bool online;
       //DIAGNOSTIC, 2026-08-16 (see BUGFIX_LOG.md #77): this used to also fetch phase/progress
       //(6-byte I2C read) - dropped in favor of the lightweight 3-byte status+offset read, since
       //the Administration page never displayed phase/progress anyway. Halves the number of TWI
       //interrupts this endpoint costs the Unit per poll. The display-update state machine (used by
       //showText(), unrelated to this endpoint - see ServiceDisplayJobFunctions.ino) still fetches
       //the full data - it genuinely needs it.
-      bool online = readUnitInfo(unitIndex, status, offset);
+      //DIAGNOSTIC, 2026-08-22 (see BUGFIX_LOG.md #84): ?detail=1 opts back into the heavy read for
+      //exactly this call - see the comment on pendingUnitsInfoRequestDetail above.
+      if (pendingUnitsInfoRequestDetail) {
+        int phase = -1;
+        int progress = -1;
+        online = readUnitInfo(unitIndex, status, offset, phase, progress);
+        doc["units"][unitIndex]["phase"] = phase;
+        doc["units"][unitIndex]["progress"] = progress;
+      } else {
+        online = readUnitInfo(unitIndex, status, offset);
+      }
 
       doc["units"][unitIndex]["index"] = unitIndex;
       doc["units"][unitIndex]["online"] = online;

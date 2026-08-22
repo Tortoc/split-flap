@@ -307,12 +307,43 @@ void rotateToLetter(int toLetter) {
   }
 }
 
+//HARDENING, 2026-08-22 (see BUGFIX_LOG.md #85): every message from ESPMaster now ends with one
+//extra XOR-checksum byte over whatever payload precedes it (see i2cChecksum() in ESPMaster's
+//ServiceFlapFunctions.ino - the exact same computation, mirrored here). A mismatch means this
+//wasn't a genuine command - most plausibly a garbage/spurious byte sequence from an I2C bus glitch
+//(e.g. right after an ESPMaster reset/reflash - see BUGFIX_LOG.md's Offene Punkte for the
+//investigation that led here) rather than a real write - ignored entirely instead of risking
+//acting on it. Checking this is a much stronger defense than range-checking the letter alone: a
+//random byte already has a ~1-in-6 chance of looking like a valid 0-44 letter index by pure luck,
+//versus only a ~1-in-256 chance of also passing this checksum.
 void receiveLetter(int numBytes) {
-  int receiveArray[4]; //array for received bytes
+  int receiveArray[5]; //array for received bytes - grew from 4 to 5 for the checksum byte
   uint16_t newCalOffset = 0;
 
-  for (int i = 0; i < numBytes && i < 4; i++) {
+  int actualBytes = numBytes;
+  if (actualBytes > 5) {
+    actualBytes = 5; //shouldn't happen (ESPMaster never sends more than 5 bytes), but never overflow
+  }
+
+  for (int i = 0; i < actualBytes; i++) {
     receiveArray[i] = Wire.read();
+  }
+  //Drain anything beyond our buffer so it doesn't linger in the TWI hardware's own queue
+  for (int i = actualBytes; i < numBytes; i++) {
+    Wire.read();
+  }
+
+  if (actualBytes < 2) {
+    return; //too short to contain even a 1-byte payload + checksum - ignore
+  }
+
+  int payloadLen = actualBytes - 1; //last received byte is always the checksum
+  uint8_t computedChecksum = 0;
+  for (int i = 0; i < payloadLen; i++) {
+    computedChecksum ^= (uint8_t)receiveArray[i];
+  }
+  if (computedChecksum != (uint8_t)receiveArray[payloadLen]) {
+    return; //checksum mismatch - see the comment above this function
   }
 
   //firmware update request - don't treat as a letter, just raise the flag and bail out
@@ -329,7 +360,7 @@ void receiveLetter(int numBytes) {
   //convertSpeed() in HelpersStringHandling.ino on the ESP side for the primary fix and full
   //writeup). Defensive floor here too, independent of what the master actually sends.
   stepperSpeed = receiveArray[1] > 0 ? receiveArray[1] : 1;
-  if (numBytes >= 4) {
+  if (payloadLen >= 4) {
     newCalOffset = receiveArray[2] + (receiveArray[3] << 8);
     if (newCalOffset != calOffset) {
       calOffset = newCalOffset;

@@ -35,7 +35,7 @@ endpoints require it via an `X-OTA-Password: <password>` request header:
 
 - `POST /api/web-file`
 - `POST /api/units/firmware`
-- `POST /api/units/firmware/push`
+- `POST /api/units/firmware-push`
 - `POST /api/firmware`
 
 If no password is set (empty string), these endpoints accept requests unauthenticated. Every
@@ -64,7 +64,7 @@ other endpoint below has no auth check at all, including `GET /api/ota-password`
 | POST | [`/api/units/reset`](#post-apiunitsreset) | Recalibrate every unit |
 | POST | [`/api/web-file`](#post-apiweb-file) | Replace `index.html` in place |
 | POST | [`/api/units/firmware`](#post-apiunitsfirmware) | Upload a Unit firmware image |
-| POST | [`/api/units/firmware/push`](#post-apiunitsfirmwarepush) | Push uploaded firmware to a unit over I2C |
+| POST | [`/api/units/firmware-push`](#post-apiunitsfirmware-push) | Push uploaded firmware to a unit over I2C |
 | POST | [`/api/units/bootloader-probe`](#post-apiunitsbootloader-probe) | Diagnostic bootloader probe, writes nothing |
 | POST | [`/api/firmware`](#post-apifirmware) | Browser-based ESPMaster firmware update |
 | POST | [`/api/debug-mode`](#post-apidebug-mode) | Enable/disable debug mode |
@@ -291,18 +291,29 @@ card polls. Deferred to `loop()`, same reasoning as `/api/i2c-scan` above. Uses 
 cost per unit versus the 6-byte read internal display logic uses, since this endpoint's response
 was never used for anything beyond status/offset.
 
+**Query param** `detail` (any value, e.g. `?detail=1`): opts into the heavier 6-byte read instead,
+adding `phase`/`progress` to each unit (see `BUGFIX_LOG.md` #84) - added as a diagnostic for
+watching a Unit that starts rotating with no ESPMaster-issued display job involved (the normal
+display-job wait logic's phase/progress logging never runs in that case). Not used by the
+Administration page itself - pass it manually (e.g. `curl`) when actively diagnosing.
+
 **Response** `200 application/json`:
 ```json
 {
   "unitsAmount": 3,
   "units": [
     { "index": 0, "online": true, "status": 0, "offset": 100 },
-    { "index": 1, "online": true, "status": 1, "offset": 95 }
+    { "index": 1, "online": true, "status": 1, "offset": 95, "phase": 2, "progress": 340 }
   ]
 }
 ```
 - `status`: `0` = ready, `1` = busy/moving.
 - `offset` / `status` are `-1` / `-2` respectively for a unit that didn't respond (`online: false`).
+- `phase`/`progress` only present with `?detail=1`. `phase`: `0` = idle, `1` = calibrating
+  (searching for the hall sensor marker), `2` = rotating to a target letter. `progress`: steps
+  done so far in the current phase - watch whether this climbs steadily (points at a mechanical/
+  torque issue) or keeps resetting toward 0 (points at the Unit itself repeatedly restarting, e.g.
+  from a brown-out reset).
 
 Returns `503 text/plain` if another units request is already in progress.
 
@@ -386,10 +397,15 @@ push it yet.
 
 ---
 
-### `POST /api/units/firmware/push`
+### `POST /api/units/firmware-push`
 
 Pushes the firmware previously uploaded via `/api/units/firmware` to one unit over I2C (twiboot
 protocol). Deferred to `loop()` - a real push can take several seconds to a couple minutes.
+
+**Renamed 2026-08-22** (see `BUGFIX_LOG.md` #86) from `/api/units/firmware/push` - that path was a
+strict prefix-extension of the upload endpoint above and got silently intercepted by it
+(ESPAsyncWebServer's route matching for the two-callback upload form), making it completely
+unreachable. Always use a sibling path, never a sub-path of an upload endpoint's URL.
 
 **Auth:** requires `X-OTA-Password` header if a password is set.
 

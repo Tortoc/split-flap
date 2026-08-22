@@ -2333,7 +2333,7 @@
 				resultEl.innerHTML = '<p class="status-offline">Netzwerkfehler während des Updates.</p>';
 			};
 
-			xhr.open("POST", "/api/units/firmware/push", true);
+			xhr.open("POST", "/api/units/firmware-push", true);
 			xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 			var passwordInput = document.getElementById("firmwarePassword");
 			xhr.setRequestHeader("X-OTA-Password", passwordInput ? passwordInput.value : "");
@@ -2436,7 +2436,7 @@
 				button.disabled = false;
 			};
 
-			xhr.open("POST", "/api/units/firmware/push", true);
+			xhr.open("POST", "/api/units/firmware-push", true);
 			xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 			var passwordInput = document.getElementById("firmwarePassword");
 			xhr.setRequestHeader("X-OTA-Password", passwordInput ? passwordInput.value : "");

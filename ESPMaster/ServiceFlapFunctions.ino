@@ -39,9 +39,25 @@ int translateLettertoInt(char letterchar) {
   return -1;
 }
 
+//HARDENING, 2026-08-22 (see BUGFIX_LOG.md #85): every write to a Unit now ends with one extra
+//XOR-checksum byte over the payload that preceded it. Unit.ino's receiveLetter() verifies it and
+//silently ignores the whole message on a mismatch, instead of possibly acting on it. This is the
+//defense against I2C bus noise/glitches (e.g. right after an ESPMaster reset/reflash, see #84's
+//Offene Punkte) being misread as a real command - a stray/garbage byte sequence has only a
+//~1-in-256 chance of passing a correct checksum by pure chance, versus the ~1-in-6 chance it
+//would already fall in the valid 0-44 letter range on its own (range-checking alone is a much
+//weaker defense here). Small helper shared by every write path below.
+uint8_t i2cChecksum(uint8_t* data, int len) {
+  uint8_t checksum = 0;
+  for (int i = 0; i < len; i++) {
+    checksum ^= data[i];
+  }
+  return checksum;
+}
+
 //Write letter position and speed in rpm to single unit
 void writeToUnit(int address, int letter, int flapSpeed) {
-  int sendArray[2] = {letter, flapSpeed}; //Array with values to send to unit
+  uint8_t sendArray[2] = {(uint8_t)letter, (uint8_t)flapSpeed}; //Array with values to send to unit
 
   Wire.beginTransmission(address);
 
@@ -52,6 +68,7 @@ void writeToUnit(int address, int letter, int flapSpeed) {
 
     Wire.write(sendArray[index]);
   }
+  Wire.write(i2cChecksum(sendArray, sizeof sendArray / sizeof sendArray[0]));
   Wire.endTransmission(); //send values to unit
 }
 
@@ -66,11 +83,14 @@ void writeOffsetToUnit(int address, uint16_t offset) {
   SerialPrint(" to unit ");
   SerialPrintln(address);
 
+  //letter 0 = blank, matches the position the unit ends up at after recalibrating
+  uint8_t sendArray[4] = {0, (uint8_t)currentSpeed, lowByte(offset), highByte(offset)};
+
   Wire.beginTransmission(address);
-  Wire.write(0); //letter 0 = blank, matches the position the unit ends up at after recalibrating
-  Wire.write(currentSpeed);
-  Wire.write(lowByte(offset));
-  Wire.write(highByte(offset));
+  for (unsigned int index = 0; index < sizeof sendArray / sizeof sendArray[0]; index++) {
+    Wire.write(sendArray[index]);
+  }
+  Wire.write(i2cChecksum(sendArray, sizeof sendArray / sizeof sendArray[0]));
   Wire.endTransmission();
 }
 

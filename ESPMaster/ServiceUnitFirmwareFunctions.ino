@@ -28,9 +28,15 @@
 //Tells the unit's running app (not the bootloader) to reboot into twiboot - see Unit.ino's
 //receiveLetter()/CMD_ENTER_BOOTLOADER handling. Sent to the unit's normal app address.
 void requestUnitEnterBootloader(int unitIndex) {
+  //HARDENING, 2026-08-22 (see BUGFIX_LOG.md #85): checksum byte appended, same as every other
+  //write path (writeToUnit()/writeOffsetToUnit(), ServiceFlapFunctions.ino) - this command is
+  //genuinely more consequential than a normal letter write (it reboots the unit), so it's
+  //important this isn't triggered by a spurious/misread byte sequence either.
+  uint8_t sendArray[2] = {UNIT_BOOTLOADER_CMD, 0}; //speed byte - unused for this command, but the unit always reads 2 bytes
   Wire.beginTransmission(unitIndex);
-  Wire.write(UNIT_BOOTLOADER_CMD);
-  Wire.write((uint8_t)0); //speed byte - unused for this command, but the unit always reads 2 bytes
+  Wire.write(sendArray[0]);
+  Wire.write(sendArray[1]);
+  Wire.write(i2cChecksum(sendArray, sizeof sendArray / sizeof sendArray[0]));
   Wire.endTransmission();
 }
 
@@ -93,15 +99,28 @@ bool twibootHeartbeat(int bootAddress) {
 }
 
 //Reads chip signature, flash page size and bootloader start address (= max writable flash address)
+//
+//BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #86): this used to send the address-select write with
+//endTransmission(false) (a repeated START, no STOP, before the read that follows). Research
+//(esp8266/Arduino issue #5718, "I2C changes for clock stretch and missing pulse before repeated
+//start") plus twiboot's own source (main.c's TWI_vect(), case 0xA0 "STOP or repeated START -> IDLE")
+//together explain a live-reproduced, deterministic push failure: twiboot's `cmd`/`addr` state
+//(which memory type/address a following read should serve) is NOT reset by a STOP condition - only
+//the now-inactive USE_CLOCKSTRETCH==0 branch touches anything there - so a full STOP between the
+//address-select write and the read works exactly like a repeated start from twiboot's side, without
+//tripping the ESP8266 core's own repeated-start/clock-stretch interaction bug. Switched to a real
+//STOP (endTransmission(true)) plus a short settle delay, the two workarounds this issue's own
+//discussion recommends.
 bool twibootReadChipInfo(int bootAddress, TwibootChipInfo &infoOut) {
   Wire.beginTransmission(bootAddress);
   Wire.write(TWIBOOT_CMD_ACCESS_MEMORY);
   Wire.write(TWIBOOT_MEMTYPE_CHIPINFO);
   Wire.write((uint8_t)0x00); //address bytes - unused for chipinfo, but the protocol always expects 2
   Wire.write((uint8_t)0x00);
-  if (Wire.endTransmission(false) != 0) { //repeated START, not STOP - a read follows
+  if (Wire.endTransmission(true) != 0) { //real STOP - see the comment above this function
     return false;
   }
+  delayMicroseconds(500);
 
   if (Wire.requestFrom(bootAddress, 8) != 8) {
     return false;
@@ -118,16 +137,20 @@ bool twibootReadChipInfo(int bootAddress, TwibootChipInfo &infoOut) {
   return true;
 }
 
-//Reads `len` bytes of flash starting at `flashAddress` - used for the verify pass after every write
+//Reads `len` bytes of flash starting at `flashAddress` - used for the verify pass after every write.
+//BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #86): same repeated-start -> STOP change as
+//twibootReadChipInfo() above, for the same reason - this is the read that was actually observed
+//failing (deterministic verification mismatch on page 1 of a real push).
 bool twibootReadFlash(int bootAddress, uint16_t flashAddress, uint8_t* bufferOut, uint8_t len) {
   Wire.beginTransmission(bootAddress);
   Wire.write(TWIBOOT_CMD_ACCESS_MEMORY);
   Wire.write(TWIBOOT_MEMTYPE_FLASH);
   Wire.write((uint8_t)(flashAddress >> 8));
   Wire.write((uint8_t)(flashAddress & 0xFF));
-  if (Wire.endTransmission(false) != 0) {
+  if (Wire.endTransmission(true) != 0) {
     return false;
   }
+  delayMicroseconds(500);
 
   if (Wire.requestFrom(bootAddress, (int)len) != len) {
     return false;
@@ -142,16 +165,25 @@ bool twibootReadFlash(int bootAddress, uint16_t flashAddress, uint8_t* bufferOut
 //Writes one full flash page. `data` must be exactly `pageSize` bytes (pad the source image's
 //final, partial page with 0xFF - the erased-flash value) - twiboot only commits the write once
 //it has received exactly pageSize data bytes, a short write is silently ignored, not an error.
+//
+//BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #86): this used to go through Wire.beginTransmission()/
+//write()/endTransmission() - live-reproduced root cause of a deterministic verification failure on
+//every real push: the combined length here (4 header bytes + a full 128-byte page = 132 bytes)
+//exceeds Wire's internal 128-byte TX buffer, so the last 4 bytes silently never got queued and
+//twiboot's own byte-count trigger for actually committing the write was never reached - the flash
+//was never touched at all (proved via a byte-level diff: the "new" flash content read back after a
+//"successful-looking" write was actually just the old firmware's untouched bytes). twi_writeTo()
+//(twi.h) is the ESP8266 core's raw, unbuffered I2C write - no size limit, bypasses Wire's TX buffer
+//entirely - used here to send the whole transaction as one real write. Returns 0 on success,
+//matching Wire.endTransmission()'s convention.
 bool twibootWriteFlashPage(int bootAddress, uint16_t flashAddress, const uint8_t* data, uint8_t pageSize) {
-  Wire.beginTransmission(bootAddress);
-  Wire.write(TWIBOOT_CMD_ACCESS_MEMORY);
-  Wire.write(TWIBOOT_MEMTYPE_FLASH);
-  Wire.write((uint8_t)(flashAddress >> 8));
-  Wire.write((uint8_t)(flashAddress & 0xFF));
-  for (uint8_t i = 0; i < pageSize; i++) {
-    Wire.write(data[i]);
-  }
-  return Wire.endTransmission() == 0; //STOP triggers the actual erase+write
+  uint8_t buf[4 + UNIT_BOOTLOADER_MAX_PAGE_SIZE];
+  buf[0] = TWIBOOT_CMD_ACCESS_MEMORY;
+  buf[1] = TWIBOOT_MEMTYPE_FLASH;
+  buf[2] = (uint8_t)(flashAddress >> 8);
+  buf[3] = (uint8_t)(flashAddress & 0xFF);
+  memcpy(buf + 4, data, pageSize);
+  return twi_writeTo(bootAddress, buf, 4 + pageSize, 1) == 0; //sendStop=1, STOP triggers the actual erase+write
 }
 
 //Jumps into the freshly written application - only ever call this after every page (including
@@ -184,6 +216,71 @@ bool twibootStartApplication(int bootAddress) {
 //a half-written app straddling both. If it stops responding as an app at all, it's not bricked -
 //the bootloader itself is never touched by this protocol (twiboot refuses to write anything at
 //or above its own start address) and a fresh push attempt on next reset can recover it.
+//BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #86): twibootReadFlash() (the verify-read below) uses a
+//repeated-start I2C read - the exact pattern documented in BUGFIX_LOG.md #53 (esp8266/Arduino
+//issues #5718/#5528/#1025) as able to occasionally confuse this ESP8266 core's *software* I2C
+//state, corrupting just the read-back rather than reflecting a real flash-write problem. #53's fix
+//minimized this pattern for the boot-address scan, but every page verified during a real push
+//still hits it once - with 45+ pages per push, live-reproduced: a push consistently failed at
+//page 1 with an identical "verification mismatch", the signature of this bug rather than a real,
+//physical write error. Retrying the whole write+verify cycle for one page, with a bus-recovery
+//pass in between attempts, gives a confused I2C state a chance to clear before treating it as a
+//genuine failure. twiboot's own ~1s inactivity timeout isn't at risk here - these retries complete
+//in well under 100ms total, and any successful transaction (including a failed verify) resets it.
+bool writeAndVerifyPage(int bootAddress, uint16_t flashAddress, uint8_t* writeBuffer, uint8_t* verifyBuffer,
+                         uint8_t pageSize, String &failureReasonOut) {
+  const int maxAttempts = 3;
+  for (int attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) {
+      SerialPrintln("Retrying page write+verify at flash address " + String(flashAddress) + " (attempt " + String(attempt + 1) + ")");
+      recoverI2CBus();
+      delay(20);
+    }
+
+    if (!twibootWriteFlashPage(bootAddress, flashAddress, writeBuffer, pageSize)) {
+      failureReasonOut = "I2C write failed on page at flash address " + String(flashAddress);
+      continue;
+    }
+    if (!twibootReadFlash(bootAddress, flashAddress, verifyBuffer, pageSize)) {
+      failureReasonOut = "I2C verify-read failed on page at flash address " + String(flashAddress);
+      continue;
+    }
+    if (memcmp(writeBuffer, verifyBuffer, pageSize) != 0) {
+      failureReasonOut = "Verification mismatch on page at flash address " + String(flashAddress);
+      //DIAGNOSTIC, 2026-08-22 (see BUGFIX_LOG.md #86): a live-reproduced mismatch survived every
+      //fix tried so far (repeated-start->STOP, retry+bus-recovery) - dumping the actual bytes on
+      //both sides (once, not on every retry) to tell apart "read returned stale/old data" (would
+      //show a recognizable pattern, e.g. matching the previous firmware) from "genuinely scrambled/
+      //random" (points elsewhere, e.g. a real write corruption) without needing a logic analyzer.
+      if (attempt == 0) {
+        int diffCount = 0;
+        int firstDiffIndex = -1;
+        for (int i = 0; i < pageSize; i++) {
+          if (writeBuffer[i] != verifyBuffer[i]) {
+            diffCount++;
+            if (firstDiffIndex == -1) firstDiffIndex = i;
+          }
+        }
+        SerialPrintln("Mismatch detail: " + String(diffCount) + " of " + String(pageSize) +
+          " bytes differ, first difference at offset " + String(firstDiffIndex));
+        String writeHex = "";
+        String verifyHex = "";
+        for (int i = 0; i < pageSize; i++) {
+          if (writeBuffer[i] < 0x10) writeHex += "0";
+          writeHex += String(writeBuffer[i], HEX) + " ";
+          if (verifyBuffer[i] < 0x10) verifyHex += "0";
+          verifyHex += String(verifyBuffer[i], HEX) + " ";
+        }
+        SerialPrintln("Intended (write) bytes: " + writeHex);
+        SerialPrintln("Actual (read-back) bytes: " + verifyHex);
+      }
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   JsonDocument result;
   result["unitIndex"] = unitIndex;
@@ -283,16 +380,10 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
       writeBuffer[i] = 0xFF; //pad the final, partial page with the erased-flash value
     }
 
-    if (!twibootWriteFlashPage(bootAddress, flashAddress, writeBuffer, pageSize)) {
+    if (!writeAndVerifyPage(bootAddress, flashAddress, writeBuffer, verifyBuffer, pageSize, failureReason)) {
       allOk = false;
-      failureReason = "I2C write failed on page " + String(page) + " of " + String(pageCount - 1);
-    } else if (!twibootReadFlash(bootAddress, flashAddress, verifyBuffer, pageSize)) {
-      allOk = false;
-      failureReason = "I2C verify-read failed on page " + String(page) + " of " + String(pageCount - 1);
-    } else if (memcmp(writeBuffer, verifyBuffer, pageSize) != 0) {
-      allOk = false;
-      failureReason = "Verification mismatch on page " + String(page) + " of " + String(pageCount - 1) +
-        " - page 0 was never touched, the old firmware's vector table is intact.";
+      failureReason += " (page " + String(page) + " of " + String(pageCount - 1) +
+        " - page 0 was never touched, the old firmware's vector table is intact.)";
     } else {
       pagesWritten++;
     }
@@ -311,15 +402,9 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
       writeBuffer[i] = 0xFF;
     }
 
-    if (!twibootWriteFlashPage(bootAddress, 0, writeBuffer, pageSize)) {
+    if (!writeAndVerifyPage(bootAddress, 0, writeBuffer, verifyBuffer, pageSize, failureReason)) {
       allOk = false;
-      failureReason = "I2C write failed on page 0 (vector table)";
-    } else if (!twibootReadFlash(bootAddress, 0, verifyBuffer, pageSize)) {
-      allOk = false;
-      failureReason = "I2C verify-read failed on page 0 (vector table)";
-    } else if (memcmp(writeBuffer, verifyBuffer, pageSize) != 0) {
-      allOk = false;
-      failureReason = "Verification mismatch on page 0 (vector table)";
+      failureReason += " (page 0, vector table)";
     } else {
       pagesWritten++;
     }
