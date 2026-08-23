@@ -35,7 +35,8 @@
 #define WEB_FIRMWARE_UPDATE_ENABLE true //Option to enable browser-based firmware upload from the Admin page, no Arduino IDE required
 #define UNIT_BOOTLOADER_ENABLE true //Option to enable pushing Unit.ino firmware updates to units over I2C via the twiboot bootloader.
                                      //Requires every unit to first be flashed with twiboot per Unit/BOOTLOADER_SETUP.md - leave false until that's done!
-#define UNITS_AMOUNT_MAX    16     //Maximum possible units (matches the 4-bit DIP switch addressing range 0-15).
+#define UNITS_AMOUNT_MAX    64     //Maximum possible units (matches the 6-bit DIP switch addressing range 0-63,
+                                    //see BUGFIX_LOG.md #89 - widened from the original 4-bit/0-15 range).
                                     //The actual amount is auto-detected at startup via I2C scan, see scanI2CBus() - no longer set here.
 #define SERIAL_BAUDRATE     115200  //Serial debugging BAUD rate
 #define WIFI_USE_DIRECT     false  //Option to either direct connect to a WiFi Network or setup a AP to configure WiFi. Setting to false will setup as a AP.
@@ -161,7 +162,8 @@
 #define MAX_SPEED           12      //Max Speed
 #define UNIT_STEPS          2038    //Must match STEPS in Unit.ino - used to validate offset values sent from the Admin UI
 #define UNIT_BOOTLOADER_CMD 255     //Must match CMD_ENTER_BOOTLOADER in Unit.ino
-#define UNIT_BOOTLOADER_BASE_ADDRESS 0x29 //Start of the range scanned for a unit's twiboot bootloader (0x29-0x38).
+#define UNIT_BOOTLOADER_BASE_ADDRESS 0x29 //Start of the range scanned for a unit's twiboot bootloader (0x29-0x68,
+                                           //see BUGFIX_LOG.md #89 - widened from the original 0x29-0x38 range).
 #define CRASH_LOG_PATH "/crash-log.jsonl" //See ServiceCrashLogFunctions.ino
 
 //I2C pins, named so ServiceI2CRecoveryFunctions.ino's bus-recovery routine can reuse the exact
@@ -398,44 +400,47 @@ bool isInOtaMode = false;
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
 bool firmwareUpdateAuthFailed = false;
 
-//BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #79): Update.begin()/write() used to run directly inside
-//the AsyncWebServer upload callback - live-confirmed to crash the ESP with a real stack-overflow
-//panic (`Panic core_esp8266_main.cpp:191 __yield`, ctx: sys) on the very first chunk, every time.
-//Same root cause this project already hit once with I2C calls in an AsyncWebServer callback (see
-//pendingRescanRequest etc. above) - that context's stack is too small for this kind of work.
-//Fix: the callback below only copies bytes into this ring buffer; loop() does all the actual
-//Update.begin()/write()/end() calls in its own large, safe stack. Sized well above what a single
-//upload chunk plus whatever accumulates during one Update.write() call's internal yield()s should
-//ever need, with graceful abort (not memory corruption) if it's ever not enough.
-//Allocated with new[] only while an upload is actually in progress (see index==0 below) and freed
-//right after - this device's free heap is chronically tight (see BUGFIX_LOG.md #41-43), a 4KB
-//buffer held statically for a rarely-used feature would eat noticeably into that budget for no
-//benefit the other 99% of the time this device is running.
-//Live-tested progression: 4096 overflowed early. 8192 got a full transfer through the network at
-//~150KB/s but the ring still overflowed partway (flash erase/write apparently can't always keep
-//up with that network speed on this device - a genuine throughput limit, not just a buffer-size
-//one). 16384 sounded like the fix but simply failed to allocate - this device's free heap is only
-//~15KB total (see BUGFIX_LOG.md #41-43), so a 16KB request never had headroom to succeed. 8192 is
-//close to the practical ceiling here: big enough to ride out normal short bursts, small enough to
-//reliably allocate. On a sufficiently fast connection this can still legitimately run out of
-//buffer - that now fails cleanly (a proper error response, old firmware stays active, no crash)
-//instead of the original stack-overflow panic, which is the actual bug this fix targets.
-#define OTA_RING_SIZE 8192
-uint8_t* otaRingBuffer = nullptr;
-volatile size_t otaRingHead = 0;   //next write index (callback advances this)
-volatile size_t otaRingTail = 0;   //next read index (loop() advances this)
-volatile size_t otaRingCount = 0;  //bytes currently queued, valid range 0..OTA_RING_SIZE
-volatile bool otaUpdateActive = false;    //true from the first chunk until fully finished
-volatile bool otaUpdateBegun = false;     //Update.begin() has been called for this upload
-volatile bool otaFinalChunkQueued = false;//callback has queued the last chunk (final==true)
-volatile bool otaRingOverflowed = false;  //callback had no room to queue a chunk - abort
-volatile bool otaClientDisconnected = false; //client left before the upload finished
-volatile bool otaResultReady = false;     //loop() has finished Update.end() (success or not)
+//BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #88): this used to be a single streaming upload (one big
+//multipart POST) buffered into a ring buffer that loop() drained via Update.write() - see the old
+//comment this replaced, preserved in git history. That design hit a hard wall no buffer size could
+//fix: the ESP8266 has no way to slow down incoming TCP data (confirmed via research - the SDK just
+//delivers +IPD packets as fast as they arrive, no flow control), so on a fast enough connection the
+//flash-write side could never keep up regardless of buffer size (live-tested: 4096 overflowed
+//early, 8192 got further but still overflowed, 16384 couldn't even allocate on this device's
+//chronically tight heap - see BUGFIX_LOG.md #83's Offene Punkte for the full investigation).
+//
+//Replaced with a client-paced chunked protocol across three endpoints (/api/firmware-start,
+//-chunk, -finish, below) - the browser only sends the next chunk after the ESP has confirmed the
+//previous one is fully written to flash, so the request/response round-trip itself provides
+//natural backpressure without needing any TCP-level trick. Each chunk is small and bounded
+//(OTA_CHUNK_SIZE), so - same lesson as #79 - Update.begin()/write()/end() still can't run directly
+//in an AsyncWebServer callback (too little stack there), but now there's no ring buffer to
+//manage: loop() just does the one pending Update.* call for whichever phase is pending.
+#define OTA_CHUNK_SIZE 4096 //must match CHUNK_SIZE in index.html's uploadFirmware()
+uint8_t* otaChunkBuffer = nullptr; //allocated only while an upload is in progress, freed after
+volatile size_t otaChunkLen = 0;   //bytes currently buffered for the in-progress chunk
+enum OtaPhase { OTA_PHASE_NONE, OTA_PHASE_BEGIN, OTA_PHASE_WRITE, OTA_PHASE_FINISH };
+volatile OtaPhase otaPendingPhase = OTA_PHASE_NONE; //what loop() should do next
+volatile OtaPhase otaCompletedPhase = OTA_PHASE_NONE; //which phase otaResultReady refers to
+volatile uint32_t otaBeginSize = 0; //total firmware size, from /api/firmware-start's "size" param
+volatile bool otaChunkRejected = false; //oversized/out-of-sequence chunk - separate from auth so
+                                         //the error message told to the user is accurate
+volatile bool otaResultReady = false;     //loop() has finished the pending phase (success or not)
 volatile bool otaResultSuccess = false;   //valid once otaResultReady is true
-//BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #82): captured from request->contentLength() at the start
-//of the upload so loop() can size Update.begin() to what's actually being uploaded instead of the
-//whole available OTA slot - see the comment where this is used, below.
-volatile size_t otaUploadContentLength = 0;
+String otaResultMessage = "";             //valid once otaResultReady is true
+//Watchdog for an abandoned upload (client vanished between chunks without a clean disconnect
+//event reaching us, e.g. a network drop) - loop() aborts and frees otaChunkBuffer if this goes
+//too long without any of the three endpoints touching it. Not a correctness issue otherwise (a
+//stuck otaChunkBuffer just blocks a *new* upload from starting, never anything else) but there's
+//no reason to leave a firmware update dangling indefinitely once the browser is clearly gone.
+volatile unsigned long otaLastActivityAt = 0;
+//BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #88): bumped from 30s to 90s after live testing over this
+//project's known, separately-documented flaky WiFi path (BUGFIX_LOG.md #78, external/router-side,
+//not this firmware) - a client retrying a dropped chunk a few times (network timeout + backoff
+//each attempt) can genuinely take longer than 30s in total even though the upload itself is fine,
+//and having this watchdog abandon the upload out from under a client that's about to succeed on
+//its next retry is worse than just waiting a bit longer for a clearly-gone client.
+#define OTA_ABANDONED_TIMEOUT_MS 90000
 AsyncWebServerRequest* pendingFirmwareUploadRequest = nullptr;
 bool pendingFirmwareUploadRequestDisconnected = false;
 #endif
@@ -1315,108 +1320,117 @@ void setup() {
 #endif
 
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
-    // Admin: browser-based firmware upload (no Arduino IDE required).
-    // Password (if otaPassword is set) is passed via the X-OTA-Password header so it's available
-    // before the file data starts streaming in, regardless of multipart field order.
+    // Admin: browser-based firmware upload (no Arduino IDE required), in three steps - see the
+    // comment on the ota* globals near firmwareUpdateAuthFailed above for why this replaced a
+    // single streaming upload (BUGFIX_LOG.md #88).
     //
-    // BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #79): Update.begin()/write()/end() used to be called
-    // directly from the upload callback below - live-confirmed to crash the ESP on the very first
-    // chunk every time (`Panic core_esp8266_main.cpp:191 __yield`, ctx: sys - a stack overflow,
-    // this callback's stack is too small for what Update.begin()'s flash erase needs). Fix: this
-    // callback ONLY copies bytes into otaRingBuffer; loop() does all the actual Update.* calls in
-    // its own large, safe stack. See the ring-buffer globals near firmwareUpdateAuthFailed above.
-    webServer.on("/api/firmware", HTTP_POST,
-      [](AsyncWebServerRequest * request) {
-        //Runs once AsyncWebServer has received the whole body (every chunk already handed to the
-        //upload callback below). The actual flash write may still be draining in loop() at this
-        //point - don't respond here, just hand off the request; loop() sends the real response
-        //once Update.end() has actually run (see the pendingFirmwareUploadRequest block below).
-        if (firmwareUpdateAuthFailed) {
-          firmwareUpdateAuthFailed = false;
+    // Shared password check - all three endpoints require it identically.
+    auto checkOtaPassword = [](AsyncWebServerRequest * request) -> bool {
+      if (String(otaPassword) == "") {
+        return true; //no password configured, nothing to check
+      }
+      String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
+      return providedPassword == String(otaPassword);
+    };
+
+    // Step 1: tell the ESP how big the firmware is and let it erase/prepare the flash region.
+    // Body: size=<bytes> (form-encoded).
+    webServer.on("/api/firmware-start", HTTP_POST, [checkOtaPassword](AsyncWebServerRequest * request) {
+      if (!checkOtaPassword(request)) {
+        request->send(401, "text/plain", "Invalid password");
+        return;
+      }
+      if (otaChunkBuffer != nullptr || otaPendingPhase != OTA_PHASE_NONE) {
+        request->send(503, "text/plain", "Another firmware upload is already in progress");
+        return;
+      }
+      if (!request->hasParam("size", true)) {
+        request->send(400, "text/plain", "'size' is required");
+        return;
+      }
+      uint32_t size = (uint32_t)request->getParam("size", true)->value().toInt();
+      if (size == 0) {
+        request->send(400, "text/plain", "'size' must be > 0");
+        return;
+      }
+
+      SerialPrintln("DEBUG: Firmware upload starting, size=" + String(size));
+      otaBeginSize = size;
+      otaLastActivityAt = millis();
+      otaResultReady = false;
+      pendingFirmwareUploadRequestDisconnected = false;
+      pendingFirmwareUploadRequest = request;
+      request->onDisconnect([]() {
+        pendingFirmwareUploadRequest = nullptr;
+        pendingFirmwareUploadRequestDisconnected = true;
+      });
+      otaPendingPhase = OTA_PHASE_BEGIN; //loop() calls Update.begin()
+    });
+
+    // Step 2: one chunk of firmware data (at most OTA_CHUNK_SIZE bytes), called once per chunk -
+    // the browser waits for this to return before sending the next one, which is the whole point
+    // (natural backpressure via the request/response round-trip, see the comment above).
+    webServer.on("/api/firmware-chunk", HTTP_POST,
+      [checkOtaPassword](AsyncWebServerRequest * request) {
+        if (!checkOtaPassword(request)) {
           request->send(401, "text/plain", "Invalid password");
           return;
         }
+        if (otaChunkRejected) {
+          otaChunkRejected = false;
+          request->send(400, "text/plain", "Chunk too large or no upload in progress");
+          return;
+        }
+        if (otaChunkBuffer == nullptr) {
+          request->send(400, "text/plain", "No firmware upload in progress - call /api/firmware-start first");
+          return;
+        }
+        otaLastActivityAt = millis();
         pendingFirmwareUploadRequestDisconnected = false;
         pendingFirmwareUploadRequest = request;
+        request->onDisconnect([]() {
+          pendingFirmwareUploadRequest = nullptr;
+          pendingFirmwareUploadRequestDisconnected = true;
+        });
+        otaPendingPhase = OTA_PHASE_WRITE; //loop() calls Update.write()
       },
-      [](AsyncWebServerRequest * request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
+      nullptr, //no multipart upload needed - this is a plain raw-body request
+      [](AsyncWebServerRequest * request, uint8_t *data, size_t len, size_t index, size_t total) {
         if (index == 0) {
-          SerialPrintln("DEBUG: Firmware upload starting: " + filename);
-          firmwareUpdateAuthFailed = false;
-          //BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #82): request->contentLength() is the whole
-          //multipart body size (a few hundred bytes more than the raw firmware, for the boundary/
-          //headers) - close enough once rounded up to a flash sector below. Used so loop() only
-          //erases what this upload actually needs, not the full OTA slot (which grew from ~438KB
-          //to ~1019KB in this same change - erasing the full slot took long enough to overflow the
-          //ring buffer before Update.begin() even returned, live-reproduced testing this).
-          otaUploadContentLength = request->contentLength();
-          otaRingHead = 0;
-          otaRingTail = 0;
-          otaRingCount = 0;
-          otaUpdateBegun = false;
-          otaFinalChunkQueued = false;
-          otaClientDisconnected = false;
-          otaResultReady = false;
-          //Freed by loop() once it's done with the upload (success or not) - see below. Allocated
-          //fresh per upload rather than held statically, see the comment on the declaration above.
-          if (otaRingBuffer != nullptr) {
-            delete[] otaRingBuffer; //shouldn't happen (loop() always frees before the next upload
-                                    //could start), but don't leak if it somehow does
-          }
-          otaRingBuffer = new (std::nothrow) uint8_t[OTA_RING_SIZE];
-          otaRingOverflowed = (otaRingBuffer == nullptr);
-          if (otaRingOverflowed) {
-            SerialPrintln("Firmware upload: could not allocate ring buffer, aborting");
-          }
-
-          //Only enforce the password if one has actually been configured
-          if (String(otaPassword) != "") {
-            String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-            if (providedPassword != String(otaPassword)) {
-              SerialPrintln("Firmware upload rejected: invalid password");
-              firmwareUpdateAuthFailed = true;
-              return;
-            }
-          }
-
-          //Registered here (not just in the completion callback above) so a client that
-          //disconnects mid-upload - before AsyncWebServer ever considers the request "complete" -
-          //still gets noticed by loop(), instead of leaving otaUpdateActive stuck forever.
-          request->onDisconnect([]() {
-            otaClientDisconnected = true;
-            pendingFirmwareUploadRequest = nullptr;
-            pendingFirmwareUploadRequestDisconnected = true;
-          });
-
-          otaUpdateActive = true; //loop() calls Update.begin() itself, see below
+          otaChunkLen = 0;
+          otaChunkRejected = (otaChunkBuffer == nullptr) || (total > OTA_CHUNK_SIZE);
         }
-
-        if (firmwareUpdateAuthFailed || !otaUpdateActive || otaRingOverflowed) {
-          return; //Password rejected, ring buffer alloc failed, or a stray chunk after we gave up
+        if (otaChunkRejected) {
+          return;
         }
-
-        if (len > 0) {
-          if (otaRingCount + len > OTA_RING_SIZE) {
-            SerialPrintln("Firmware upload: ring buffer overflow, aborting");
-            otaRingOverflowed = true;
-          } else {
-            size_t firstPart = OTA_RING_SIZE - otaRingHead;
-            if (firstPart >= len) {
-              memcpy(otaRingBuffer + otaRingHead, data, len);
-            } else {
-              memcpy(otaRingBuffer + otaRingHead, data, firstPart);
-              memcpy(otaRingBuffer, data + firstPart, len - firstPart);
-            }
-            otaRingHead = (otaRingHead + len) % OTA_RING_SIZE;
-            otaRingCount += len;
-          }
+        if (otaChunkLen + len > OTA_CHUNK_SIZE) {
+          otaChunkRejected = true; //shouldn't happen given the total check above, but never overflow
+          return;
         }
-
-        if (final) {
-          otaFinalChunkQueued = true;
-        }
+        memcpy(otaChunkBuffer + otaChunkLen, data, len);
+        otaChunkLen += len;
       }
     );
+
+    // Step 3: no body needed - finalizes the update (Update.end()) and reboots on success.
+    webServer.on("/api/firmware-finish", HTTP_POST, [checkOtaPassword](AsyncWebServerRequest * request) {
+      if (!checkOtaPassword(request)) {
+        request->send(401, "text/plain", "Invalid password");
+        return;
+      }
+      if (otaChunkBuffer == nullptr) {
+        request->send(400, "text/plain", "No firmware upload in progress");
+        return;
+      }
+      otaLastActivityAt = millis();
+      pendingFirmwareUploadRequestDisconnected = false;
+      pendingFirmwareUploadRequest = request;
+      request->onDisconnect([]() {
+        pendingFirmwareUploadRequest = nullptr;
+        pendingFirmwareUploadRequestDisconnected = true;
+      });
+      otaPendingPhase = OTA_PHASE_FINISH; //loop() calls Update.end()
+    });
 #endif
 
 #if DEBUG_ENABLE == true
@@ -1989,7 +2003,7 @@ void loop() {
     doc["scanTime"] = millis();
 
     int foundCount = 0;
-    for (int address = 0; address < 16; address++) {
+    for (int address = 0; address < UNITS_AMOUNT_MAX; address++) {
       Wire.beginTransmission(address);
       byte error = Wire.endTransmission();
 
@@ -2031,105 +2045,104 @@ void loop() {
   }
 
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
-  // Drains otaRingBuffer and does all the real Update.begin()/write()/end() work here, in loop()'s
-  // large safe stack - see BUGFIX_LOG.md #79 for why this can't run in the upload callback itself.
-  if (otaUpdateActive) {
-    if (!otaUpdateBegun && !otaRingOverflowed) {
-      uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
-      //BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #82): only erase what this upload actually needs
-      //(rounded up to a flash sector), not the whole OTA slot - Update.begin()'s erase is
-      //synchronous and scales with the size passed in, and widening the OTA slot from ~438KB to
-      //~1019KB (same change) made a full-slot erase take long enough to overflow the small ring
-      //buffer before this call even returned. Falls back to the old full-slot behavior if
-      //contentLength() wasn't available for some reason, and is always clamped to maxSketchSpace
-      //as a safety ceiling either way.
-      uint32_t updateSize = maxSketchSpace;
-      if (otaUploadContentLength > 0) {
-        uint32_t rounded = (otaUploadContentLength + 0xFFF) & 0xFFFFF000;
-        if (rounded > 0 && rounded < maxSketchSpace) {
-          updateSize = rounded;
-        }
+  // Does the one pending Update.* call for whichever phase a client is currently waiting on, here
+  // in loop()'s large safe stack - see BUGFIX_LOG.md #79 for why this can't run in a webserver
+  // callback itself. See BUGFIX_LOG.md #88 for why this is chunk-based rather than a streamed
+  // ring buffer.
+  if (otaPendingPhase == OTA_PHASE_BEGIN) {
+    uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+    uint32_t rounded = (otaBeginSize + 0xFFF) & 0xFFFFF000; //round up to a flash sector
+    uint32_t updateSize = (rounded > 0 && rounded < maxSketchSpace) ? rounded : maxSketchSpace;
+
+    bool ok = Update.begin(updateSize, U_FLASH);
+    if (ok) {
+      //Allocated here (not statically) for the same reason as the old ring buffer - this device's
+      //free heap is chronically tight (BUGFIX_LOG.md #41-43), no reason to hold 4KB for a rarely-
+      //used feature the other 99% of the time.
+      if (otaChunkBuffer != nullptr) {
+        delete[] otaChunkBuffer; //shouldn't happen (always freed below before this runs again), don't leak if it somehow does
       }
-      if (!Update.begin(updateSize, U_FLASH)) {
-        SerialPrintln("Firmware upload: Update.begin() failed");
-        Update.printError(Serial);
-        otaRingOverflowed = true; //no dedicated "begin failed" flag - this also aborts cleanly
+      otaChunkBuffer = new (std::nothrow) uint8_t[OTA_CHUNK_SIZE];
+      ok = (otaChunkBuffer != nullptr);
+      if (!ok) {
+        SerialPrintln("Firmware upload: could not allocate chunk buffer");
+        Update.end(false); //release Update's internal "running" lock - see the #79-era lesson below
       }
-      otaUpdateBegun = true;
+    } else {
+      SerialPrintln("Firmware upload: Update.begin() failed");
+      Update.printError(Serial);
     }
 
-    if (otaRingCount > 0 && !otaRingOverflowed) {
-      size_t lenToWrite = otaRingCount;
-      size_t firstPart = OTA_RING_SIZE - otaRingTail;
-      bool writeOk;
-      if (firstPart >= lenToWrite) {
-        writeOk = Update.write(otaRingBuffer + otaRingTail, lenToWrite) == lenToWrite;
-      } else {
-        writeOk = Update.write(otaRingBuffer + otaRingTail, firstPart) == firstPart;
-        if (writeOk) {
-          writeOk = Update.write(otaRingBuffer, lenToWrite - firstPart) == (lenToWrite - firstPart);
-        }
-      }
-      if (!writeOk) {
-        SerialPrintln("Firmware upload: Update.write() failed");
-        Update.printError(Serial);
-        otaRingOverflowed = true;
-      }
-      otaRingTail = (otaRingTail + lenToWrite) % OTA_RING_SIZE;
-      otaRingCount -= lenToWrite;
+    otaResultSuccess = ok;
+    otaResultMessage = ok ? "OK - ready for chunks" : "Failed to start update, check the serial log for details";
+    otaCompletedPhase = OTA_PHASE_BEGIN;
+    otaResultReady = true;
+    otaPendingPhase = OTA_PHASE_NONE;
+
+  } else if (otaPendingPhase == OTA_PHASE_WRITE) {
+    bool ok = !otaChunkRejected && Update.write(otaChunkBuffer, otaChunkLen) == otaChunkLen;
+    if (!ok) {
+      SerialPrintln("Firmware upload: chunk write failed");
+      Update.printError(Serial);
+      //Must still call end() here (ignoring its result - we already know success is false):
+      //Update.begin() refuses to start a new update while the previous one is still marked
+      //"running" internally, and only end()/a premature end() clears that - skipping this call
+      //left every subsequent upload attempt failing with "Update.begin() failed" until a full
+      //reboot, live-confirmed while testing the original version of this fix (see BUGFIX_LOG.md #79).
+      Update.end(false);
+      delete[] otaChunkBuffer; //abort the whole upload - a missing chunk buffer makes the other
+      otaChunkBuffer = nullptr; //two endpoints cleanly reject anything further
     }
 
-    if (!otaResultReady && (otaClientDisconnected || otaRingOverflowed || (otaFinalChunkQueued && otaRingCount == 0))) {
-      bool success = false;
-      if (!otaClientDisconnected && !otaRingOverflowed) {
-        success = Update.end(true);
-        if (!success) {
-          SerialPrintln("Firmware upload: Update.end() failed");
-          Update.printError(Serial);
-        }
-      } else {
-        //Must still call end() here (ignoring its result - we already know success is false):
-        //Update.begin() refuses to start a new update while the previous one is still marked
-        //"running" internally, and only end()/a premature end() clears that - skipping this call
-        //left every subsequent upload attempt failing with "Update.begin() failed" until a full
-        //reboot, live-confirmed while testing this fix.
-        if (otaUpdateBegun) {
-          Update.end(false);
-        }
-        if (otaClientDisconnected) {
-          SerialPrintln("Firmware upload: client disconnected mid-upload, aborting (old firmware stays active)");
-        } else {
-          SerialPrintln("Firmware upload: aborting (old firmware stays active)");
-        }
-      }
-      otaResultReady = true;
-      otaResultSuccess = success;
-      otaUpdateActive = false;
-      delete[] otaRingBuffer; //safe even if allocation itself failed - delete[] on nullptr is a no-op
-      otaRingBuffer = nullptr;
+    otaResultSuccess = ok;
+    otaResultMessage = ok ? "OK" : "Chunk write failed, check the serial log for details";
+    otaCompletedPhase = OTA_PHASE_WRITE;
+    otaResultReady = true;
+    otaPendingPhase = OTA_PHASE_NONE;
+
+  } else if (otaPendingPhase == OTA_PHASE_FINISH) {
+    bool ok = Update.end(true);
+    if (!ok) {
+      SerialPrintln("Firmware upload: Update.end() failed");
+      Update.printError(Serial);
     }
+    delete[] otaChunkBuffer;
+    otaChunkBuffer = nullptr;
+
+    otaResultSuccess = ok;
+    otaResultMessage = ok ? "OK - Firmware written, rebooting now" : "Update failed, check the serial log for details";
+    otaCompletedPhase = OTA_PHASE_FINISH;
+    otaResultReady = true;
+    otaPendingPhase = OTA_PHASE_NONE;
+  }
+
+  // Abandoned-upload watchdog - see the comment on otaLastActivityAt above.
+  if (otaChunkBuffer != nullptr && otaPendingPhase == OTA_PHASE_NONE &&
+      (millis() - otaLastActivityAt) > OTA_ABANDONED_TIMEOUT_MS) {
+    SerialPrintln("Firmware upload: no activity for " + String(OTA_ABANDONED_TIMEOUT_MS / 1000) + "s, aborting (old firmware stays active)");
+    Update.end(false);
+    delete[] otaChunkBuffer;
+    otaChunkBuffer = nullptr;
   }
 
   // Separate from the block above on purpose: the flash-side result and the deferred request can
-  // become ready in either order (e.g. an overflow can finish before AsyncWebServer even calls the
-  // completion callback that hands us pendingFirmwareUploadRequest).
+  // become ready in either order.
   if (otaResultReady && pendingFirmwareUploadRequest != nullptr) {
     AsyncWebServerRequest* deferredRequest = pendingFirmwareUploadRequest;
     bool wasDisconnected = pendingFirmwareUploadRequestDisconnected;
     pendingFirmwareUploadRequest = nullptr;
 
     if (!wasDisconnected) {
-      AsyncWebServerResponse* response = deferredRequest->beginResponse(otaResultSuccess ? 200 : 500, "text/plain",
-        otaResultSuccess ? "OK - Firmware written, rebooting now" : "Update failed, check the serial log for details");
+      AsyncWebServerResponse* response = deferredRequest->beginResponse(otaResultSuccess ? 200 : 500, "text/plain", otaResultMessage);
       response->addHeader("Connection", "close");
       deferredRequest->send(response);
     }
 
     otaResultReady = false;
-    if (otaResultSuccess) {
+    if (otaResultSuccess && otaCompletedPhase == OTA_PHASE_FINISH) {
       SerialPrintln("Firmware update successful, rebooting...");
       isPendingReboot = true;
-    } else {
+    } else if (!otaResultSuccess) {
       SerialPrintln("Firmware update failed");
     }
   }
@@ -2338,15 +2351,16 @@ void loop() {
 // of units. Sets the global unitsAmount as a side effect and also returns it for convenience.
 int scanI2CBus() {
   SerialPrintln("========================================");
-  SerialPrintln("I2C Bus Scan - Checking addresses 0-15");
+  SerialPrintln("I2C Bus Scan - Checking addresses 0-" + String(UNITS_AMOUNT_MAX - 1));
   SerialPrintln("========================================");
 
   int foundCount = 0;
-  bool foundUnits[16] = {false}; // Track which addresses are found
-  int unitStatus[16] = {-2}; // Track status of each address (-2 = not found, -1 = sleeping, 0 = ready, 1 = busy)
+  bool foundUnits[UNITS_AMOUNT_MAX] = {false}; // Track which addresses are found
+  int unitStatus[UNITS_AMOUNT_MAX]; // Track status of each address (-2 = not found, -1 = sleeping, 0 = ready, 1 = busy)
+  for (int i = 0; i < UNITS_AMOUNT_MAX; i++) unitStatus[i] = -2; // {-2} only zero-initializes element 0 for a non-constant size
 
-  // Scan all possible I2C addresses (0-15)
-  for (int address = 0; address < 16; address++) {
+  // Scan all possible I2C addresses (0..UNITS_AMOUNT_MAX-1, see BUGFIX_LOG.md #89)
+  for (int address = 0; address < UNITS_AMOUNT_MAX; address++) {
     Wire.beginTransmission(address);
     byte error = Wire.endTransmission();
 
@@ -2392,7 +2406,7 @@ int scanI2CBus() {
 
   // Determine unitsAmount: count contiguous "found" addresses starting at 0
   int detectedAmount = 0;
-  while (detectedAmount < 16 && foundUnits[detectedAmount]) {
+  while (detectedAmount < UNITS_AMOUNT_MAX && foundUnits[detectedAmount]) {
     detectedAmount++;
   }
   unitsAmount = detectedAmount;
@@ -2433,7 +2447,7 @@ int scanI2CBus() {
   if (foundCount > unitsAmount) {
     SerialPrintln("");
     SerialPrintln("⚠ Devices found beyond the contiguous 0..N-1 range - check for a gap (a missing/misconfigured unit earlier in the sequence?):");
-    for (int i = unitsAmount; i < 16; i++) {
+    for (int i = unitsAmount; i < UNITS_AMOUNT_MAX; i++) {
       if (foundUnits[i]) {
         SerialPrint("  Address ");
         SerialPrint(i);

@@ -2135,8 +2135,17 @@
 			document.getElementById("adminLoadedContent").classList.remove("hidden");
 		}
 
-		//Uploads a compiled .bin sketch to the ESP over the browser, no Arduino IDE required
-		function uploadFirmware() {
+		//Uploads a compiled .bin sketch to the ESP over the browser, no Arduino IDE required.
+		//BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #88): this used to send the whole file as one big
+		//multipart POST - the ESP8266 has no way to slow down incoming TCP data, so past a certain
+		//upload speed the flash-write side could never keep up no matter how big the receive
+		//buffer was (see BUGFIX_LOG.md #83's Offene Punkte for the full investigation). Rewritten
+		//to upload in small, sequential chunks instead: the browser only sends the next chunk
+		//after the ESP has confirmed the previous one is fully written to flash, so the
+		//request/response round-trip itself provides natural backpressure. Uses fetch()/async
+		//instead of this file's usual XHR style - much clearer for a ~130-iteration sequential
+		//loop than nested XHR callbacks would be.
+		async function uploadFirmware() {
 			var fileInput = document.getElementById("firmwareFile");
 			var passwordInput = document.getElementById("firmwarePassword");
 			var button = document.getElementById("firmwareUploadButton");
@@ -2165,8 +2174,8 @@
 				return;
 			}
 
-			var formData = new FormData();
-			formData.append("firmware", file, file.name);
+			var password = passwordInput.value;
+			var CHUNK_SIZE = 4096; //must match OTA_CHUNK_SIZE in ESPMaster.ino
 
 			button.disabled = true;
 			progressContainer.classList.remove("hidden");
@@ -2175,43 +2184,60 @@
 			statusEl.innerText = "Wird hochgeladen...";
 			statusEl.className = "";
 
-			var xhr = new XMLHttpRequest();
+			try {
+				var startResponse = await fetch("/api/firmware-start", {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/x-www-form-urlencoded",
+						"X-OTA-Password": password
+					},
+					body: "size=" + file.size
+				});
+				if (!startResponse.ok) {
+					throw new Error(await startResponse.text());
+				}
 
-			xhr.upload.onprogress = function (e) {
-				if (e.lengthComputable) {
-					var percent = Math.round((e.loaded / e.total) * 100);
+				var offset = 0;
+				while (offset < file.size) {
+					var end = Math.min(offset + CHUNK_SIZE, file.size);
+					var chunk = file.slice(offset, end);
+					var chunkResponse = await fetch("/api/firmware-chunk", {
+						method: "POST",
+						headers: {
+							"Content-Type": "application/octet-stream",
+							"X-OTA-Password": password
+						},
+						body: chunk
+					});
+					if (!chunkResponse.ok) {
+						throw new Error(await chunkResponse.text());
+					}
+					offset = end;
+					var percent = Math.round((offset / file.size) * 100);
 					progressBar.style.width = percent + "%";
 					progressBar.innerText = percent + "%";
 				}
-			};
 
-			xhr.onreadystatechange = function () {
-				if (this.readyState == 4) {
-					if (this.status == 200) {
-						progressBar.style.width = "100%";
-						progressBar.innerText = "100%";
-						statusEl.innerText = "Update erfolgreich! Gerät startet jetzt neu, dies kann 10-20 Sekunden dauern...";
-						statusEl.className = "status-online-ready";
-						setTimeout(function () {
-							window.location.href = "/";
-						}, 15000);
-					} else {
-						statusEl.innerText = "Update fehlgeschlagen: " + (this.responseText || ("Status " + this.status));
-						statusEl.className = "status-offline";
-						button.disabled = false;
-					}
+				var finishResponse = await fetch("/api/firmware-finish", {
+					method: "POST",
+					headers: { "X-OTA-Password": password }
+				});
+				if (!finishResponse.ok) {
+					throw new Error(await finishResponse.text());
 				}
-			};
 
-			xhr.onerror = function () {
-				statusEl.innerText = "Netzwerkfehler beim Hochladen.";
+				progressBar.style.width = "100%";
+				progressBar.innerText = "100%";
+				statusEl.innerText = "Update erfolgreich! Gerät startet jetzt neu, dies kann 10-20 Sekunden dauern...";
+				statusEl.className = "status-online-ready";
+				setTimeout(function () {
+					window.location.href = "/";
+				}, 15000);
+			} catch (err) {
+				statusEl.innerText = "Update fehlgeschlagen: " + (err && err.message ? err.message : String(err));
 				statusEl.className = "status-offline";
 				button.disabled = false;
-			};
-
-			xhr.open("POST", "/api/firmware", true);
-			xhr.setRequestHeader("X-OTA-Password", passwordInput.value);
-			xhr.send(formData);
+			}
 		}
 
 		//Uploads a compiled Unit.ino .bin to the ESP, to be pushed to a unit afterwards

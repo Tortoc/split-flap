@@ -868,21 +868,35 @@ int main(void)
 #endif
 
 #if defined (TWCR)
-    /* Read the address DIP switches (same pins as Unit.ino's getaddress():
-     * D3-D6 = PD3-PD6, switch ON = pulled to GND = bit set), so the
-     * bootloader's I2C address always matches whatever the app would use -
-     * one compiled image for every unit, jumper changes apply immediately
-     * without a bootloader reflash. */
-    DDRD &= ~((1<<PD3) | (1<<PD4) | (1<<PD5) | (1<<PD6));  /* inputs */
-    PORTD |= (1<<PD3) | (1<<PD4) | (1<<PD5) | (1<<PD6);    /* enable pull-ups */
+    /* Read the address jumpers (same pins as Unit.ino's getaddress() - see the long comment on
+     * addressPins near the top of Unit.ino for the full pin-to-bit mapping and why it's 6 bits,
+     * not the full 8 pairs J4 physically has), so the bootloader's I2C address always matches
+     * whatever the app would use - one compiled image for every unit, jumper changes apply
+     * immediately without a bootloader reflash.
+     *
+     * FEATURE, 2026-08-23 (see BUGFIX_LOG.md #89): extended from 4 bits (D3-D6 only) to 6 bits -
+     * bit 0..3 = A0-A3 (PC0-PC3, the physically bottom four pairs on J4), bit 4..5 = D3-D4
+     * (PD3-PD4). D5/D6 (PD5/PD6, the two topmost pairs) are intentionally left unread/reserved -
+     * with TWI_ADDRESS_BASE staying at 0x29, a 6-bit raw value (0-63) keeps every possible
+     * bootloader address (0x29-0x68) safely inside the valid, non-reserved 7-bit I2C range
+     * (0x08-0x77) - going further would risk landing on a reserved address or overflowing TWAR's
+     * 7-bit field. Must stay in sync with Unit.ino's own 6-bit getaddress() - the two independently
+     * compute the app and bootloader I2C addresses from the same physical jumpers. */
+    DDRD &= ~((1<<PD3) | (1<<PD4));  /* inputs */
+    PORTD |= (1<<PD3) | (1<<PD4);    /* enable pull-ups */
+    DDRC &= ~((1<<PC0) | (1<<PC1) | (1<<PC2) | (1<<PC3));  /* inputs */
+    PORTC |= (1<<PC0) | (1<<PC1) | (1<<PC2) | (1<<PC3);    /* enable pull-ups */
     _delay_us(50); /* let pull-ups settle */
 
-    uint8_t pins = PIND;
+    uint8_t pinsD = PIND;
+    uint8_t pinsC = PINC;
     uint8_t dipAddress = 0;
-    if (!(pins & (1<<PD3))) dipAddress |= 1;
-    if (!(pins & (1<<PD4))) dipAddress |= 2;
-    if (!(pins & (1<<PD5))) dipAddress |= 4;
-    if (!(pins & (1<<PD6))) dipAddress |= 8;
+    if (!(pinsC & (1<<PC0))) dipAddress |= 1;
+    if (!(pinsC & (1<<PC1))) dipAddress |= 2;
+    if (!(pinsC & (1<<PC2))) dipAddress |= 4;
+    if (!(pinsC & (1<<PC3))) dipAddress |= 8;
+    if (!(pinsD & (1<<PD3))) dipAddress |= 16;
+    if (!(pinsD & (1<<PD4))) dipAddress |= 32;
 
     /* TWI init: set address, auto ACKs */
     TWAR = ((TWI_ADDRESS_BASE + dipAddress) << 1);

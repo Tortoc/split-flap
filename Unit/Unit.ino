@@ -17,11 +17,31 @@
 //letter indices (0-44), so it can never collide with a normal display request.
 #define CMD_ENTER_BOOTLOADER 255
 
-// Pins of I2C adress switch
-#define ADRESSSW1 6
-#define ADRESSSW2 5
-#define ADRESSSW3 4
-#define ADRESSSW4 3
+//FEATURE, 2026-08-23 (see BUGFIX_LOG.md #89): address jumper block (J4 "AddressJumpers" on the
+//fae-pcb schematic) extended from 4 to 6 bits (16 -> 64 possible addresses). J4 has 8 pin pairs
+//total, only 4 (D3-D6) were wired into the address calculation before - this adds A0-A3, which
+//were already physically present on the connector but unused.
+//
+//Pin-to-net mapping verified directly against the PCB netlist (splitflappcb.kicad_pcb), not just
+//the schematic symbol - an earlier attempt to derive this purely from the schematic's symbol
+//geometry got the pin order backwards, caught by cross-checking against the actual routed board.
+//Physical top-to-bottom order on J4 (confirmed via two independent reference points on the board -
+//the J6 ISP header and the Y2 crystal, both sitting right next to J4's pin 1/D6): D6 (pin 1,
+//topmost, nearest the ISP header) - D5 (pin 3) - D4 (pin 5) - D3 (pin 7) - A3 (pin 9) - A2 (pin 11)
+//- A1 (pin 13) - A0 (pin 15, bottommost).
+//
+//Bit order chosen so the physically bottom-most pin pair is bit 0 (value 1): A0=bit0, A1=bit1,
+//A2=bit2, A3=bit3, D3=bit4, D4=bit5. D5/D6 (the two topmost pairs) are left unused/reserved - I2C
+//addresses are only 7 bits wide and this project's twiboot bootloader adds a fixed 0x29 base on
+//top of this raw value (see Unit/bootloader/twiboot/main.c), so 6 bits (raw values 0-63, giving
+//bootloader addresses 0x29-0x68) is the most this can safely extend to without either colliding
+//with the reserved 0x00-0x07/0x78-0x7F I2C address ranges or overflowing the 7-bit TWAR field.
+//twiboot's own jumper-reading patch was extended to match this exact same 6-bit scheme - the two
+//must stay in sync, since they compute the app and bootloader I2C addresses from the same jumpers.
+//No jumper on any pin = address 0, same as before (INPUT_PULLUP + open pin reads HIGH, and
+//getaddress() inverts each bit - see below).
+#define ADDRESS_PIN_COUNT 6
+const uint8_t addressPins[ADDRESS_PIN_COUNT] = {A0, A1, A2, A3, 3, 4}; //bit 0..5, bottom-to-top on J4
 
 //constants stepper
 #define STEPPERPIN1 11
@@ -97,10 +117,9 @@ void run_test() {
 //setup
 void setup() {
   // i2c adress switch
-  pinMode(ADRESSSW1, INPUT_PULLUP);
-  pinMode(ADRESSSW2, INPUT_PULLUP);
-  pinMode(ADRESSSW3, INPUT_PULLUP);
-  pinMode(ADRESSSW4, INPUT_PULLUP);
+  for (int i = 0; i < ADDRESS_PIN_COUNT; i++) {
+    pinMode(addressPins[i], INPUT_PULLUP);
+  }
 
   //hall sensor
   //DIAGNOSTIC, 2026-08-13: was plain INPUT (no pull-up). If this sensor has an open-collector/
@@ -398,9 +417,15 @@ void requestEvent() {
   */
 }
 
-//returns the adress of the unit as int from 0-15
+//returns the address of the unit as int from 0-63 (see the comment on addressPins near the top
+//of this file for the pin-to-bit mapping and why 6 bits, not the full 8 pins J4 has)
 int getaddress() {
-  int address = !digitalRead(ADRESSSW4) + (!digitalRead(ADRESSSW3) * 2) + (!digitalRead(ADRESSSW2) * 4) + (!digitalRead(ADRESSSW1) * 8);
+  int address = 0;
+  for (int i = 0; i < ADDRESS_PIN_COUNT; i++) {
+    if (!digitalRead(addressPins[i])) {
+      address += (1 << i);
+    }
+  }
   return address;
 }
 

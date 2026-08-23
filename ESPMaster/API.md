@@ -36,7 +36,9 @@ endpoints require it via an `X-OTA-Password: <password>` request header:
 - `POST /api/web-file`
 - `POST /api/units/firmware`
 - `POST /api/units/firmware-push`
-- `POST /api/firmware`
+- `POST /api/firmware-start`
+- `POST /api/firmware-chunk`
+- `POST /api/firmware-finish`
 
 If no password is set (empty string), these endpoints accept requests unauthenticated. Every
 other endpoint below has no auth check at all, including `GET /api/ota-password` itself
@@ -66,7 +68,9 @@ other endpoint below has no auth check at all, including `GET /api/ota-password`
 | POST | [`/api/units/firmware`](#post-apiunitsfirmware) | Upload a Unit firmware image |
 | POST | [`/api/units/firmware-push`](#post-apiunitsfirmware-push) | Push uploaded firmware to a unit over I2C |
 | POST | [`/api/units/bootloader-probe`](#post-apiunitsbootloader-probe) | Diagnostic bootloader probe, writes nothing |
-| POST | [`/api/firmware`](#post-apifirmware) | Browser-based ESPMaster firmware update |
+| POST | [`/api/firmware-start`](#post-apifirmware-start) | Begin a browser-based ESPMaster firmware update |
+| POST | [`/api/firmware-chunk`](#post-apifirmware-chunk) | Upload one chunk of the firmware |
+| POST | [`/api/firmware-finish`](#post-apifirmware-finish) | Finalize the update, reboot on success |
 | POST | [`/api/debug-mode`](#post-apidebug-mode) | Enable/disable debug mode |
 | POST | [`/api/reboot`](#post-apireboot) | Reboot the device |
 | DELETE | [`/api/scheduled-messages`](#delete-apischeduled-messages) | Remove a scheduled message |
@@ -471,21 +475,69 @@ in progress.
 
 ---
 
-### `POST /api/firmware`
+### `POST /api/firmware-start`
 
-Browser-based ESPMaster firmware update (uploads a compiled `.bin` sketch, no Arduino IDE
-required). Reboots the device automatically on success.
+Begins a browser-based ESPMaster firmware update (a compiled `.bin` sketch, no Arduino IDE
+required) - three-step, chunked protocol. See `POST /api/firmware-chunk` below for why this
+replaced a single-request upload (BUGFIX_LOG.md #88).
 
 **Auth:** requires `X-OTA-Password` header if a password is set.
 
-**Request:** `multipart/form-data` file upload (any field name).
+**Body params:** `size` (integer, total firmware size in bytes).
+
+**Response:**
+- `200 text/plain`: `"OK - ready for chunks"`
+- `400 text/plain` if `size` is missing/zero.
+- `401 text/plain` if the password is wrong.
+- `500 text/plain`: `"Failed to start update, check the serial log for details"`
+- `503 text/plain` if another firmware upload is already in progress.
+
+---
+
+### `POST /api/firmware-chunk`
+
+Uploads one chunk of the firmware previously announced via `/api/firmware-start`. Call
+repeatedly, once per chunk, **waiting for each response before sending the next chunk** - that
+wait is the whole point: the ESP8266 has no way to slow down incoming TCP data on its own, so an
+upload sent as fast as the network allows can outrun the flash-write speed no matter how large a
+receive buffer is used (see BUGFIX_LOG.md #83's Offene Punkte for the investigation, and #88 for
+the fix). Waiting for the response to each chunk lets the request/response round-trip itself
+provide backpressure.
+
+**Auth:** requires `X-OTA-Password` header if a password is set.
+
+**Request:** raw binary body, at most 4096 bytes (`OTA_CHUNK_SIZE` in `ESPMaster.ino` - keep the
+uploader's chunk size in sync with this).
+
+**Response:**
+- `200 text/plain`: `"OK"`
+- `400 text/plain` if the chunk is oversized, or no upload is in progress.
+- `401 text/plain` if the password is wrong.
+- `500 text/plain`: `"Chunk write failed, check the serial log for details"` (aborts the whole
+  upload - old firmware stays active; call `/api/firmware-start` again to retry from scratch).
+
+An upload with no chunk/finish activity for 30s is treated as abandoned and cleaned up
+automatically (old firmware stays active).
+
+---
+
+### `POST /api/firmware-finish`
+
+Finalizes an upload after all chunks have been sent successfully. Reboots the device
+automatically on success.
+
+**Auth:** requires `X-OTA-Password` header if a password is set.
+
+**Request:** no body needed.
 
 **Response:**
 - `200 text/plain`: `"OK - Firmware written, rebooting now"`
+- `400 text/plain` if no upload is in progress.
 - `401 text/plain` if the password is wrong.
 - `500 text/plain`: `"Update failed, check the serial log for details"`
 
-Only present if `WEB_FIRMWARE_UPDATE_ENABLE` is compiled in (it is, by default).
+All three endpoints above are only present if `WEB_FIRMWARE_UPDATE_ENABLE` is compiled in (it is,
+by default).
 
 ---
 

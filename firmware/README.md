@@ -72,11 +72,11 @@ make MCU=atmega328p CFLAGS_TARGET="-DUSE_CLOCKSTRETCH=1"
   Adresse `0x0`, danach `littlefs.bin` auf Adresse `0x300000` (seit
   2026-08-21/Punkt 83 - vorher `0xDB000`, siehe Haupt-[README](../README.md),
   Abschnitt "Uploading the Static Assets", dort noch die alte Adresse
-  dokumentiert). Alternativ, seit Punkt 83, per Browser über `POST
-  /api/firmware` (nur den Sketch, kein LittleFS) - **Stand 2026-08-21 noch
-  nicht zuverlässig für den aktuellen Sketch** (scheitert an einem noch
-  ungelösten Ringpuffer-Engpass, siehe BUGFIX_LOG.md #83) - bis das gelöst
-  ist, bleibt der serielle Programmer der zuverlässige Weg.
+  dokumentiert). **Seit 2026-08-22/Punkt 88 zuverlässig auch per Browser
+  möglich** (nur den Sketch, kein LittleFS) - über die Admin-Seite, die den
+  Sketch in 4KB-Häppchen über `/api/firmware-start`/`-chunk`/`-finish`
+  hochlädt. Der serielle Programmer bleibt nützlich für Diagnose
+  (Serial-Log), ist für normale Updates aber nicht mehr zwingend nötig.
 - **Unit-App:** `Unit.hex` per ISP oder Arduino-IDE - oder, falls die Unit
   bereits den twiboot-Bootloader hat, `Unit.bin` über die ESPMaster
   Admin-Seite ("Unit Firmware Update") per I2C pushen, kein USB nötig.

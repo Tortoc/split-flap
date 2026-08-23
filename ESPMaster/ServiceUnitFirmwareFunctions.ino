@@ -40,7 +40,7 @@ void requestUnitEnterBootloader(int unitIndex) {
   Wire.endTransmission();
 }
 
-//Scans UNIT_BOOTLOADER_BASE_ADDRESS..+15 for a unit currently sitting in twiboot.
+//Scans UNIT_BOOTLOADER_BASE_ADDRESS..+63 for a unit currently sitting in twiboot.
 //Our twiboot (Unit/bootloader/twiboot/main.c - a patched fork, see BOOTLOADER_SETUP.md) reads
 //the unit's own DIP switches at boot and adds them to TWI_ADDRESS_BASE, same as the app does -
 //so in normal operation bootAddress == UNIT_BOOTLOADER_BASE_ADDRESS + unitIndex already. Scanning
@@ -52,20 +52,25 @@ void requestUnitEnterBootloader(int unitIndex) {
 //BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #53): this used to call twibootReadChipInfo() - which
 //uses a repeated-start read (endTransmission(false) + requestFrom(), the exact pattern flagged
 //in esp8266/Arduino issue #5718 as able to leave the ESP8266's *software* I2C state stuck) -
-//against all 16 candidate addresses, even the (usually) 15 with nothing listening. Live-tested
+//against all candidate addresses, even the ones with nothing listening. Live-tested
 //today: doing that repeatedly, then immediately trying a real command against the one address
 //that *did* answer, consistently got "NACK on address" - the real unit's own address stopped
 //being acknowledged right after the scan touched it. Split into two passes instead: a cheap
 //presence-only check (plain beginTransmission()+endTransmission(), a full STOP each time - the
-//simple write-style pattern this project has always found reliable) against all 16 addresses
-//first, then the actual repeated-start chip-info read only once, against the single confirmed
-//candidate. Keeps the same multi-unit safety property (still checks all 16 for ambiguity) while
-//cutting the repeated-start operations from up to 16 down to at most 1 per scan.
+//simple write-style pattern this project has always found reliable) against all candidate
+//addresses first, then the actual repeated-start chip-info read only once, against the single
+//confirmed candidate. Keeps the same multi-unit safety property (still checks the whole range
+//for ambiguity) while cutting the repeated-start operations down to at most 1 per scan.
+//
+//BUG FIX, 2026-08-23 (see BUGFIX_LOG.md #89): range widened from +15 to +63 to match the
+//DIP-switch addressing extension from 4 bits (0-15) to 6 bits (0-63) - see Unit.ino and
+//Unit/bootloader/twiboot/main.c. A unit jumpered to any of the newly-usable higher values would
+//otherwise sit outside this scan and be silently invisible to a firmware push.
 int scanForBootloaderAddress(TwibootChipInfo &infoOut) {
   int foundAddress = -1;
   int foundCount = 0;
 
-  for (int address = UNIT_BOOTLOADER_BASE_ADDRESS; address < UNIT_BOOTLOADER_BASE_ADDRESS + 16; address++) {
+  for (int address = UNIT_BOOTLOADER_BASE_ADDRESS; address < UNIT_BOOTLOADER_BASE_ADDRESS + 64; address++) {
     Wire.beginTransmission(address);
     if (Wire.endTransmission() == 0) {
       foundCount++;
