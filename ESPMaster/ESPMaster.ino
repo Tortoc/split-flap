@@ -28,20 +28,20 @@
 #define SERIAL_ENABLE       true   //Option to enable serial debug messages
 #define UNIT_CALLS_DISABLE  false   //Option to disable the call to the units so can just debug the ESP with no connections
 #define OTA_ENABLE          true    //Option to enable OTA functionality via the Arduino IDE (same WiFi network + IDE required).
-                                     //BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #82): flipped from false to true on user request - going
-                                     //forward, prefer flashing over the network (this, or the always-on WEB_FIRMWARE_UPDATE_ENABLE
-                                     //endpoint below) and reserve the physical USB/serial programmer mainly for diagnostics
-                                     //(serial log capture) rather than routine updates.
+                                     //Prefer flashing over the network (this, or WEB_FIRMWARE_UPDATE_ENABLE below) - reserve the
+                                     //physical USB/serial programmer mainly for diagnostics (serial log capture).
 #define WEB_FIRMWARE_UPDATE_ENABLE true //Option to enable browser-based firmware upload from the Admin page, no Arduino IDE required
 #define UNIT_BOOTLOADER_ENABLE true //Option to enable pushing Unit.ino firmware updates to units over I2C via the twiboot bootloader.
                                      //Requires every unit to first be flashed with twiboot per Unit/BOOTLOADER_SETUP.md - leave false until that's done!
-#define UNITS_AMOUNT_MAX    64     //Maximum possible units (matches the 6-bit DIP switch addressing range 0-63,
-                                    //see BUGFIX_LOG.md #89 - widened from the original 4-bit/0-15 range).
+#define UNITS_AMOUNT_MAX    64     //Maximum possible units (matches the 6-bit DIP switch addressing range 0-63).
                                     //The actual amount is auto-detected at startup via I2C scan, see scanI2CBus() - no longer set here.
 #define SERIAL_BAUDRATE     115200  //Serial debugging BAUD rate
 #define WIFI_USE_DIRECT     false  //Option to either direct connect to a WiFi Network or setup a AP to configure WiFi. Setting to false will setup as a AP.
-#define LED_ENABLE          true   //Option to enable LED debug blink codes (set to false if not using LED)
-#define DEBUG_ENABLE true  //Enable debug features: startup debug page, error status panel, page load debug log, and serial debug log at bottom of page
+#define LED_ENABLE          true   //Option to enable LED debug blink codes (set to false if not using LED at all)
+#define DEBUG_ENABLE true  //Enable debug features: startup debug page, error status panel, page load debug log, serial
+                           //debug log at bottom of page, and whether the LED_ENABLE blink codes below actually light up -
+                           //the LED only blinks while the runtime debug-mode flag (showDebugPage, toggled via
+                           //POST /api/debug-mode, persisted in /debugmode.txt) is on.
 
 /*
   EXPERIMENTAL: Try to use your Router when possible to set a Static IP address for your device to avoid conflicts with other devices
@@ -122,8 +122,11 @@
 
 /*
   LED BLINK CODE REFERENCE:
-  The LED on GPIO 2 will blink to indicate system status during initialization:
-  
+  The LED on GPIO 2 will blink to indicate system status during initialization -
+  but only while debug mode is on (POST /api/debug-mode, persisted in /debugmode.txt).
+  Leave debug mode off for normal operation and the LED simply stays dark; turn it
+  on when you actually want to watch the boot sequence.
+
   1 blink   = WiFi connecting
   2 blinks  = WiFi connected successfully
   3 blinks  = NTP time synchronization starting
@@ -151,19 +154,16 @@
 */
 //Status byte + 2 offset bytes + phase byte + 2 progress bytes - must match Unit.ino's requestEvent().
 #define ANSWER_SIZE         6
-//Status + offset only (first 3 bytes of the same response) - Unit.ino doesn't need to know which
-//size is being requested; Wire.requestFrom()'s length parameter alone controls how many bytes
-//actually get clocked out (I2C read length is purely master-controlled - the slave's TWI ISR
-//stops firing as soon as the master NACKs, regardless of how much more it queued via
-//Wire.write()). See readUnitInfo()'s 3-arg overload in ServiceFlapFunctions.ino.
+//Status + offset only (first 3 bytes of the same response) - Wire.requestFrom()'s length
+//parameter alone controls how many bytes get clocked out, so Unit.ino doesn't need to know which
+//size was requested. See readUnitInfo()'s 3-arg overload in ServiceFlapFunctions.ino.
 #define ANSWER_SIZE_LIGHT   3
 #define FLAP_AMOUNT         45      //Amount of Flaps in each unit
 #define MIN_SPEED           1       //Min Speed
 #define MAX_SPEED           12      //Max Speed
 #define UNIT_STEPS          2038    //Must match STEPS in Unit.ino - used to validate offset values sent from the Admin UI
 #define UNIT_BOOTLOADER_CMD 255     //Must match CMD_ENTER_BOOTLOADER in Unit.ino
-#define UNIT_BOOTLOADER_BASE_ADDRESS 0x29 //Start of the range scanned for a unit's twiboot bootloader (0x29-0x68,
-                                           //see BUGFIX_LOG.md #89 - widened from the original 0x29-0x38 range).
+#define UNIT_BOOTLOADER_BASE_ADDRESS 0x29 //Start of the range scanned for a unit's twiboot bootloader (0x29-0x68).
 #define CRASH_LOG_PATH "/crash-log.jsonl" //See ServiceCrashLogFunctions.ino
 
 //I2C pins, named so ServiceI2CRecoveryFunctions.ino's bus-recovery routine can reuse the exact
@@ -175,9 +175,6 @@
 #define I2C_SDA_PIN 1
 #define I2C_SCL_PIN 3
 #endif
-                                          //Must match TWI_ADDRESS_BASE in Unit/bootloader/twiboot/main.c - that
-                                          //bootloader reads the unit's own DIP switches and adds them to this base,
-                                          //so it doesn't need to match any particular unitIndex - see BOOTLOADER_SETUP.md
 
 /* .-----------------------------------. */
 /* | _    _ _                 _        | */
@@ -216,20 +213,9 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <Wire.h>
-//BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #86): a twiboot flash-page write needs one unbroken I2C
-//transaction of 4 header bytes + a full 128-byte page = 132 bytes - but Wire's internal TX buffer
-//(I2C_BUFFER_LENGTH, Wire.h) defaults to 128 bytes, so the last 4 bytes of every page write
-//silently never queue (Wire.write() drops anything past the buffer, no error returned) - twiboot's
-//own byte-count trigger for actually committing the page write is never reached, so the write does
-//*nothing* at all. (An attempted #define I2C_BUFFER_LENGTH override before this include did NOT
-//fix it - Wire.cpp is compiled as its own separate translation unit with its own default,
-//unaffected by a #define in this one.) This went undetected since the feature's original test
-//(BUGFIX_LOG #54) happened to push firmware byte-identical to what was already running, so even a
-//fully inert write still "verified" successfully - a live-reproduced, byte-level diff against the
-//old firmware (BUGFIX_LOG #86) proved the "new" flash content was actually just the untouched old
-//content. Fixed in ServiceUnitFirmwareFunctions.ino by using twi_writeTo() (twi.h) directly for
-//flash-page writes - a raw, unbuffered write with no size limit, bypassing Wire's TX buffer
-//entirely.
+//twi.h's raw twi_writeTo() is used for twiboot flash-page writes (ServiceUnitFirmwareFunctions.ino)
+//instead of Wire - a page write is 132 bytes, which exceeds Wire's 128-byte TX buffer and silently
+//drops the tail (a #define I2C_BUFFER_LENGTH override doesn't help, Wire.cpp has its own default).
 #include <twi.h>
 #include <user_interface.h> // struct rst_info, for the on-device crash reporter (ServiceCrashLogFunctions.ino)
 #include <lwip/priv/tcp_priv.h> // internal lwIP header - exposes tcp_active_pcbs/etc. for /api/tcp-status
@@ -317,9 +303,8 @@ AsyncWebServerRequest* pendingLegacyI2CScanRequest = nullptr;
 bool pendingRescanRequestDisconnected = false;
 bool pendingUnitsInfoRequestDisconnected = false;
 bool pendingLegacyI2CScanRequestDisconnected = false;
-//DIAGNOSTIC, 2026-08-22 (see BUGFIX_LOG.md #84): captured from the "detail" query param at
-//request time (query params aren't available anymore once loop() picks this up later) - see the
-//comment where this is used, below.
+//Captured from the "detail" query param at request time - query params aren't available anymore
+//once loop() picks this up later (see where this is used, below).
 bool pendingUnitsInfoRequestDetail = false;
 
 //Same reasoning, for the twiboot/bootloader endpoints (only relevant when
@@ -376,7 +361,7 @@ bool isPendingReboot = false;
 bool isPendingUnitsReset = false;
 bool isWifiConfigured = false;
 //Defaults off - the dynamically-built startup debug page caused blank/corrupted pages on fresh
-//boots (see BUGFIX_LOG.md). Toggle via POST /api/debug-mode.
+//boots. Toggle via POST /api/debug-mode.
 bool showDebugPage = false;
 volatile bool webRequestActive = false; // Flag to skip display updates during web requests
 LList<ScheduledMessage> scheduledMessages;
@@ -400,22 +385,11 @@ bool isInOtaMode = false;
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
 bool firmwareUpdateAuthFailed = false;
 
-//BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #88): this used to be a single streaming upload (one big
-//multipart POST) buffered into a ring buffer that loop() drained via Update.write() - see the old
-//comment this replaced, preserved in git history. That design hit a hard wall no buffer size could
-//fix: the ESP8266 has no way to slow down incoming TCP data (confirmed via research - the SDK just
-//delivers +IPD packets as fast as they arrive, no flow control), so on a fast enough connection the
-//flash-write side could never keep up regardless of buffer size (live-tested: 4096 overflowed
-//early, 8192 got further but still overflowed, 16384 couldn't even allocate on this device's
-//chronically tight heap - see BUGFIX_LOG.md #83's Offene Punkte for the full investigation).
-//
-//Replaced with a client-paced chunked protocol across three endpoints (/api/firmware-start,
-//-chunk, -finish, below) - the browser only sends the next chunk after the ESP has confirmed the
-//previous one is fully written to flash, so the request/response round-trip itself provides
-//natural backpressure without needing any TCP-level trick. Each chunk is small and bounded
-//(OTA_CHUNK_SIZE), so - same lesson as #79 - Update.begin()/write()/end() still can't run directly
-//in an AsyncWebServer callback (too little stack there), but now there's no ring buffer to
-//manage: loop() just does the one pending Update.* call for whichever phase is pending.
+//Client-paced chunked upload (/api/firmware-start, -chunk, -finish, below) - the browser sends
+//the next chunk only after the ESP confirms the previous one is flashed, so the round-trip itself
+//provides backpressure. Needed because the ESP8266 can't slow down incoming TCP data, so a plain
+//streamed upload into any fixed buffer eventually overflows. Update.* still runs from loop(), not
+//the AsyncWebServer callback (too little stack there).
 #define OTA_CHUNK_SIZE 4096 //must match CHUNK_SIZE in index.html's uploadFirmware()
 uint8_t* otaChunkBuffer = nullptr; //allocated only while an upload is in progress, freed after
 volatile size_t otaChunkLen = 0;   //bytes currently buffered for the in-progress chunk
@@ -428,18 +402,12 @@ volatile bool otaChunkRejected = false; //oversized/out-of-sequence chunk - sepa
 volatile bool otaResultReady = false;     //loop() has finished the pending phase (success or not)
 volatile bool otaResultSuccess = false;   //valid once otaResultReady is true
 String otaResultMessage = "";             //valid once otaResultReady is true
-//Watchdog for an abandoned upload (client vanished between chunks without a clean disconnect
-//event reaching us, e.g. a network drop) - loop() aborts and frees otaChunkBuffer if this goes
-//too long without any of the three endpoints touching it. Not a correctness issue otherwise (a
-//stuck otaChunkBuffer just blocks a *new* upload from starting, never anything else) but there's
-//no reason to leave a firmware update dangling indefinitely once the browser is clearly gone.
+//Watchdog for an abandoned upload (client vanished mid-upload, e.g. a network drop) - loop()
+//frees otaChunkBuffer if this goes too long without any of the three endpoints touching it.
 volatile unsigned long otaLastActivityAt = 0;
-//BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #88): bumped from 30s to 90s after live testing over this
-//project's known, separately-documented flaky WiFi path (BUGFIX_LOG.md #78, external/router-side,
-//not this firmware) - a client retrying a dropped chunk a few times (network timeout + backoff
-//each attempt) can genuinely take longer than 30s in total even though the upload itself is fine,
-//and having this watchdog abandon the upload out from under a client that's about to succeed on
-//its next retry is worse than just waiting a bit longer for a clearly-gone client.
+//90s, not a shorter value: a client retrying a dropped chunk over a flaky WiFi path (network
+//timeout + backoff per attempt) can genuinely take a while even though the upload itself is fine -
+//abandoning it out from under a client about to succeed on its next retry is worse than waiting.
 #define OTA_ABANDONED_TIMEOUT_MS 90000
 AsyncWebServerRequest* pendingFirmwareUploadRequest = nullptr;
 bool pendingFirmwareUploadRequestDisconnected = false;
@@ -452,28 +420,13 @@ bool webFileUploadAuthFailed = false;
 // LED Debugging variables
 String debugStatus = "";
 
-// Serial log buffer for web interface (circular buffer, stores last N messages).
-// DIAGNOSTIC FIX, 2026-08-13: message used to be a String. addToSerialLog() runs on
-// *every single* SerialPrint()/SerialPrintln() call (regardless of SERIAL_ENABLE - see
-// HelpersSerialHandling.ino), cycling through 100 slots with wildly varying message
-// lengths - a textbook heap-fragmentation pattern on the ESP8266's small heap, and the
-// leading remaining suspect for this session's "crashes eventually, at a seemingly
-// random point" bug (after the /log stack-overflow fix in 1483f66 measurably improved
-// but didn't fully eliminate it). Switched to a fixed-size char buffer: no allocation,
-// no fragmentation, at the cost of a flat chunk of static RAM instead of scattered heap
-// churn. Longer messages are truncated, not an error for a debug log.
+// Serial log buffer for web interface (circular, last N messages) - fixed-size char buffer, not
+// String, to avoid heap fragmentation given how often addToSerialLog() runs. Longer messages
+// truncate silently.
 //
-// BUG FIX, 2026-08-14: the original 100*150=15000 bytes for this buffer, on top of
-// everything else already static in this sketch, left only ~8KB of free heap on a
-// *freshly booted* device (measured live via the new /heap diagnostic endpoint) - out of
-// a total ~80KB RAM budget, over 80% was already claimed by static/global variables before
-// a single dynamic allocation happened. That's this session's real root cause for a whole
-// separate class of crash (reason 254 "user exception (panic/abort)", live-caught via the
-// crash reporter - see BUGFIX_LOG.md #38/#41): with that little heap margin, ordinary
-// allocations (a JSON response String, even a mere 1460-byte AsyncResponseStream buffer)
-// can fail outright, and this core's `operator new` aborts rather than gracefully
-// returning null. Shrunk to 40*120=4800 bytes (a >10KB heap-budget win) - still a useful
-// rolling debug window, just no longer eating the majority of available RAM by itself.
+// IMPORTANT: keep this buffer small - a much larger version once left only ~8KB free heap on a
+// freshly booted device (of ~80KB total), enough for ordinary allocations to fail outright
+// (`operator new` aborts on failure here, doesn't return null). 40*120=4800 bytes is deliberate.
 #define SERIAL_LOG_SIZE 40
 #define SERIAL_LOG_MESSAGE_MAX 120
 struct SerialLogEntry {
@@ -517,7 +470,11 @@ void addToSerialLog(const String &message) {
 
 void ledOn() {
 #if LED_ENABLE == true
-  digitalWrite(LED_DEBUG_PIN, LED_ON);
+  //Only lights up while debug mode is on; ledOff() stays ungated so a mid-sequence toggle can't
+  //leave the LED stuck lit.
+  if (showDebugPage) {
+    digitalWrite(LED_DEBUG_PIN, LED_ON);
+  }
 #endif
 }
 
@@ -539,16 +496,19 @@ void blinkLed(int count, int onTime, int offTime) {
 }
 
 void setup() {
-  //HARDENING, 2026-08-22 (see BUGFIX_LOG.md #85): the very first thing this firmware does, before
-  //anything else (even Serial.begin()) - pull SDA/SCL to a defined idle-high state as early as
-  //physically possible. Between a hard ESP reset and this point, these pins sit in an undefined
-  //hardware-default state while the Unit's TWI hardware (which does NOT reset when the ESP does)
-  //stays continuously armed and listening - any glitch during that gap could be misread as a
-  //start condition. This doesn't close the gap entirely (nothing runs before setup() at all), but
-  //shrinks it to a minimum and gets the lines into a safe state before anything else in setup()
-  //could plausibly toggle them further.
+  //First thing this firmware does - pull SDA/SCL to idle-high before anything can glitch them.
+  //The Unit's TWI hardware doesn't reset when the ESP does and stays armed/listening.
   pinMode(I2C_SDA_PIN, INPUT_PULLUP);
   pinMode(I2C_SCL_PIN, INPUT_PULLUP);
+
+  //Load the debug-mode flag before the first blinkLed() call - some blink codes (WiFi
+  //connecting/failed) fire before the normal filesystem-init point in the boot sequence.
+  //LittleFS.begin() here is idempotent, safe to call again later.
+#if DEBUG_ENABLE == true
+  if (LittleFS.begin()) {
+    showDebugPage = (readFile(LittleFS, debugModePath, "false") == "true");
+  }
+#endif
 
 #if SERIAL_ENABLE == true
   //Setup so we can see serial messages
@@ -566,10 +526,9 @@ void setup() {
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
 #endif
 
-  //I2C Fast Mode (400kHz) instead of the 100kHz default - every I2C read runs inside the Unit's
-  //TWI interrupt handler (briefly blocking its main loop, e.g. mid-stepper-timing during
-  //calibration), so a faster bus means less time stolen per transaction. Units run at 16MHz and
-  //already have 4.7k pull-ups on SDA/SCL, both comfortably support Fast Mode. See BUGFIX_LOG.md.
+  //Fast Mode (400kHz) - every I2C read briefly blocks the Unit's main loop via its TWI interrupt,
+  //so a faster bus steals less time per transaction. Units run at 16MHz with 4.7k pull-ups, both
+  //comfortably support this.
   Wire.setClock(400000);
 
 #if UNIT_BOOTLOADER_ENABLE == true
@@ -579,13 +538,7 @@ void setup() {
   Wire.setClockStretchLimit(25000);
 #endif
 
-  //HARDENING, 2026-08-22 (see BUGFIX_LOG.md #85): recoverI2CBus() (ServiceI2CRecoveryFunctions.ino)
-  //used to only run reactively, after a read already failed (see #45). Called here too, proactively,
-  //right after Wire.begin() but before any real transaction - clocks SCL up to 9 times and forces a
-  //clean STOP condition (AN10216), cleaning up any bus state left over from whatever happened
-  //between the ESP's reset and this point (a Unit's TWI hardware never resets when the ESP does, so
-  //it's been listening the whole time). Cheap (a few ms at most) and a no-op if the bus already
-  //looks idle - safe to always run.
+  //Proactive bus recovery, not just reactive after a failed read - cheap, no-op if already idle.
   recoverI2CBus();
 
   // Initialize LED for debugging
@@ -595,16 +548,8 @@ void setup() {
   blinkLed(1, 100, 50); // Quick blink to show startup
 #endif
 
-  // DIAGNOSTIC, 2026-08-16 (see BUGFIX_LOG.md #73/#76): the first I2C scan used to happen right
-  // here, blocking setup() with a delay(500) ("give the I2C bus time to stabilize") - later
-  // pushed to delay(30000) as a live experiment (individual Units have repeatedly been observed
-  // spinning endlessly trying to calibrate right after an ESPMaster reboot, see BUGFIX_LOG.md's
-  // Offene Punkte), which also pushed WiFi/web server startup back by the same ~29.5s as an
-  // unwanted side effect. Nothing else in setup() actually depends on unitsAmount being known
-  // yet (the web server and display logic already treat unitsAmount==0 as "no units found so
-  // far" gracefully) - so the scan is now deferred to loop() instead, see the
-  // firstUnitScanDone block there. Same 30s delay before the first real I2C transaction, but
-  // WiFi/the web server start immediately as before #73.
+  // First I2C scan is deferred to loop() (firstUnitScanDone block there), 30s after boot to give
+  // Units time to finish their own homing - WiFi/web server start immediately regardless.
   SerialPrintln("");
   SerialPrintln("#######################################################");
   SerialPrintln("..............Split Flap Display Starting..............");
@@ -631,19 +576,13 @@ void setup() {
     SerialPrintln("DEBUG: Status = " + debugStatus);
     blinkLed(3, 200, 100); // 3 blinks = NTP syncing
     
-    // BUG FIX, 2026-08-16 (see BUGFIX_LOG.md #78): was setInterval(60). ezTime's vendored
-    // NTP_RETRY constant (ezTime.h) unconditionally reschedules a retry 20s after any failed
-    // sync, independent of this interval - resyncing every 60s gave that retry path frequent
-    // chances to fire and, per live monitoring, correlated with a recurring ~50-65s
-    // unreachable/reachable WiFi cycle. A wall-clock display doesn't need minute-level NTP
-    // freshness, so we back off hard to shrink that exposure window. setInterval() takes a
-    // uint16_t (max 65535s / ~18.2h), so a true 24h interval isn't representable - 6h is the
-    // most conservative round value comfortably in range.
+    // 6h: a wall-clock display doesn't need minute-level freshness, and a short interval gives
+    // ezTime's 20s post-failure retry frequent chances to fire. uint16_t max is ~18.2h, so a true
+    // 24h interval isn't representable.
     setInterval(21600); // Sync every 6 hours
 
-    //Was setDebug(INFO) - ezTime's own internal logging was firing 44000+ times in a few
-    //minutes around WiFi hiccups, wasting loop()/UART time. Our own SerialPrintln() logging is
-    //unaffected. See BUGFIX_LOG.md.
+    //Not setDebug(INFO) - ezTime's own internal logging fires extremely often around WiFi
+    //hiccups, wasting loop()/UART time. Our own SerialPrintln() logging is unaffected.
     setDebug(NONE);
     
     // Try to sync with timeout (non-blocking)
@@ -679,16 +618,14 @@ void setup() {
     loadValuesFromFileSystem();
     checkAndPersistCrashLog(); // see ServiceCrashLogFunctions.ino - must run after LittleFS mounts
 
-    // Moved here (see BUGFIX_LOG.md #78): needs timezoneSetting, which loadValuesFromFileSystem()
-    // just populated from LittleFS (or its "Europe/Berlin" default on first boot).
+    // Must come after loadValuesFromFileSystem() - needs timezoneSetting, populated from there.
     timezone.setLocation(timezoneSetting);
     SerialPrintln("DEBUG: Timezone set to: " + timezoneSetting);
     
-    // Load debug mode setting
+    // Debug mode was already loaded at the very top of setup(), before the earlier blinkLed()
+    // calls - just log the already-known value here.
 #if DEBUG_ENABLE == true
-    String debugModeSetting = readFile(LittleFS, debugModePath, "false");
-    showDebugPage = (debugModeSetting == "true");
-    SerialPrintln("DEBUG: Debug mode: " + String(showDebugPage ? "enabled" : "disabled") + " (controls startup page, error status, page load log, and serial log)");
+    SerialPrintln("DEBUG: Debug mode: " + String(showDebugPage ? "enabled" : "disabled") + " (controls startup page, error status, page load log, LED blink codes, and serial log)");
 #endif
 
 #if OTA_ENABLE == true
@@ -700,14 +637,11 @@ void setup() {
     SerialPrintln("DEBUG: Status = " + debugStatus);
     blinkLed(7, 200, 100); // 7 blinks = Web server starting
     
-    //No .setCacheControl() - it drove heap fragmentation up fast on repeated requests (reverted,
-    //see BUGFIX_LOG.md #69). Hard-refresh needed after updating a web file.
+    //No .setCacheControl() - drove heap fragmentation up fast on repeated requests when tried.
+    //Hard-refresh needed after updating a web file.
     webServer.serveStatic("/", LittleFS, "/");
 
-    //All API routes below live under a single "/api/" prefix (was a mix of "/admin/..." and
-    //no-prefix paths) - full endpoint reference in API.md, rename rationale in BUGFIX_LOG.md #74.
-    //Not yet flash-tested on hardware as of the #74 rename (programmer was broken) - treat as
-    //"ready to test" until the next successful flash confirms it.
+    //All API routes below live under a single "/api/" prefix - full endpoint reference in API.md.
     webServer.on("/", HTTP_GET, [](AsyncWebServerRequest * request) {
       unsigned long pageRequestStart = millis();
       SerialPrintln("DEBUG: Request Home Page Received");
@@ -835,20 +769,14 @@ void setup() {
       minimalDoc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
       minimalDoc["scheduledMessages"] = JsonArray();
       minimalDoc["wifiSettingsResettable"] = true;
-      //BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #82): this was hardcoded to false regardless of the
-      //actual OTA_ENABLE compile flag (a stale leftover from the #80 minimalDoc fast-path refactor -
-      //getCurrentSettingValues(), the older/fuller settings builder elsewhere in this file, already
-      //had the correct #if OTA_ENABLE check). Found while verifying OTA_ENABLE=true actually took
-      //effect after flashing - /api/settings kept reporting false either way.
 #if OTA_ENABLE == true
       minimalDoc["otaEnabled"] = true;
 #else
       minimalDoc["otaEnabled"] = false;
 #endif
-      //Folded in here (see BUGFIX_LOG.md #80) so the Administration view can populate its OTA
-      //password/timezone displays from the one /api/settings fetch it already does, instead of
-      //two more separate XHRs - opening that view used to fire 4 near-simultaneous requests
-      //against this device's hard 5-connection TCP limit (see #70).
+      //otaPassword/timezone included here so the Administration view can populate its displays
+      //from this one /api/settings fetch instead of firing more separate XHRs against this
+      //device's hard 5-connection TCP limit.
       minimalDoc["otaPassword"] = otaPassword;
       minimalDoc["timezone"] = timezoneSetting;
       
@@ -865,8 +793,7 @@ void setup() {
         }
       }
       
-      //beginResponseStream() avoids building the JSON into one contiguous String first (same fix
-      //as /api/log, see BUGFIX_LOG.md #42/#44/#52).
+      //beginResponseStream() avoids building the JSON into one contiguous String first.
       unsigned long totalTime = millis() - settingsStart;
       SerialPrintln("DEBUG: Settings response ready in " + String(totalTime) + "ms, JSON size: " + String(measureJson(minimalDoc)) + " bytes");
 
@@ -885,24 +812,12 @@ void setup() {
       request->send(200, "text/plain", "Healthy");
     });
 
-    // Heap health check (added 2026-08-14 while chasing a live OOM-abort() crash - see
-    // BUGFIX_LOG.md #42/#43, directly led to finding the low-free-heap root cause). Kept
-    // permanently, unlike the one-off /debug/trigger-crash endpoint from #38 - this one is
-    // read-only, has no allocation/crash risk of its own (plain text, stack-only char buffer),
-    // and is cheap, ongoing insight worth having if heap pressure ever creeps back up.
+    // Heap health check - permanent, read-only diagnostic (plain text, stack-only char buffer, no
+    // allocation/crash risk of its own) for spotting heap pressure before it causes a crash.
     webServer.on("/api/heap", HTTP_GET, [](AsyncWebServerRequest * request) {
       char buf[220];
-      //DIAGNOSTIC, 2026-08-21 (see BUGFIX_LOG.md #82): getFlashChipRealSize() reads the physical
-      //chip's own SPI ID at boot (ground truth, independent of what this build was compiled for);
-      //getFlashChipSize() is what the current eesz board-menu choice assumes. Added while figuring
-      //out whether the flash layout can safely be widened for a bigger OTA slot (web-based
-      //firmware upload currently fails outright - this sketch already exceeds eesz=1M128's ~438KB
-      //OTA budget) - a mismatch between the two would mean the compiled layout doesn't match the
-      //real chip, which needs fixing before touching eesz at all. Read-only, no allocation.
-      //getFlashChipId()/getChipId() added on user request for full identification (manufacturer/
-      //device ID of the actual flash part, and the ESP8266's own unique chip ID) - useful
-      //documentation regardless of the eesz decision, and a second cross-check that FlashMode/
-      //FlashFreq (dout/40MHz, unchanged) still matches this real part.
+      //getFlashChipRealSize() = physical chip's own SPI ID (ground truth); getFlashChipSize() =
+      //what the eesz board-menu choice assumes - a mismatch means the compiled layout is wrong.
       snprintf(buf, sizeof(buf), "free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s",
         ESP.getFreeHeap(), ESP.getHeapFragmentation(), ESP.getMaxFreeBlockSize(),
         ESP.getFlashChipRealSize(), ESP.getFlashChipSize(), ESP.getFlashChipId(), ESP.getChipId(),
@@ -910,13 +825,9 @@ void setup() {
       request->send(200, "text/plain", buf);
     });
 
-    // DIAGNOSTIC, 2026-08-15 (see BUGFIX_LOG.md #70): added while investigating the residual,
-    // self-recovering "ERR_EMPTY_RESPONSE" pattern noted in #69. This board's lwIP build
-    // (verified in lwipopts.h, all 8 board-menu "lwIP variant" choices share this same value)
-    // hard-caps MEMP_NUM_TCP_PCB at 5 - only 5 simultaneously *active* TCP connections, with a
-    // *separate* 5-slot pool for connections in TIME-WAIT after closing (ESPAsyncWebSrv sets
-    // "Connection: close" on every response, so every request opens a fresh connection). Read-
-    // only, no allocation, same risk profile as /heap - walks lwIP's own linked lists.
+    // This board's lwIP build hard-caps MEMP_NUM_TCP_PCB at 5 - only 5 simultaneously *active*
+    // TCP connections, with a separate 5-slot TIME-WAIT pool (every request opens a fresh
+    // connection, "Connection: close" on every response). Read-only, no allocation.
     webServer.on("/api/tcp-status", HTTP_GET, [](AsyncWebServerRequest * request) {
       int activeCount = 0;
       for (struct tcp_pcb *p = tcp_active_pcbs; p != NULL; p = p->next) activeCount++;
@@ -940,14 +851,8 @@ void setup() {
     });
     
     webServer.on("/api/log", HTTP_GET, [](AsyncWebServerRequest * request) {
-      // DIAGNOSTIC FIX, 2026-08-13: this used to be `StaticJsonDocument<25000> document;` -
-      // as a *local* variable, that puts a 25000-byte buffer on the stack of this very
-      // AsyncWebServer callback, which (see the pendingRescanRequest comment near unitsAmount)
-      // has much less stack headroom than loop() - a near-guaranteed stack overflow on every
-      // single /log call, unlike everywhere else in this file which already uses the
-      // heap-backed JsonDocument (ArduinoJson v7) exactly to avoid this. This endpoint was
-      // called very frequently while debugging tonight's other issues, and is the leading
-      // suspect for this session's "crashes eventually, at a seemingly random point" bug.
+      // Heap-backed JsonDocument, not a StaticJsonDocument local - a large static buffer here
+      // would sit on this callback's stack, which has far less headroom than loop().
       JsonDocument document;
       document["count"] = serialLogCount;
       
@@ -966,28 +871,9 @@ void setup() {
         document["logs"][i]["timestamp"] = serialLog[idx].timestamp;
       }
       
-      // BUG FIX, 2026-08-14: this used to build the whole response into one contiguous
-      // `String jsonString`, then hand it to request->send(200, ..., jsonString), which copies
-      // it again internally (AsyncBasicResponse::_content = content). With up to 50 entries at
-      // up to 150 bytes each, that's two back-to-back multi-KB contiguous allocations - live-
-      // reproduced today via the crash reporter (finally working, see BUGFIX_LOG.md #38): a
-      // real abort()/panic crash with a stack trace pointing exactly here (operator new ->
-      // String::reserve() -> AsyncWebServerRequest::send() -> this line), most likely an
-      // allocation failing against a heap fragmented by many hours of uptime - exactly the kind
-      // of large contiguous allocation that's hardest to satisfy on a fragmented ESP8266 heap,
-      // even when total free heap would otherwise be enough. Switched to beginResponseStream(),
-      // which lets ArduinoJson serialize directly into small (~1460 byte) chunks as TCP send
-      // buffer space becomes available - no large contiguous buffer ever needed for the JSON
-      // body itself.
-      //
-      // BUG FIX, 2026-08-14 (follow-up, BUGFIX_LOG.md #44): the heap-budget fix (#43) made this
-      // crash far rarer, but not impossible - live-caught again, same site, after ~75 minutes of
-      // otherwise idle uptime (presumably a browser tab left open with the Serial Log panel
-      // auto-polling /log, occasionally landing on a moment when 1460 contiguous bytes genuinely
-      // weren't available, e.g. mid WiFi/TCP activity). ESP8266's operator new aborts outright on
-      // failure rather than returning null, so there's no way to catch this after the fact -
-      // check free heap defensively *before* attempting the allocation instead, and degrade to a
-      // clean error response rather than risking a crash.
+      // beginResponseStream() serializes into small chunks instead of one contiguous String,
+      // which needs a multi-KB allocation that fails first on a fragmented heap. operator new
+      // aborts on failure here, so check free heap before allocating at all.
       if (ESP.getFreeHeap() < 4000) {
         SerialPrintln("WARNING: /log skipped building response - free heap too low (" + String(ESP.getFreeHeap()) + " bytes)");
         request->send(503, "text/plain", "Too little free heap right now to safely build the log response - try again shortly");
@@ -998,9 +884,8 @@ void setup() {
       request->send(response);
     });
 
-    // On-device crash log (added 2026-08-13, see ServiceCrashLogFunctions.ino) - survives
-    // even if the live serial connection wasn't available/reliable at the moment of a
-    // crash. One JSON object per line (JSON Lines), oldest first, newest last.
+    // On-device crash log (see ServiceCrashLogFunctions.ino) - survives even without a live
+    // serial connection at the moment of a crash. One JSON object per line, oldest first.
     webServer.on("/api/crash-log", HTTP_GET, [](AsyncWebServerRequest * request) {
       if (!LittleFS.exists(CRASH_LOG_PATH)) {
         request->send(200, "application/jsonl", "");
@@ -1009,8 +894,7 @@ void setup() {
       request->send(LittleFS, CRASH_LOG_PATH, "application/jsonl");
     });
 
-    // Clears the persisted crash log. POST (not GET) per this project's CSRF-hardening
-    // convention (see the 2026-08-13 BUGFIX_LOG entry on GET-triggered state changes).
+    // Clears the persisted crash log. Not GET, to avoid a CSRF-via-GET state change.
     webServer.on("/api/crash-log", HTTP_DELETE, [](AsyncWebServerRequest * request) {
       if (LittleFS.exists(CRASH_LOG_PATH)) {
         LittleFS.remove(CRASH_LOG_PATH);
@@ -1042,14 +926,9 @@ void setup() {
         request->send(503, "text/plain", "Another units request is already in progress, try again shortly");
         return;
       }
-      //DIAGNOSTIC, 2026-08-22 (see BUGFIX_LOG.md #84): opt-in heavy 6-byte read (adds phase/
-      //progress) instead of the default light 3-byte one (#77) - only when explicitly asked for
-      //via ?detail=1, so routine Administration-page polling stays on the cheaper path. Added to
-      //investigate a Unit spontaneously rotating slowly/never finishing homing with no ESPMaster-
-      //issued display job involved (see BUGFIX_LOG's Offene Punkte) - watching whether
-      //currentPhaseProgress climbs steadily (mechanical/torque theory) or keeps resetting toward 0
-      //(repeated-brownout-reset theory) distinguishes between the two live, without needing a
-      //multimeter/scope.
+      //Opt-in heavy 6-byte read (adds phase/progress) instead of the default light 3-byte one,
+      //only when explicitly asked for via ?detail=1, so routine Administration-page polling
+      //stays on the cheaper path.
       pendingUnitsInfoRequestDetail = request->hasParam("detail");
       pendingUnitsInfoRequestDisconnected = false;
       pendingUnitsInfoRequest = request;
@@ -1140,7 +1019,7 @@ void setup() {
             }
           }
 
-          //"index.html" is the only valid target - the whole UI is one file now (BUGFIX_LOG.md #72).
+          //"index.html" is the only valid target - the whole UI is one file now.
           webUploadFilenameValid = (filename == "index.html");
           if (!webUploadFilenameValid) {
             SerialPrintln("Web file upload rejected: filename not in allowlist: " + filename);
@@ -1173,10 +1052,8 @@ void setup() {
     );
 
 #if UNIT_BOOTLOADER_ENABLE == true
-    // Admin: upload a compiled Unit.ino firmware image (raw AVR flash .bin, NOT the ESPMaster's own
-    // .bin) to be pushed to a unit afterwards via /api/units/firmware-push. See Unit/BOOTLOADER_SETUP.md.
-    // Requires X-OTA-Password, same as /api/firmware - anyone on the LAN could otherwise push
-    // arbitrary code to the unit's AVR.
+    // Admin: upload a compiled Unit.ino firmware image (raw AVR .bin, NOT ESPMaster's own) to be
+    // pushed to a unit via /api/units/firmware-push. Requires X-OTA-Password, same as /api/firmware.
     webServer.on("/api/units/firmware", HTTP_POST,
       [](AsyncWebServerRequest * request) {
         if (unitFirmwareUploadAuthFailed) {
@@ -1226,14 +1103,8 @@ void setup() {
 
     // Admin: push the currently stored unit firmware to a single unit over I2C (twiboot).
     // Deferred to loop(), same reasoning as pendingRescanRequest above. Requires X-OTA-Password.
-    //BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #86): this used to be "/api/units/firmware/push" -
-    //a URL that is a strict prefix-extension of "/api/units/firmware" (the upload endpoint just
-    //above, registered with the two-callback upload form). ESPAsyncWebServer's route matching for
-    //that form intercepted every request to this path too, so this handler was completely
-    //unreachable (silently "succeeding" with the upload endpoint's response instead) ever since
-    //the two endpoints were renamed from the old, non-overlapping "/unit-firmware-upload"/
-    //"/unit-firmware-push" scheme. Renamed to a sibling path instead of a sub-path so the two
-    //can never prefix-collide again.
+    //IMPORTANT: must be a sibling path, not a sub-path of "/api/units/firmware" above - its
+    //two-callback upload route would intercept any prefix-extension of it, silently unreachable.
     webServer.on("/api/units/firmware-push", HTTP_POST, [](AsyncWebServerRequest * request) {
       if (String(otaPassword) != "") {
         String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
@@ -1283,9 +1154,8 @@ void setup() {
     });
 
     // Admin/diagnostic: send a unit into bootloader mode and report which I2C address it answers
-    // on, without writing anything to flash. Used to verify the DIP-jumper address is read live
-    // by twiboot (see BOOTLOADER_SETUP.md's jumper-live-test) without risking a real firmware
-    // push. Deferred to loop() for the same reason as /unit-firmware-push above.
+    // on, without writing anything - verifies the DIP-jumper address twiboot reads live, without
+    // risking a real firmware push.
     webServer.on("/api/units/bootloader-probe", HTTP_POST, [](AsyncWebServerRequest * request) {
       if (!request->hasParam(PARAM_ID, true)) {
         request->send(400, "text/plain", "'id' is required");
@@ -1321,8 +1191,7 @@ void setup() {
 
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
     // Admin: browser-based firmware upload (no Arduino IDE required), in three steps - see the
-    // comment on the ota* globals near firmwareUpdateAuthFailed above for why this replaced a
-    // single streaming upload (BUGFIX_LOG.md #88).
+    // comment on the ota* globals near firmwareUpdateAuthFailed above for why it's chunked.
     //
     // Shared password check - all three endpoints require it identically.
     auto checkOtaPassword = [](AsyncWebServerRequest * request) -> bool {
@@ -1434,8 +1303,6 @@ void setup() {
 #endif
 
 #if DEBUG_ENABLE == true
-    //Used to be two CSRF-via-GET endpoints (/exit-debug-mode, /enable-debug-mode) - merged into
-    //one POST with an "enabled" param (see BUGFIX_LOG.md #74).
     webServer.on("/api/debug-mode", HTTP_POST, [](AsyncWebServerRequest * request) {
       if (!request->hasParam("enabled", true)) {
         request->send(400, "text/plain", "'enabled' is required (true/false)");
@@ -1557,13 +1424,9 @@ void setup() {
 
           //HTTP POST Flap Speed Slider value
           if (p->name() == PARAM_FLAP_SPEED) {
-            //SECURITY/BUG FIX, 2026-08-13: the <input type="range" min="1" max="100"> bound in
-            //index.html is client-side only. convertSpeed() feeds this straight into map(), which
-            //extrapolates rather than clamps outside its input range - a handcrafted request with
-            //e.g. flapSpeed=-1000 produces a negative "speed", which then gets truncated to a
-            //uint8_t when written over I2C (Wire.write()) and wraps around to an arbitrary large
-            //byte value. The unit would call stepper.setSpeed() with that garbage RPM value - a
-            //real (if low-probability) safety concern for the physical motor. Validate server-side.
+            //index.html's <input min="1" max="100"> is client-side only - validate server-side
+            //too, since convertSpeed() extrapolates (not clamps) out-of-range values, and a
+            //garbage speed reaching the unit is a real physical-motor safety concern.
             String rawFlapSpeed = p->value();
             if (!isNumber(rawFlapSpeed) || rawFlapSpeed.toInt() < 1 || rawFlapSpeed.toInt() > 100) {
               SerialPrintln("flapSpeed provided was invalid (must be a number 1-100): " + rawFlapSpeed);
@@ -1575,13 +1438,8 @@ void setup() {
 
           //HTTP POST inputText value
           if (p->name() == PARAM_INPUT_TEXT) {
-            //SECURITY/BUG FIX, 2026-08-13: the <input maxlength="75"> limit in index.html is
-            //client-side only - a request built by hand (or a malicious/broken client) can send
-            //an arbitrarily long value. Nothing downstream (processSentenceToLines(),
-            //centerString() and friends) has an unbounded failure mode anymore after this
-            //session's other fixes, but an unbounded String here is still needless heap
-            //pressure/slowness on a memory-constrained device for no legitimate benefit. Enforce
-            //server-side too, generously above the UI's own limit.
+            //index.html's maxlength="75" is client-side only - enforce server-side too (generously
+            //above the UI's own limit), an unbounded String is needless heap pressure otherwise.
             if (p->value().length() > 500) {
               SerialPrintln("inputText provided was too long (" + String(p->value().length()) + " chars, max 500)");
               submissionError = true;
@@ -1900,9 +1758,8 @@ void setup() {
 /* |                          |___/               |_|   | */
 /* '----------------------------------------------------' */
 void loop() {
-  //DIAGNOSTIC, 2026-08-16 (see BUGFIX_LOG.md #76): the first I2C scan of the Units, deliberately
-  //delayed 30s after boot (see the comment in setup() for why) - runs here instead of blocking
-  //setup() with delay(30000), so WiFi/the web server start immediately. Fires exactly once.
+  //First I2C scan, delayed 30s after boot (see setup()) - runs here instead of blocking setup(),
+  //so WiFi/the web server start immediately. Fires exactly once.
   static bool firstUnitScanDone = false;
   if (!firstUnitScanDone && millis() >= 30000) {
     firstUnitScanDone = true;
@@ -1918,17 +1775,12 @@ void loop() {
     SerialPrintln("");
   }
 
-  //BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #40/#81): advances the non-blocking display-update
-  //state machine by at most one small step (one I2C op at most) - called unconditionally, before
-  //any of the deferred-request handling below, so a display update in progress can never again
-  //prevent loop() from reaching this point (which is what used to make the deferred-request
-  //pattern below starve for up to 90s at a time).
+  //Advances the display-update state machine by at most one I2C op, unconditionally and before
+  //any deferred-request handling below, so an in-progress display update can't block loop().
   updateDisplayJob();
 
-  //Handle any I2C admin requests deferred here by the web handlers (see the comment on
-  //pendingRescanRequest near unitsAmount for why this can't just run in the handler itself).
-  //Checked first, before anything else in loop(), so a pending request gets served as soon as
-  //possible.
+  //I2C admin requests deferred here by the web handlers (see pendingRescanRequest's comment near
+  //unitsAmount) - checked first so a pending request gets served as soon as possible.
   if (pendingRescanRequest != nullptr) {
     AsyncWebServerRequest* deferredRequest = pendingRescanRequest;
     pendingRescanRequestDisconnected = false; //this run's flag starts clean - see the comment near unitsAmount
@@ -1936,8 +1788,7 @@ void loop() {
     int detectedAmount = scanI2CBus();
 
     //Guard slot released only now (not before scanI2CBus() ran) so a request arriving mid-scan
-    //correctly gets 503 instead of silently overwriting this one. Same pattern below. See
-    //BUGFIX_LOG.md #50.
+    //correctly gets 503 instead of silently overwriting this one. Same pattern below.
     pendingRescanRequest = nullptr;
 
     //Client may have disconnected while scanI2CBus() ran, making deferredRequest a dangling pointer.
@@ -1960,14 +1811,8 @@ void loop() {
       int status = -2;
       int offset = -1;
       bool online;
-      //DIAGNOSTIC, 2026-08-16 (see BUGFIX_LOG.md #77): this used to also fetch phase/progress
-      //(6-byte I2C read) - dropped in favor of the lightweight 3-byte status+offset read, since
-      //the Administration page never displayed phase/progress anyway. Halves the number of TWI
-      //interrupts this endpoint costs the Unit per poll. The display-update state machine (used by
-      //showText(), unrelated to this endpoint - see ServiceDisplayJobFunctions.ino) still fetches
-      //the full data - it genuinely needs it.
-      //DIAGNOSTIC, 2026-08-22 (see BUGFIX_LOG.md #84): ?detail=1 opts back into the heavy read for
-      //exactly this call - see the comment on pendingUnitsInfoRequestDetail above.
+      //Default is the light 3-byte status+offset read, not the 6-byte one with phase/progress -
+      //the Administration page never displays those. ?detail=1 opts into the heavy read.
       if (pendingUnitsInfoRequestDetail) {
         int phase = -1;
         int progress = -1;
@@ -2046,9 +1891,8 @@ void loop() {
 
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
   // Does the one pending Update.* call for whichever phase a client is currently waiting on, here
-  // in loop()'s large safe stack - see BUGFIX_LOG.md #79 for why this can't run in a webserver
-  // callback itself. See BUGFIX_LOG.md #88 for why this is chunk-based rather than a streamed
-  // ring buffer.
+  // in loop()'s large safe stack - Update.begin()/write()/end() need more stack than an
+  // AsyncWebServer callback has available.
   if (otaPendingPhase == OTA_PHASE_BEGIN) {
     uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
     uint32_t rounded = (otaBeginSize + 0xFFF) & 0xFFFFF000; //round up to a flash sector
@@ -2056,9 +1900,8 @@ void loop() {
 
     bool ok = Update.begin(updateSize, U_FLASH);
     if (ok) {
-      //Allocated here (not statically) for the same reason as the old ring buffer - this device's
-      //free heap is chronically tight (BUGFIX_LOG.md #41-43), no reason to hold 4KB for a rarely-
-      //used feature the other 99% of the time.
+      //Allocated here, not statically - free heap on this device is chronically tight, no reason
+      //to hold 4KB for a rarely-used feature the other 99% of the time.
       if (otaChunkBuffer != nullptr) {
         delete[] otaChunkBuffer; //shouldn't happen (always freed below before this runs again), don't leak if it somehow does
       }
@@ -2084,11 +1927,9 @@ void loop() {
     if (!ok) {
       SerialPrintln("Firmware upload: chunk write failed");
       Update.printError(Serial);
-      //Must still call end() here (ignoring its result - we already know success is false):
-      //Update.begin() refuses to start a new update while the previous one is still marked
-      //"running" internally, and only end()/a premature end() clears that - skipping this call
-      //left every subsequent upload attempt failing with "Update.begin() failed" until a full
-      //reboot, live-confirmed while testing the original version of this fix (see BUGFIX_LOG.md #79).
+      //Must still call end() here (ignoring its result): Update.begin() refuses to start a new
+      //update while the previous one is still marked "running" internally, and only end() clears
+      //that - skipping this leaves every subsequent upload failing until a full reboot.
       Update.end(false);
       delete[] otaChunkBuffer; //abort the whole upload - a missing chunk buffer makes the other
       otaChunkBuffer = nullptr; //two endpoints cleanly reject anything further
@@ -2206,15 +2047,15 @@ void loop() {
 
       //Unconditional re-init: repeated-start I2C reads (what the scan above just did) can leave
       //the ESP8266 core's *software* I2C state stuck (NACK on every later transaction) even when
-      //the physical bus is idle - recoverI2CBus() alone doesn't catch that case. See BUGFIX_LOG.md #53.
+      //the physical bus is idle - recoverI2CBus() alone doesn't catch that case.
       Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
       Wire.setClock(400000);
 #if UNIT_BOOTLOADER_ENABLE == true
       Wire.setClockStretchLimit(25000);
 #endif
 
-      //Explicitly asked to return to the app - twiboot's own ~1000ms idle-timeout wasn't reliable
-      //in practice (unit stayed in the bootloader 44+s once, needed a power cycle). BUGFIX_LOG.md #53.
+      //Explicitly ask to return to the app - twiboot's own ~1000ms idle-timeout wasn't reliable in
+      //practice (unit stayed in the bootloader 44+s once, needed a power cycle).
       bool returnedToApp = twibootStartApplication(bootAddress);
       doc["returnedToApp"] = returnedToApp;
       doc["note"] = returnedToApp
@@ -2254,27 +2095,9 @@ void loop() {
   }
 #endif
 
-  // BUG FIX, 2026-08-14: removed loop()'s entire custom WiFi reconnect-monitoring block
-  // (an addition on top of the original upstream project, not present in the "stable" baseline
-  // the user started from - github.com/scientress/split-flap - verified directly by fetching
-  // its ESPMaster.ino/loop(): it contains *no* WiFi.status()/disconnect()/begin() calls at all,
-  // relying entirely on wifiManager.setWiFiAutoReconnect(true) set once in initWiFi() and the
-  // ESP8266 SDK's own background auto-reconnect from then on).
-  //
-  // Today's session spent a long time fixing bugs *within* that added block (wrong hardcoded
-  // credentials, permanently giving up after 3 failures, insufficient radio reset before
-  // retrying) and it kept resurfacing new failure modes each time (most recently: 90+
-  // consecutive failed reconnect attempts over 18+ minutes even with all those fixes applied).
-  // Stepping back per the user's direct suggestion: this custom block calls WiFi.disconnect()
-  // and WiFi.begin() *on top of* the SDK's own already-running background auto-reconnect - a
-  // very plausible mechanism for actively fighting/interrupting that background process rather
-  // than helping it, which would explain why patching the block's *details* never fully
-  // resolved the underlying instability. Removed entirely rather than patched further -
-  // isWifiConfigured is now purely a boot-time flag again (set once in initWiFi() on success,
-  // exactly as in the original), matching the simpler, previously-stable design. The
-  // WIFI_NONE_SLEEP fix (see ServiceWifiFunctions.ino) is kept - it's an independent radio
-  // power-mode setting, not something that can conflict with the SDK's own reconnect logic, and
-  // is a genuine improvement over both the original and this project's prior state.
+  // IMPORTANT: no custom WiFi reconnect-monitoring block here, deliberately - a prior version
+  // fought the SDK's own background auto-reconnect and caused instability. Trust
+  // wifiManager.setWiFiAutoReconnect(true) (set once in initWiFi()) instead of adding one.
 
   //Do nothing if WiFi is not configured
   if (!isWifiConfigured) {
@@ -2293,12 +2116,9 @@ void loop() {
   //Admin page's "Rescan Units" once wiring/addressing is fixed, no reboot required.
   bool unitsAvailable = (unitsAmount > 0);
 
-  //BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #40/#81): this used to be "showText(blank1);
-  //delay(2000); showText(blank2);", relying on showText() blocking until fully done to guarantee
-  //ordering. Now that showText() returns immediately, a real delay(2000) here would just freeze
-  //loop() (and updateDisplayJob() with it) for 2 real seconds - undermining the whole point of
-  //this change. updateUnitsResetSequence() (ServiceDisplayJobFunctions.ino) replicates the same
-  //blank1 -> pause -> blank2 ordering non-blockingly instead.
+  //updateUnitsResetSequence() (ServiceDisplayJobFunctions.ino) does a non-blocking
+  //blank1 -> pause -> blank2 sequence - a real delay(2000) here would freeze loop() itself, since
+  //showText() no longer blocks until done.
   if (unitsAvailable && isPendingUnitsReset) {
     updateUnitsResetSequence();
   } else if (!unitsAvailable) {
@@ -2344,11 +2164,9 @@ void loop() {
   }
 }
 
-// Scans the I2C bus, reports all found devices, and (re-)determines unitsAmount: the number of
-// units found sequentially starting at address 0, stopping at the first missing address - this
-// mirrors the DIP switches' own "must be sequential from 0" requirement (see README "Set Unit
-// Address"), so a gap here means a wiring/configuration problem, not a legitimately sparse set
-// of units. Sets the global unitsAmount as a side effect and also returns it for convenience.
+// Scans the I2C bus and (re-)determines unitsAmount: units found sequentially from address 0,
+// stopping at the first gap (mirrors the DIP switches' "must be sequential from 0" requirement -
+// a gap means a wiring/config problem, not a sparse set of units). Sets the global as a side effect.
 int scanI2CBus() {
   SerialPrintln("========================================");
   SerialPrintln("I2C Bus Scan - Checking addresses 0-" + String(UNITS_AMOUNT_MAX - 1));
@@ -2359,7 +2177,7 @@ int scanI2CBus() {
   int unitStatus[UNITS_AMOUNT_MAX]; // Track status of each address (-2 = not found, -1 = sleeping, 0 = ready, 1 = busy)
   for (int i = 0; i < UNITS_AMOUNT_MAX; i++) unitStatus[i] = -2; // {-2} only zero-initializes element 0 for a non-constant size
 
-  // Scan all possible I2C addresses (0..UNITS_AMOUNT_MAX-1, see BUGFIX_LOG.md #89)
+  // Scan all possible I2C addresses (0..UNITS_AMOUNT_MAX-1)
   for (int address = 0; address < UNITS_AMOUNT_MAX; address++) {
     Wire.beginTransmission(address);
     byte error = Wire.endTransmission();

@@ -23,13 +23,12 @@
  * commit 559a403836e8d91a2d5b962e9541af679150b7a9 (2021-02-20).
  *
  * Change: the TWI/I2C address is no longer a fixed compile-time value.
- * Instead, main() reads the same 4 DIP-switch address pins (D3-D6 = PD3-PD6)
+ * Instead, main() reads the same 6 DIP-switch address pins (A0-A3, D3-D4)
  * that Unit.ino's getaddress() already reads, and adds that to
  * TWI_ADDRESS_BASE. This keeps a single compiled bootloader image usable on
  * every unit, and makes DIP-switch/jumper changes take effect immediately
  * for firmware updates too, without needing a per-unit bootloader reflash.
- * See Unit/BOOTLOADER_SETUP.md and the "twiboot patchen" section of the
- * project's implementation plan for the full rationale.
+ * See Unit/BOOTLOADER_SETUP.md for the full rationale.
  *
  * Everything else in this file is unmodified upstream code. This file
  * remains licensed under GPL-2.0 (see LICENSE in this directory), as
@@ -57,29 +56,16 @@
 #endif
 /* Actual TWI address = TWI_ADDRESS_BASE + (DIP switch reading), computed at runtime in main() */
 
-/* 16MHz, NOT twiboot's own upstream default of 8MHz: this project's hardware (bare ATmega328P
- * on the fae-pcb, https://github.com/codingcatgirl/split-flap-fae-pcb) has a real external
- * 16MHz crystal (Y2 in the schematic), matching nano.build.f_cpu=16000000L in Arduino's own
- * boards.txt - what Unit.ino and the whole Arduino core/Stepper library are compiled against.
- * Must be paired with the Makefile's AVRDUDE_FUSES (lfuse=0xFF for external crystal, hfuse=0xDA
- * matching this hardware's actual, factory-programmed 1024-word boot section / BOOTLOADER_START
- * below), not twiboot's own upstream example fuses. Getting either the clock source or the boot
- * section size/address wrong silently runs the chip wrong or jumps to a boot address the actual
- * fuses don't point to - no error message, it just doesn't work. Root-caused by testing against
- * a pristine, never-touched unit's actual factory fuses (2026-08-10): the stepper motor only
- * moved again once F_CPU/lfuse/hfuse/BOOTLOADER_START here all matched that hardware exactly -
- * see Unit/BOOTLOADER_SETUP.md and the Makefile's atmega328p section for the full story. */
+/* 16MHz, NOT twiboot's upstream 8MHz default - this hardware has a real external 16MHz crystal
+ * (Y2). Must be paired with the Makefile's AVRDUDE_FUSES (lfuse=0xFF, hfuse=0xDA) - a mismatch
+ * here silently runs the chip wrong, no error message. See Unit/BOOTLOADER_SETUP.md. */
 #define F_CPU                   16000000ULL
-/* util/delay.h's _delay_us()/_delay_ms() calibrate against F_CPU, so this include must come
- * after F_CPU is defined above - including it earlier silently defaults to the wrong clock
- * speed (1MHz) and produces incorrect (too short) delays. */
+/* Must come after F_CPU above - util/delay.h calibrates against it at include time. */
 #include <util/delay.h>
 
 #define TIMER_DIVISOR           1024
-/* Upstream uses 25ms here, sized so a single Timer0 overflow period fits the 8-bit TCNT0
- * preload at F_CPU=8MHz (8MHz/1024/1000*25 = ~195 ticks, fits under 255). At our F_CPU=16MHz
- * that would be ~390 ticks - overflows uint8_t (see TCNT0 = 0xFF - TIMER_MSEC2TICKS(...) below).
- * 12ms keeps the same margin at 16MHz (16MHz/1024/1000*12 = ~188 ticks). */
+/* Upstream's 25ms assumes F_CPU=8MHz (~195 Timer0 ticks, fits uint8_t). At our 16MHz that would
+ * be ~390 ticks and overflow uint8_t - 12ms keeps the same margin at 16MHz (~188 ticks). */
 #define TIMER_IRQFREQ_MS        12
 #define TIMEOUT_MS              1000
 
@@ -868,20 +854,10 @@ int main(void)
 #endif
 
 #if defined (TWCR)
-    /* Read the address jumpers (same pins as Unit.ino's getaddress() - see the long comment on
-     * addressPins near the top of Unit.ino for the full pin-to-bit mapping and why it's 6 bits,
-     * not the full 8 pairs J4 physically has), so the bootloader's I2C address always matches
-     * whatever the app would use - one compiled image for every unit, jumper changes apply
-     * immediately without a bootloader reflash.
-     *
-     * FEATURE, 2026-08-23 (see BUGFIX_LOG.md #89): extended from 4 bits (D3-D6 only) to 6 bits -
-     * bit 0..3 = A0-A3 (PC0-PC3, the physically bottom four pairs on J4), bit 4..5 = D3-D4
-     * (PD3-PD4). D5/D6 (PD5/PD6, the two topmost pairs) are intentionally left unread/reserved -
-     * with TWI_ADDRESS_BASE staying at 0x29, a 6-bit raw value (0-63) keeps every possible
-     * bootloader address (0x29-0x68) safely inside the valid, non-reserved 7-bit I2C range
-     * (0x08-0x77) - going further would risk landing on a reserved address or overflowing TWAR's
-     * 7-bit field. Must stay in sync with Unit.ino's own 6-bit getaddress() - the two independently
-     * compute the app and bootloader I2C addresses from the same physical jumpers. */
+    /* Read the address jumpers (same pins/bit mapping as Unit.ino's getaddress()) so the
+     * bootloader's I2C address always matches the app's - one image for every unit, jumper
+     * changes apply immediately without a reflash. bit 0..3 = A0-A3 (PC0-PC3), bit 4..5 = D3-D4
+     * (PD3-PD4); D5/D6 stay unread. Must stay in sync with Unit.ino's getaddress(). */
     DDRD &= ~((1<<PD3) | (1<<PD4));  /* inputs */
     PORTD |= (1<<PD3) | (1<<PD4);    /* enable pull-ups */
     DDRC &= ~((1<<PC0) | (1<<PC1) | (1<<PC2) | (1<<PC3));  /* inputs */

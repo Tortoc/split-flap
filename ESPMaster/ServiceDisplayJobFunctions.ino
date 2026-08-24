@@ -1,25 +1,9 @@
-// Non-blocking display-update state machine (see BUGFIX_LOG.md #40/#81).
-//
-// Background: showText()/showMessage() used to block loop() synchronously for up to 90s twice
-// per display update (waitForAllUnitsReady() before writing, and again after) - live-confirmed
-// this makes the whole "deferred to loop()" request pattern (pendingUnitsInfoRequest etc.) starve,
-// since that pattern is only ever checked at the very top of loop(), which a blocked showText()
-// call never lets loop() return to. Static file serving stayed responsive throughout (confirmed
-// live) because that's serviced directly by AsyncTCP/lwIP via yield(), which is a genuinely
-// different mechanism from "loop() reaches its own top-level code again".
-//
-// A previous fix attempt called the deferred-request processing from additional yield-points
-// nested inside showText()'s own wait loops - this DID keep the server responsive, but introduced
-// new I2C reads that could nest inside an already-running I2C wait cycle, and was reverted after
-// the user reported worse connection stability shortly after. That risk (nested/re-entrant Wire
-// calls) is the reason this rewrite is a real state machine rather than "more yield points": at
-// any moment, at most one I2C transfer is ever in flight, and it always happens from the very top
-// of loop() (via updateDisplayJob(), called once per iteration, doing at most one I2C op per call)
-// - never nested inside another call's wait loop.
-//
-// showText() (ServiceFlapFunctions.ino) keeps its exact old signature/dedup-guard and public
-// behavior for every caller (main loop() text/date/clock display, scheduled messages, the units
-// reset sequence) - it just starts a job and returns immediately instead of blocking until done.
+// Non-blocking display-update state machine - showText() used to block loop() for up to 90s per
+// update, starving the "deferred to loop()" web request pattern. A real state machine rather
+// than more yield() points, deliberately: yield-points inside the old blocking wait let I2C reads
+// nest inside an already-running I2C wait cycle and made connection stability worse. Here at most
+// one I2C transfer is ever in flight, always from updateDisplayJob() at the top of loop().
+// showText() keeps its old signature/behavior - it just starts a job and returns immediately.
 
 enum DisplayJobState {
   DISPLAY_JOB_IDLE,
@@ -34,48 +18,32 @@ enum DisplayJobState {
 struct DisplayJob {
   DisplayJobState state = DISPLAY_JOB_IDLE;
   String originalMessage;      //what showText() was actually asked to show, for lastWrittenText
-  //BUG FIX, 2026-08-21: this was originally `LList<String> lines;`, assigned directly from
-  //processSentenceToLines()'s return value in startDisplayJob() (`displayJob.lines =
-  //processSentenceToLines(message);`). LIVE-CRASHED on the very first multi-line message tested
-  //(Exception 28/LoadProhibited, garbled String content in the log - a fragment of an unrelated
-  //earlier log line, the textbook signature of reading freed memory). Root cause: `LinkedList`
-  //(LinkedList.h) has no custom copy constructor/operator= - its destructor unconditionally
-  //`delete`s every node - so a plain member-wise copy (the compiler-generated default, taken by a
-  //struct-member *assignment* from a temporary) leaves the assigned-to copy's root/last pointers
-  //referring to nodes the temporary's destructor frees moments later at the end of that statement.
-  //The original showText() never hit this because it used `LList<String> messageLines =
-  //processSentenceToLines(message);` as a fresh *local* (copy elision applies to initialization
-  //from a prvalue, not to assignment into an existing object) and read it entirely within the same
-  //call - never letting a second, longer-lived copy of the LinkedList object itself exist. Fixed
-  //by copying only the individual String elements (String's own copy semantics are fine) into a
-  //plain fixed-size array, once, in startDisplayJob() - never storing/assigning the LList itself
-  //across a struct/scope boundary again.
+  //IMPORTANT: must stay a plain array, not `LList<String> lines` assigned from
+  //processSentenceToLines() - LinkedList's destructor unconditionally deletes every node, so
+  //assigning a temporary's LList into a longer-lived struct member leaves dangling pointers
+  //once the temporary is destroyed (live-crashed on the first multi-line message tested). Copy
+  //just the String elements into a fixed array instead - never store an LList across a scope boundary.
   static const int MAX_DISPLAY_LINES = 50; //500-char max message (#31) / a few chars per line
                                             //(unitsAmount) comfortably fits well under this
   String lines[MAX_DISPLAY_LINES];
   int lineCount = 0;
-  bool isMultiLine = false;    //see getCurrentJobLineText() - matches the old code's exact
-                                //behavior of only using the split lines when there's more than
-                                //one; a single (or zero) line always shows originalMessage as-is,
-                                //not whatever processSentenceToLines() normalized it to.
+  bool isMultiLine = false;    //split lines are only used when there's more than one; a single
+                                //(or zero) line always shows originalMessage as-is (see DISPLAY_JOB_WRITE_LINE below)
   int currentLineIndex = 0;
   int flapSpeedValue = 0;
   unsigned long finalPauseMs = 0;
   unsigned long pauseUntil = 0;
 
-  //Sub-state for the current waitForAllUnitsReady()-equivalent phase - one unit at a time,
-  //same 90s max-wait / 15s stuck-timeout semantics as the old waitForUnitReady(), just spread
-  //non-blockingly across loop() ticks (see resetWaitSubstate()/pollWaitAllUnitsReadyStep() below)
-  //instead of blocking in a while loop.
+  //Sub-state for the "wait for all units ready" phase - one unit at a time, 90s max-wait / 15s
+  //stuck-timeout, spread non-blockingly across loop() ticks (see pollDisplayJobWaitAllUnitsReady() below).
   int waitUnitIndex = 0;
   unsigned long waitUnitStart = 0;
   unsigned long waitLastProgressAt = 0;
   unsigned long waitNextPollAt = 0;
   int waitLastPhase = -1;
   int waitLastProgress = -1;
-  //BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #82): counts polls since resetDisplayJobWaitSubstate(),
-  //used to only fetch phase/progress (the heavy 6-byte read) every Nth poll instead of every poll -
-  //see the comment on pollDisplayJobWaitAllUnitsReady() for why.
+  //Counts polls since resetDisplayJobWaitSubstate() - used to only fetch phase/progress (the
+  //heavy 6-byte read) every Nth poll instead of every poll, see PHASE_READ_EVERY_N_POLLS below.
   unsigned long waitPollCount = 0;
 };
 
@@ -139,26 +107,13 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   return true;
 }
 
-//Advances the waitForAllUnitsReady()-equivalent sub-state by at most one I2C read (one unit at a
-//time, one poll per ~1s), matching the old waitForUnitReady()'s per-unit stuck/timeout handling
-//exactly. Returns true once every currently-known unit has been waited on (ready, or given up on
-//via forceUnitRecoveryReset() - the old code didn't stop the whole sequence on one unit's failure
-//either, see waitForAllUnitsReady()'s plain for-loop).
-//BUG FIX, 2026-08-21 (see BUGFIX_LOG.md #82): this used to call the heavy 6-byte readUnitInfo()
-//(status+offset+phase+progress) on every ~1s poll while waiting. The ATmega328p's TWI hardware
-//fires one interrupt PER BYTE transferred (not once per transaction), so a 6-byte read means 6 ISR
-//firings landing on the Unit right in the middle of whatever it's doing - including calibrate()'s
-//search loop (Unit.ino), which paces the stepper purely by micros() with zero feedback on whether
-//the rotor actually kept up. Diffed Unit.ino against upstream (scientress/split-flap) on user
-//request: requestEvent() grew from 1 byte (just currentlyrotating) to 6 bytes (+ calOffset lo/hi,
-//+ currentPhase, + currentPhaseProgress lo/hi) in the same timeframe the diagnostic phase/progress
-//fields were added - and the user independently confirmed the "unit spins very slowly" symptom
-//first appeared around that same twiboot-related work, after "hundreds of hours" of prior
-//trouble-free operation. A plausible, code-grounded mechanism (accumulated per-poll ISR jitter
-//against a busy-wait timing loop with no position feedback) that doesn't require a power-supply
-//theory. Mitigation: only fetch phase/progress every PHASE_READ_EVERY_N_POLLS-th poll (a light
-//3-byte status+offset read the rest of the time) - still frequent enough for the 15s stuck-timeout
-//to mean something, but cuts ISR firings during a wait by roughly 2/3.
+//Advances the "wait for all units ready" sub-state by at most one I2C read (one unit at a time,
+//one poll per ~1s). Returns true once every unit has been waited on (ready, or given up on via
+//forceUnitRecoveryReset() - one unit's failure doesn't stop the whole sequence).
+//
+//Only fetches the heavy 6-byte read (status+offset+phase+progress) every Nth poll, light 3-byte
+//otherwise - the ATmega328p's TWI fires one interrupt PER BYTE, and 6 ISR firings landing
+//mid-calibration is a plausible contributor to the still-open "unit spins very slowly" issue.
 const int PHASE_READ_EVERY_N_POLLS = 3; //heavy 6-byte read roughly every 3s instead of every 1s
 
 bool pollDisplayJobWaitAllUnitsReady() {
@@ -339,10 +294,9 @@ void updateDisplayJob() {
   }
 }
 
-//Non-blocking replacement for the old "showText(blank1); delay(2000); showText(blank2);"
-//sequence in ESPMaster.ino's loop() (isPendingUnitsReset handling) - that relied on showText()
-//blocking until fully done to guarantee ordering, which no longer holds now that showText()
-//returns immediately. Call every loop() iteration while isPendingUnitsReset is true.
+//Non-blocking "show blank1, pause, show blank2" sequence for isPendingUnitsReset (ESPMaster.ino's
+//loop()) - needed since showText() no longer blocks until done. Call every loop() iteration while
+//isPendingUnitsReset is true.
 enum UnitsResetSequenceState { UNITS_RESET_SEQ_IDLE, UNITS_RESET_SEQ_BLANK1, UNITS_RESET_SEQ_PAUSE, UNITS_RESET_SEQ_BLANK2 };
 UnitsResetSequenceState unitsResetSequenceState = UNITS_RESET_SEQ_IDLE;
 unsigned long unitsResetSequencePauseUntil = 0;

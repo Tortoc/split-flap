@@ -4,27 +4,16 @@ void initWiFi() {
 
   WiFi.mode(WIFI_STA);
 
-  //TRIED & REVERTED, 2026-08-16 (see BUGFIX_LOG.md #78): WiFi.setSleepMode(WIFI_NONE_SLEEP) was
-  //added 2026-08-14 to fix a *different* symptom (full disconnects that never self-recovered,
-  //"Reconnection attempt N failed" for minutes - BUGFIX_LOG.md #46). It forces the radio to stay
-  //continuously fully active instead of modem-sleeping between beacons - sustained higher
-  //current draw instead of periodic sleep/wake spikes. This line doesn't exist anywhere in the
-  //upstream evilscientress/split-flap repo. Given this session's power-supply-related findings
-  //(a unit stalling, an unexplained crash-log-silent reboot) and a newly-observed recurring
-  //~30-40s reachability cycle that persisted through a TX-power fix and a PSU upgrade, removed
-  //this to test whether it's contributing - if the original #46 symptom returns, it should look
-  //qualitatively different (occasional, minutes-long) and easy to tell apart from the ~30s cycle.
+  //NOTE: no WiFi.setSleepMode(WIFI_NONE_SLEEP) here, deliberately - forcing the radio fully
+  //active instead of sleeping was a plausible power-instability contributor. Revisit only if
+  //full, minutes-long disconnects reappear (see BUGFIX_LOG.md #46).
 
 #if WIFI_USE_DIRECT == false
   SerialPrintln("Setting up WiFi AP Setup Mode");
 
-  // TRIED & REVERTED, 2026-08-16 (see BUGFIX_LOG.md #78): tested WiFi.setOutputPower(20.5) here
-  // (max TX power - previously only set in the inactive WIFI_USE_DIRECT==true branch) against a
-  // recurring ~30s up/down reachability cycle. Several minutes of live monitoring showed no
-  // clear improvement (one ~3min good stretch, otherwise the same ~30s cycle), and research
-  // turned up reports of max TX power itself causing ESP8266 instability (RF amplifier current
-  // draw). Reverted to isolate whether the newly-installed 120W PSU (swapped in mid-session)
-  // makes a difference on its own, without this variable mixed in.
+  // NOTE: no WiFi.setOutputPower(20.5) here - tested against a reachability cycle that later
+  // turned out to be an external network-path issue, not the ESP; max TX power is also a known
+  // ESP8266 instability risk on its own.
 
 #if WIFI_STATIC_IP == true
   wifiManager.setSTAStaticIPConfig(wifiDeviceStaticIp, wifiRouterGateway, wifiSubnet, wifiPrimaryDns);
@@ -40,15 +29,9 @@ void initWiFi() {
   wifiManager.setConnectTimeout(120);    
   wifiManager.setWiFiAutoReconnect(true);
   wifiManager.setSaveConfigCallback([]() {
-    //Sadly, if we've had to open up the WiFi manager portal to set the WiFi configuration up
-    //then a soft reset is necessary. There looks to be issues with the ESP and running
-    //a webserver alongside the WiFiManager. Some reading around this issue here suggests it is
-    //not possible to fix:
-    //https://github.com/tzapu/WiFiManager/issues/1579
-    
-    //Suggestion to fix is reset the device:
-    //https://github.com/rancilio-pid/clevercoffee/issues/323#issuecomment-1587344185
-
+    //A reboot is needed after the WiFiManager config portal saves new credentials - running the
+    //portal and our own webserver together doesn't work reliably (known WiFiManager issue,
+    //https://github.com/tzapu/WiFiManager/issues/1579), a reset is the accepted workaround.
     SerialPrintln("New WiFi configuration saved. Will need to reboot device to let webserver work...");
     isPendingReboot = true;
   });

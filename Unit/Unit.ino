@@ -17,29 +17,14 @@
 //letter indices (0-44), so it can never collide with a normal display request.
 #define CMD_ENTER_BOOTLOADER 255
 
-//FEATURE, 2026-08-23 (see BUGFIX_LOG.md #89): address jumper block (J4 "AddressJumpers" on the
-//fae-pcb schematic) extended from 4 to 6 bits (16 -> 64 possible addresses). J4 has 8 pin pairs
-//total, only 4 (D3-D6) were wired into the address calculation before - this adds A0-A3, which
-//were already physically present on the connector but unused.
+//Address jumper block (J4 "AddressJumpers" on the fae-pcb schematic), 6 bits = 64 addresses. J4
+//has 8 pin pairs; D5/D6 (topmost) stay unused - I2C addresses are 7 bits wide and twiboot adds a
+//fixed 0x29 base (Unit/bootloader/twiboot/main.c, must stay in sync), so 6 bits (0-63, bootloader
+//addresses 0x29-0x68) is the max safe extension.
 //
-//Pin-to-net mapping verified directly against the PCB netlist (splitflappcb.kicad_pcb), not just
-//the schematic symbol - an earlier attempt to derive this purely from the schematic's symbol
-//geometry got the pin order backwards, caught by cross-checking against the actual routed board.
-//Physical top-to-bottom order on J4 (confirmed via two independent reference points on the board -
-//the J6 ISP header and the Y2 crystal, both sitting right next to J4's pin 1/D6): D6 (pin 1,
-//topmost, nearest the ISP header) - D5 (pin 3) - D4 (pin 5) - D3 (pin 7) - A3 (pin 9) - A2 (pin 11)
-//- A1 (pin 13) - A0 (pin 15, bottommost).
-//
-//Bit order chosen so the physically bottom-most pin pair is bit 0 (value 1): A0=bit0, A1=bit1,
-//A2=bit2, A3=bit3, D3=bit4, D4=bit5. D5/D6 (the two topmost pairs) are left unused/reserved - I2C
-//addresses are only 7 bits wide and this project's twiboot bootloader adds a fixed 0x29 base on
-//top of this raw value (see Unit/bootloader/twiboot/main.c), so 6 bits (raw values 0-63, giving
-//bootloader addresses 0x29-0x68) is the most this can safely extend to without either colliding
-//with the reserved 0x00-0x07/0x78-0x7F I2C address ranges or overflowing the 7-bit TWAR field.
-//twiboot's own jumper-reading patch was extended to match this exact same 6-bit scheme - the two
-//must stay in sync, since they compute the app and bootloader I2C addresses from the same jumpers.
-//No jumper on any pin = address 0, same as before (INPUT_PULLUP + open pin reads HIGH, and
-//getaddress() inverts each bit - see below).
+//J4 top-to-bottom (verified against the PCB netlist): D6 (pin 1, nearest ISP header) - D5 - D4 -
+//D3 - A3 - A2 - A1 - A0 (pin 15, bottom). Bit order: bottom-most = bit 0 - A0=bit0, A1=bit1,
+//A2=bit2, A3=bit3, D3=bit4, D4=bit5. No jumper = address 0 (INPUT_PULLUP, getaddress() inverts each bit).
 #define ADDRESS_PIN_COUNT 6
 const uint8_t addressPins[ADDRESS_PIN_COUNT] = {A0, A1, A2, A3, 3, 4}; //bit 0..5, bottom-to-top on J4
 
@@ -77,10 +62,8 @@ bool lastInd4 = false; //store last status of phase
 float missedSteps = 0; //cummulate steps <1, to compensate via additional step when reaching >1
 int currentlyrotating = 0; // 1 = drum is currently rotating, 0 = drum is standing still
 
-//DIAGNOSTIC, 2026-08-13: extra I2C status byte so ESPMaster can see *what kind* of busy the
-//unit is, not just a plain busy/idle bit - added to investigate whether "busy" waits that
-//exceed showMessage()'s timeout are legitimate (e.g. a full-rotation calibration search, which
-//can legitimately take a while) rather than a stuck/hung unit. See requestEvent().
+//Extra I2C status byte so ESPMaster can see *what kind* of busy the unit is (e.g. a legitimately
+//slow full-rotation calibration search vs. an actually stuck unit), not just busy/idle. See requestEvent().
 #define PHASE_IDLE        0
 #define PHASE_CALIBRATING 1
 #define PHASE_ROTATING    2
@@ -121,13 +104,9 @@ void setup() {
     pinMode(addressPins[i], INPUT_PULLUP);
   }
 
-  //hall sensor
-  //DIAGNOSTIC, 2026-08-13: was plain INPUT (no pull-up). If this sensor has an open-collector/
-  //open-drain output and the board doesn't provide its own pull-up, the pin could float and
-  //give noisy/unreliable readings - a very plausible explanation for calibrate() never
-  //reliably detecting the marker, leaving the motor energized (and warm) indefinitely instead
-  //of reaching stopMotor(). Testing with the internal pull-up enabled; revert if this doesn't
-  //help or makes homing worse (would suggest a push-pull sensor where this fights the signal).
+  //Hall sensor: INPUT_PULLUP rather than plain INPUT - if this is an open-collector/open-drain
+  //sensor without its own pull-up, a floating pin gives noisy readings and calibrate() can miss
+  //the marker indefinitely. Revert if this makes homing worse (would suggest a push-pull sensor).
   pinMode(HALLPIN, INPUT_PULLUP);
 
   i2cAddress = getaddress(); //get I2C Address and save in variable
@@ -179,15 +158,9 @@ void loop() {
   }
 
   unsigned long currentMillis = millis();
-  //DIAGNOSTIC, 2026-08-13: sleep block disabled to test a suspected root cause of the
-  //long-standing intermittent I2C-read-hang bug (see
-  //ESPMaster.ino's async-handler fix commit history). Theory: SLEEP_MODE_PWR_DOWN stops
-  //nearly everything and relies on the TWI hardware's "address match" wake source to bring
-  //the chip back up in time to answer the ESP's request - if the ESP's read lands right as
-  //the unit is entering/deep in this sleep, the oscillator startup delay can make it miss or
-  //badly delay the ACK, which on the ESP8266 master side has been observed to hang
-  //Wire.requestFrom() indefinitely rather than time out. Re-enable (restore the block below)
-  //once this is confirmed/ruled out - it exists for power savings, not correctness.
+  //Sleep block disabled (if (false && ...)) - suspected contributor to the intermittent I2C-read-
+  //hang bug: an ESP read landing as the unit enters sleep can badly delay/miss the ACK. Re-enable
+  //only once that's ruled out - exists for power savings, not correctness.
   if (false && currentMillis - previousMillis >= WAIT_TIME) {
     byte old_ADCSRA = ADCSRA;
     // disable ADC
@@ -279,7 +252,7 @@ void rotateToLetter(int toLetter) {
         stepper.setSpeed(stepperSpeed);
         //doing the rotation letterwise
         for (int i = 0; i < diffPosition; i++) {
-          currentPhaseProgress = (uint16_t)i; //DIAGNOSTIC, 2026-08-13
+          currentPhaseProgress = (uint16_t)i;
           float preciseStep = (float)STEPS / (float)AMOUNTFLAPS;
           int roundedStep = (int)preciseStep;
           missedSteps = missedSteps + ((float)preciseStep - (float)roundedStep);
@@ -297,10 +270,10 @@ void rotateToLetter(int toLetter) {
 #endif
         calibrate(false); //calibrate revolver and do not stop motor
         //startMotor();
-        currentPhase = PHASE_ROTATING; //DIAGNOSTIC, 2026-08-13 - calibrate() left it at PHASE_CALIBRATING, we're rotating to the target letter now
+        currentPhase = PHASE_ROTATING; //calibrate() left it at PHASE_CALIBRATING, we're rotating to the target letter now
         stepper.setSpeed(stepperSpeed);
         for (int i = 0; i < posLetter; i++) {
-          currentPhaseProgress = (uint16_t)i; //DIAGNOSTIC, 2026-08-13
+          currentPhaseProgress = (uint16_t)i;
           float preciseStep = (float)STEPS / (float)AMOUNTFLAPS;
           int roundedStep = (int)preciseStep;
           missedSteps = missedSteps + (float)preciseStep - (float)roundedStep;
@@ -326,15 +299,10 @@ void rotateToLetter(int toLetter) {
   }
 }
 
-//HARDENING, 2026-08-22 (see BUGFIX_LOG.md #85): every message from ESPMaster now ends with one
-//extra XOR-checksum byte over whatever payload precedes it (see i2cChecksum() in ESPMaster's
-//ServiceFlapFunctions.ino - the exact same computation, mirrored here). A mismatch means this
-//wasn't a genuine command - most plausibly a garbage/spurious byte sequence from an I2C bus glitch
-//(e.g. right after an ESPMaster reset/reflash - see BUGFIX_LOG.md's Offene Punkte for the
-//investigation that led here) rather than a real write - ignored entirely instead of risking
-//acting on it. Checking this is a much stronger defense than range-checking the letter alone: a
-//random byte already has a ~1-in-6 chance of looking like a valid 0-44 letter index by pure luck,
-//versus only a ~1-in-256 chance of also passing this checksum.
+//Every message ends with one XOR-checksum byte (mirrors i2cChecksum() in ESPMaster's
+//ServiceFlapFunctions.ino). A mismatch (likely I2C bus glitch noise) is ignored entirely - much
+//stronger than range-checking the letter alone (~1-in-6 chance of a random byte looking valid,
+//vs. ~1-in-256 of also passing this).
 void receiveLetter(int numBytes) {
   int receiveArray[5]; //array for received bytes - grew from 4 to 5 for the checksum byte
   uint16_t newCalOffset = 0;
@@ -373,25 +341,16 @@ void receiveLetter(int numBytes) {
 
   //Write received bytes to correct variables
   receivedNumber = receiveArray[0];
-  //BUG FIX, 2026-08-14: stepperSpeed=0 makes Stepper::setSpeed(0) divide by zero, leaving
-  //step_delay effectively infinite - Stepper::step() then spins forever waiting for a delay
-  //that never elapses, a real, live-observed hang with no recovery except a power cycle (see
-  //convertSpeed() in HelpersStringHandling.ino on the ESP side for the primary fix and full
-  //writeup). Defensive floor here too, independent of what the master actually sends.
+  //Defensive floor: stepperSpeed=0 makes Stepper::setSpeed(0) divide by zero, spinning
+  //Stepper::step() forever waiting for a delay that never elapses (needs a power cycle to
+  //recover) - independent of what the master actually sends.
   stepperSpeed = receiveArray[1] > 0 ? receiveArray[1] : 1;
   if (payloadLen >= 4) {
     newCalOffset = receiveArray[2] + (receiveArray[3] << 8);
     if (newCalOffset != calOffset) {
       calOffset = newCalOffset;
-      //DIAGNOSTIC FIX, 2026-08-13: this used to call writeToEEPROM(calOffset) directly, right
-      //here. receiveLetter() is Wire's onReceive callback, which on AVR runs *inside the TWI
-      //interrupt handler itself* - global interrupts are disabled for its entire duration.
-      //EEPROM.put() is a blocking, multi-millisecond-per-changed-byte operation (busy-waits on
-      //the EEPROM hardware). Running that inside an ISR blocks all other interrupts (including
-      //further I2C activity, and the millis()/micros() timer tick) for that whole time - a
-      //plausible contributor to this project's rare, hard-to-pin-down I2C read hangs,
-      //especially right after an offset write. Deferred to loop() instead, same pattern as
-      //forceRecalibrate below.
+      //Defer the actual EEPROM.put() to loop() - receiveLetter() runs inside the AVR's TWI
+      //interrupt handler with global interrupts disabled, and EEPROM.put() blocks for several ms.
       pendingEepromWrite = true;
       forceRecalibrate = true; //apply the new offset right away instead of waiting for the next full rotation
     }
@@ -403,7 +362,6 @@ void requestEvent() {
   Wire.write(currentlyrotating);
   Wire.write(lowByte(calOffset));
   Wire.write(highByte(calOffset));
-  //DIAGNOSTIC, 2026-08-13: see the comment on currentPhase near currentlyrotating
   Wire.write(currentPhase);
   Wire.write(lowByte(currentPhaseProgress));
   Wire.write(highByte(currentPhaseProgress));
@@ -448,7 +406,7 @@ int calibrate(bool initialCalibration) {
   Serial.println(F("calibrate revolver"));
 #endif
   currentlyrotating = 1; //set active state to active
-  currentPhase = PHASE_CALIBRATING; //DIAGNOSTIC, 2026-08-13 - see the comment near currentPhase's declaration
+  currentPhase = PHASE_CALIBRATING; //see the comment near currentPhase's declaration
   bool reachedMarker = false;
   stepper.setSpeed(stepperSpeed);
   int i = 0;
@@ -510,13 +468,13 @@ void stopMotor() {
   Serial.println(F("Motor Stop"));
 #endif
   currentlyrotating = 0; //set active state to not active
-  currentPhase = PHASE_IDLE; //DIAGNOSTIC, 2026-08-13 - see the comment near currentPhase's declaration
+  currentPhase = PHASE_IDLE; //see the comment near currentPhase's declaration
   currentPhaseProgress = 0;
   delay(100);
 }
 
 void startMotor() {
-  currentPhase = PHASE_ROTATING; //DIAGNOSTIC, 2026-08-13 - see the comment near currentPhase's declaration
+  currentPhase = PHASE_ROTATING; //see the comment near currentPhase's declaration
 #ifdef SERIAL_ENABLE
   Serial.println(F("Motor Start"));
 #endif

@@ -1,19 +1,7 @@
-// custom_crash_callback() lives in a real .cpp file, not a .ino, for a specific reason found
-// the hard way (2026-08-13): Arduino's sketch preprocessor auto-generates a forward
-// declaration for every top-level function it finds in .ino files, with plain C++ linkage.
-// The ESP8266 core declares custom_crash_callback() inside an `extern "C" { ... }` block
-// (core_esp8266_postmortem.cpp:37-373), so a definition here needs matching `extern "C"`
-// linkage to actually override the core's weak no-op stub - but doing that in a .ino
-// produces a hard compile error ("conflicting declaration ... with 'C' linkage" vs the
-// auto-generated 'C++' linkage prototype). Worse, the *silent* failure mode (before this was
-// caught) was deploying it anyway without extern "C": it compiles and links, but under a
-// C++-mangled symbol name that nothing references, so the linker just keeps the core's
-// original no-op - verified via `nm` on the .elf, where custom_crash_callback and the core's
-// own __custom_crash_callback resolved to the *same* address. A real crash was captured live
-// this session and /crash-log stayed empty even after that fix attempt, which is what led to
-// writing a deliberate test-crash endpoint (/debug/trigger-crash) and finally finding this.
-// Plain .cpp files aren't run through the sketch preprocessor at all, so this problem doesn't
-// exist here.
+// Must live in a real .cpp, not a .ino: the sketch preprocessor auto-generates a C++-linkage
+// forward declaration for every top-level .ino function, but the ESP8266 core declares this one
+// `extern "C"` - a .ino definition either fails to compile, or silently compiles under a mangled
+// symbol nothing references (linker keeps the core's no-op stub, /crash-log stays empty forever).
 #include <Arduino.h>
 #include <user_interface.h>
 #include "CrashLog.h"

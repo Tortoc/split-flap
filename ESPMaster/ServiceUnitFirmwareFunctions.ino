@@ -1,8 +1,7 @@
-//twiboot I2C client + push orchestration for updating Unit.ino firmware over I2C.
-//Only used when UNIT_BOOTLOADER_ENABLE is true - see Unit/BOOTLOADER_SETUP.md for the
-//one-time, physical setup this depends on (every unit must already be running twiboot).
+//twiboot I2C client + push orchestration for updating Unit.ino firmware over I2C. Only used when
+//UNIT_BOOTLOADER_ENABLE is true - see Unit/BOOTLOADER_SETUP.md (every unit must already run twiboot).
 //
-//Protocol verified directly against https://github.com/orempel/twiboot main.c (2026-08-09):
+//Protocol (verified against https://github.com/orempel/twiboot main.c):
 //  - abort boot timeout (heartbeat): SLA+W, 0x00, STOP
 //  - start application:              SLA+W, 0x01, 0x80, STOP
 //  - read chip info (8 bytes):       SLA+W, 0x02, 0x00, 0x00, 0x00, SLA+R, {8 bytes}, STOP
@@ -28,10 +27,8 @@
 //Tells the unit's running app (not the bootloader) to reboot into twiboot - see Unit.ino's
 //receiveLetter()/CMD_ENTER_BOOTLOADER handling. Sent to the unit's normal app address.
 void requestUnitEnterBootloader(int unitIndex) {
-  //HARDENING, 2026-08-22 (see BUGFIX_LOG.md #85): checksum byte appended, same as every other
-  //write path (writeToUnit()/writeOffsetToUnit(), ServiceFlapFunctions.ino) - this command is
-  //genuinely more consequential than a normal letter write (it reboots the unit), so it's
-  //important this isn't triggered by a spurious/misread byte sequence either.
+  //Checksum byte appended, same as every other write path - this command reboots the unit, so
+  //it's important it isn't triggered by a spurious/misread byte sequence.
   uint8_t sendArray[2] = {UNIT_BOOTLOADER_CMD, 0}; //speed byte - unused for this command, but the unit always reads 2 bytes
   Wire.beginTransmission(unitIndex);
   Wire.write(sendArray[0]);
@@ -40,32 +37,16 @@ void requestUnitEnterBootloader(int unitIndex) {
   Wire.endTransmission();
 }
 
-//Scans UNIT_BOOTLOADER_BASE_ADDRESS..+63 for a unit currently sitting in twiboot.
-//Our twiboot (Unit/bootloader/twiboot/main.c - a patched fork, see BOOTLOADER_SETUP.md) reads
-//the unit's own DIP switches at boot and adds them to TWI_ADDRESS_BASE, same as the app does -
-//so in normal operation bootAddress == UNIT_BOOTLOADER_BASE_ADDRESS + unitIndex already. Scanning
-//instead of assuming that directly is defense in depth (e.g. a shared power-cycle could
-//momentarily put more than one unit in bootloader mode at once) - it only ever proceeds if
-//exactly one unit answers as a bootloader right now.
+//Scans UNIT_BOOTLOADER_BASE_ADDRESS..+63 for a unit currently sitting in twiboot, rather than
+//assuming bootAddress == base+unitIndex - defense in depth against more than one unit landing in
+//bootloader mode at once (e.g. a shared power-cycle). Only proceeds if exactly one answers.
 //Returns the found address, or a negative sentinel: -1 = none found, -2 = more than one found.
 //
-//BUG FIX, 2026-08-15 (see BUGFIX_LOG.md #53): this used to call twibootReadChipInfo() - which
-//uses a repeated-start read (endTransmission(false) + requestFrom(), the exact pattern flagged
-//in esp8266/Arduino issue #5718 as able to leave the ESP8266's *software* I2C state stuck) -
-//against all candidate addresses, even the ones with nothing listening. Live-tested
-//today: doing that repeatedly, then immediately trying a real command against the one address
-//that *did* answer, consistently got "NACK on address" - the real unit's own address stopped
-//being acknowledged right after the scan touched it. Split into two passes instead: a cheap
-//presence-only check (plain beginTransmission()+endTransmission(), a full STOP each time - the
-//simple write-style pattern this project has always found reliable) against all candidate
-//addresses first, then the actual repeated-start chip-info read only once, against the single
-//confirmed candidate. Keeps the same multi-unit safety property (still checks the whole range
-//for ambiguity) while cutting the repeated-start operations down to at most 1 per scan.
-//
-//BUG FIX, 2026-08-23 (see BUGFIX_LOG.md #89): range widened from +15 to +63 to match the
-//DIP-switch addressing extension from 4 bits (0-15) to 6 bits (0-63) - see Unit.ino and
-//Unit/bootloader/twiboot/main.c. A unit jumpered to any of the newly-usable higher values would
-//otherwise sit outside this scan and be silently invisible to a firmware push.
+//Two passes, not one repeated-start read per address: a repeated-start read against every
+//address (even ones with nothing listening) was found to leave the ESP8266's software I2C state
+//stuck, making the real unit's own address stop acknowledging right after (esp8266/Arduino issue
+//#5718). So: a cheap presence-only check against every address first, then the real
+//repeated-start chip-info read only once, against the single confirmed candidate.
 int scanForBootloaderAddress(TwibootChipInfo &infoOut) {
   int foundAddress = -1;
   int foundCount = 0;
@@ -105,17 +86,10 @@ bool twibootHeartbeat(int bootAddress) {
 
 //Reads chip signature, flash page size and bootloader start address (= max writable flash address)
 //
-//BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #86): this used to send the address-select write with
-//endTransmission(false) (a repeated START, no STOP, before the read that follows). Research
-//(esp8266/Arduino issue #5718, "I2C changes for clock stretch and missing pulse before repeated
-//start") plus twiboot's own source (main.c's TWI_vect(), case 0xA0 "STOP or repeated START -> IDLE")
-//together explain a live-reproduced, deterministic push failure: twiboot's `cmd`/`addr` state
-//(which memory type/address a following read should serve) is NOT reset by a STOP condition - only
-//the now-inactive USE_CLOCKSTRETCH==0 branch touches anything there - so a full STOP between the
-//address-select write and the read works exactly like a repeated start from twiboot's side, without
-//tripping the ESP8266 core's own repeated-start/clock-stretch interaction bug. Switched to a real
-//STOP (endTransmission(true)) plus a short settle delay, the two workarounds this issue's own
-//discussion recommends.
+//Uses a real STOP + short settle delay between the address-select write and the read, not a
+//repeated START - a repeated START here triggered a deterministic push failure (esp8266/Arduino
+//issue #5718). twiboot doesn't reset its cmd/addr state on STOP, so this behaves the same from
+//twiboot's side without tripping the ESP8266 core bug.
 bool twibootReadChipInfo(int bootAddress, TwibootChipInfo &infoOut) {
   Wire.beginTransmission(bootAddress);
   Wire.write(TWIBOOT_CMD_ACCESS_MEMORY);
@@ -143,9 +117,7 @@ bool twibootReadChipInfo(int bootAddress, TwibootChipInfo &infoOut) {
 }
 
 //Reads `len` bytes of flash starting at `flashAddress` - used for the verify pass after every write.
-//BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #86): same repeated-start -> STOP change as
-//twibootReadChipInfo() above, for the same reason - this is the read that was actually observed
-//failing (deterministic verification mismatch on page 1 of a real push).
+//Same repeated-start -> STOP change as twibootReadChipInfo() above.
 bool twibootReadFlash(int bootAddress, uint16_t flashAddress, uint8_t* bufferOut, uint8_t len) {
   Wire.beginTransmission(bootAddress);
   Wire.write(TWIBOOT_CMD_ACCESS_MEMORY);
@@ -167,20 +139,13 @@ bool twibootReadFlash(int bootAddress, uint16_t flashAddress, uint8_t* bufferOut
   return true;
 }
 
-//Writes one full flash page. `data` must be exactly `pageSize` bytes (pad the source image's
-//final, partial page with 0xFF - the erased-flash value) - twiboot only commits the write once
-//it has received exactly pageSize data bytes, a short write is silently ignored, not an error.
+//Writes one full flash page. `data` must be exactly `pageSize` bytes (pad the final partial page
+//with 0xFF) - twiboot only commits once it has received exactly pageSize bytes, a short write is
+//silently ignored.
 //
-//BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #86): this used to go through Wire.beginTransmission()/
-//write()/endTransmission() - live-reproduced root cause of a deterministic verification failure on
-//every real push: the combined length here (4 header bytes + a full 128-byte page = 132 bytes)
-//exceeds Wire's internal 128-byte TX buffer, so the last 4 bytes silently never got queued and
-//twiboot's own byte-count trigger for actually committing the write was never reached - the flash
-//was never touched at all (proved via a byte-level diff: the "new" flash content read back after a
-//"successful-looking" write was actually just the old firmware's untouched bytes). twi_writeTo()
-//(twi.h) is the ESP8266 core's raw, unbuffered I2C write - no size limit, bypasses Wire's TX buffer
-//entirely - used here to send the whole transaction as one real write. Returns 0 on success,
-//matching Wire.endTransmission()'s convention.
+//IMPORTANT: uses twi_writeTo() (raw unbuffered I2C write), NOT Wire - this transaction is 132
+//bytes (4-byte header + 128-byte page), which exceeds Wire's 128-byte TX buffer and silently
+//drops the tail, so the flash never actually gets written even though the call appears to succeed.
 bool twibootWriteFlashPage(int bootAddress, uint16_t flashAddress, const uint8_t* data, uint8_t pageSize) {
   uint8_t buf[4 + UNIT_BOOTLOADER_MAX_PAGE_SIZE];
   buf[0] = TWIBOOT_CMD_ACCESS_MEMORY;
@@ -191,15 +156,9 @@ bool twibootWriteFlashPage(int bootAddress, uint16_t flashAddress, const uint8_t
   return twi_writeTo(bootAddress, buf, 4 + pageSize, 1) == 0; //sendStop=1, STOP triggers the actual erase+write
 }
 
-//Jumps into the freshly written application - only ever call this after every page (including
-//page 0) has been written AND read back and verified.
-//
-//DIAGNOSTIC, 2026-08-15: twiboot's own source (main.c, TWI_data_write(), case CMD_SWITCH_APPLICATION)
-//deliberately NACKs the second (BOOTTYPE_APPLICATION) byte of this exact command - the internal
-//`cmd` state is updated *before* the NACK is returned, so a NACK here should be the *expected*,
-//correct result, not a real failure. Live-tested today and the unit did NOT return to the app
-//despite this - logging the exact endTransmission() code (2=NACK on address, 3=NACK on data,
-//other=a real problem) to tell those cases apart. See BUGFIX_LOG.md #53.
+//Jumps into the freshly written application - only call after every page (including page 0) has
+//been written AND verified. twiboot deliberately NACKs this command's data byte (its internal
+//state already updated before the NACK) - that's the expected result, not a failure.
 bool twibootStartApplication(int bootAddress) {
   Wire.beginTransmission(bootAddress);
   Wire.write(TWIBOOT_CMD_SWITCH_APP);
@@ -213,25 +172,15 @@ bool twibootStartApplication(int bootAddress) {
 
 //Pushes the firmware currently stored at unitFirmwarePath to the given unit over I2C.
 //
-//Safety property this relies on: every page except page 0 (the interrupt vector table) is
-//written and verified FIRST. Page 0 - the point where a partially-updated app would become
-//unbootable - is only ever written once everything else has already been verified byte-for-byte.
-//So a failed/interrupted push always leaves the unit in one of two safe states: either the old,
-//fully-intact application (page 0 untouched), or the fully verified new one. It can never leave
-//a half-written app straddling both. If it stops responding as an app at all, it's not bricked -
-//the bootloader itself is never touched by this protocol (twiboot refuses to write anything at
-//or above its own start address) and a fresh push attempt on next reset can recover it.
-//BUG FIX, 2026-08-22 (see BUGFIX_LOG.md #86): twibootReadFlash() (the verify-read below) uses a
-//repeated-start I2C read - the exact pattern documented in BUGFIX_LOG.md #53 (esp8266/Arduino
-//issues #5718/#5528/#1025) as able to occasionally confuse this ESP8266 core's *software* I2C
-//state, corrupting just the read-back rather than reflecting a real flash-write problem. #53's fix
-//minimized this pattern for the boot-address scan, but every page verified during a real push
-//still hits it once - with 45+ pages per push, live-reproduced: a push consistently failed at
-//page 1 with an identical "verification mismatch", the signature of this bug rather than a real,
-//physical write error. Retrying the whole write+verify cycle for one page, with a bus-recovery
-//pass in between attempts, gives a confused I2C state a chance to clear before treating it as a
-//genuine failure. twiboot's own ~1s inactivity timeout isn't at risk here - these retries complete
-//in well under 100ms total, and any successful transaction (including a failed verify) resets it.
+//Safety property: every page except page 0 (the vector table, where a partial write means
+//unbootable) is written and verified FIRST - page 0 only after everything else is confirmed
+//byte-for-byte. A failed/interrupted push always leaves either the old, intact app or the fully
+//verified new one, never a half-written straddle. The bootloader itself is never touched by this
+//protocol, so a stuck unit isn't bricked - a fresh push attempt on next reset can recover it.
+//
+//writeAndVerifyPage() below retries with a bus-recovery pass in between: a repeated-start read
+//can occasionally confuse the ESP8266's software I2C state and corrupt just the read-back (not a
+//real write problem) - a retry gives that a chance to clear first. Cheap, well under 100ms.
 bool writeAndVerifyPage(int bootAddress, uint16_t flashAddress, uint8_t* writeBuffer, uint8_t* verifyBuffer,
                          uint8_t pageSize, String &failureReasonOut) {
   const int maxAttempts = 3;
@@ -252,11 +201,9 @@ bool writeAndVerifyPage(int bootAddress, uint16_t flashAddress, uint8_t* writeBu
     }
     if (memcmp(writeBuffer, verifyBuffer, pageSize) != 0) {
       failureReasonOut = "Verification mismatch on page at flash address " + String(flashAddress);
-      //DIAGNOSTIC, 2026-08-22 (see BUGFIX_LOG.md #86): a live-reproduced mismatch survived every
-      //fix tried so far (repeated-start->STOP, retry+bus-recovery) - dumping the actual bytes on
-      //both sides (once, not on every retry) to tell apart "read returned stale/old data" (would
-      //show a recognizable pattern, e.g. matching the previous firmware) from "genuinely scrambled/
-      //random" (points elsewhere, e.g. a real write corruption) without needing a logic analyzer.
+      //Dump the actual bytes on both sides (once, not every retry) - lets a stale-read mismatch
+      //(read-back matches old firmware) be told apart from a real write corruption (scrambled/
+      //random) without a logic analyzer.
       if (attempt == 0) {
         int diffCount = 0;
         int firstDiffIndex = -1;
@@ -370,11 +317,9 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   for (int page = 1; page < pageCount && allOk; page++) {
     uint16_t flashAddress = page * pageSize;
 
-    //BUG FIX, 2026-08-13: seek()'s return value used to be ignored. If it ever failed (unlikely
-    //on LittleFS for an in-bounds position, but not impossible), read() would silently continue
-    //from wherever the file cursor already was instead of `flashAddress` - writing the wrong
-    //bytes to this flash page while still reporting a clean verify (the verify-read would just
-    //match the same wrong data). Bail out cleanly instead of writing bad data.
+    //Check seek()'s return value - if it fails, read() would silently continue from the current
+    //file cursor instead of flashAddress, writing wrong bytes while still verifying clean
+    //(verify-read would just match the same wrong data). Bail out instead of writing bad data.
     if (!firmwareFile.seek(flashAddress)) {
       allOk = false;
       failureReason = "Failed to seek to offset " + String(flashAddress) + " in the stored firmware file (page " + String(page) + ")";

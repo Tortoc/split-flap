@@ -1,16 +1,7 @@
 //Aligns string on center of array and fills empty chars with spaces
 String centerString(String message) {
-  //BUG FIX, 2026-08-13: message.length() returns an unsigned int; `unitsAmount - message.length()`
-  //used to do that subtraction in unsigned arithmetic (the int operand gets promoted), so a
-  //message longer than unitsAmount wrapped around to a huge positive number instead of going
-  //negative. Divided by 2 for the padding loop below, that landed well within positive int
-  //range for very common length differences - the loop below would then try to run roughly a
-  //billion iterations, each concatenating onto the String (reallocating every time), which in
-  //practice means an out-of-memory crash/hang, not a clean failure. Reachable via completely
-  //normal use: the very first bytes of showText("OFFLINE") on WiFi disconnect force
-  //ALIGNMENT_MODE_CENTER, and "OFFLINE" (7 chars) is already longer than a lot of real-world
-  //unit counts. Casting to int first makes the subtraction happen in signed arithmetic, so a
-  //too-long message correctly produces a negative/zero pad amount instead of wrapping.
+  //message.length() is unsigned - cast to int first, or a too-long message wraps the subtraction
+  //to a huge positive pad amount instead of negative, driving the loop below into an OOM crash.
   int padTotal = unitsAmount - (int)message.length();
   if (padTotal > 0) {
     //Takes care of the left side
@@ -41,9 +32,7 @@ String createRepeatingString(char character) {
 
 //Aligns string on right side of array and fills empty chars with spaces
 String rightString(String message) {
-  //BUG FIX, 2026-08-13: same unsigned-underflow issue as centerString() above - cast to int
-  //first so a too-long message gives a (harmless, skips the loop) negative pad amount instead
-  //of an unsigned wraparound.
+  //Same unsigned-underflow issue as centerString() above.
   int rightSpaceAmount = unitsAmount - (int)message.length();
   for (int spaceIndex = 0; spaceIndex < rightSpaceAmount; spaceIndex++) {
     message = " " + message;
@@ -56,7 +45,7 @@ String rightString(String message) {
 
 //Aligns string on left side of array and fills empty chars with spaces
 String leftString(String message) {
-  //BUG FIX, 2026-08-13: same unsigned-underflow issue as centerString() above.
+  //Same unsigned-underflow issue as centerString() above.
   int leftSpaceAmount = unitsAmount - (int)message.length();
   for (int spaceIndex = 0; spaceIndex < leftSpaceAmount; spaceIndex++) {
     message = message + " ";
@@ -79,18 +68,8 @@ int convertSpeed(String flapSpeed) {
   flapSpeedInt = flapSpeed.toInt();
   flapSpeedInt = map(flapSpeedInt, 1, 100, MIN_SPEED, MAX_SPEED);
 
-  //BUG FIX, 2026-08-14: map() extrapolates rather than clamps for inputs outside [1,100] -
-  //the "/" POST handler validates *new* submissions (see the 2026-08-13 flapSpeed fix in
-  //BUGFIX_LOG.md), but that doesn't retroactively clean up a bad value already sitting in
-  //LittleFS from before that validation existed, and this function has other callers besides
-  //that handler. A stored value in roughly [-17,-9] maps to exactly 0 here, which becomes
-  //stepperSpeed=0 on the Unit - Stepper::setSpeed(0) divides by zero, leaving step_delay
-  //effectively infinite, so Stepper::step() spins forever waiting for a delay that never
-  //elapses: the motor never physically moves, phase/progress freeze mid-value, I2C keeps
-  //responding fine (a separate interrupt-driven path), and the unit needs a full power cycle
-  //to recover - a real, live-observed failure mode this was traced back to. Clamp
-  //defensively here so this function can never hand back anything outside the intended range,
-  //regardless of what's stored or who calls it.
+  //map() extrapolates, doesn't clamp - an out-of-range result maps to stepperSpeed=0 on the Unit,
+  //which divides by zero and spins the motor loop forever. Clamp defensively regardless of input.
   flapSpeedInt = constrain(flapSpeedInt, MIN_SPEED, MAX_SPEED);
 
   return flapSpeedInt;
