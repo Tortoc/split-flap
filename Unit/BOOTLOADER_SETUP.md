@@ -40,9 +40,9 @@ DIP-Schalter nicht.
 gepatchte Kopie** (nicht mehr das unveränderte Upstream-Projekt, siehe
 Kommentarblock am Dateianfang für Details/Attribution): Der Bootloader liest
 beim Start dieselben DIP-Pins wie `Unit.ino`s `getaddress()` und berechnet
-seine I2C-Adresse daraus. **Seit 2026-08-23 (siehe BUGFIX_LOG.md #89) sind
-das 6 Pins** (A0-A3 + D3/D4, Adressen 0-63 statt vorher 4 Pins/0-15) - siehe
-den Kommentar auf `addressPins` in `Unit.ino` für die genaue Pin-Zuordnung.
+seine I2C-Adresse daraus. **Seit 2026-08-23 sind das 6 Pins** (A0-A3 + D3/D4,
+Adressen 0-63 statt vorher 4 Pins/0-15) - siehe den Kommentar auf
+`addressPins` in `Unit.ino` für die genaue Pin-Zuordnung.
 Ergebnis:
 
 - **Ein einziges** kompiliertes Bootloader-Image für **alle** Units - keine
@@ -176,8 +176,8 @@ demselben Smoke-Test nach jeder einzelnen.
 ## Hintergrund: Warum der Master trotzdem noch scannt
 
 ESPMaster findet die Bootloader-Adresse einer Unit beim Update-Push per
-I2C-Scan (`0x29`-`0x68`, seit der 6-Bit-Erweiterung 2026-08-23, siehe
-BUGFIX_LOG.md #89 - vorher `0x29`-`0x38` für den alten 4-Bit-Bereich), statt
+I2C-Scan (`0x29`-`0x68`, seit der 6-Bit-Erweiterung 2026-08-23 - vorher
+`0x29`-`0x38` für den alten 4-Bit-Bereich), statt
 sie stur aus dem DIP-Wert zu berechnen. Da Bootloader und App jetzt immer
 dieselben Jumper lesen, sind beide Adressen praktisch immer synchron - der
 Scan ist also keine Notwendigkeit mehr, bleibt aber als zusätzliche

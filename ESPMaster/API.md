@@ -1,14 +1,7 @@
 # ESPMaster HTTP API
 
-Reference for every HTTP endpoint ESPMaster exposes. Written against the `/api/`-unified
-endpoint layout introduced in `BUGFIX_LOG.md` Punkt 74.
-
-> ⚠️ **Deployment status:** as of this writing, this `/api/` layout is compiled but **not yet
-> flashed to the device** - the ISP/USB programmer used to flash it is currently broken (see
-> `BUGFIX_LOG.md` Punkt 73/74 and "Offene Punkte"). The device is still running the older,
-> pre-Punkt-74 paths (`/admin/units`, `/settings`, `/admin/unit-offset`, etc. - no `/api/` prefix,
-> and `/exit-debug-mode`/`/enable-debug-mode` instead of `/api/debug-mode`). Once a working
-> programmer is available and this build is flashed and verified, remove this notice.
+Reference for every HTTP endpoint ESPMaster exposes, against the current `/api/`-unified
+endpoint layout.
 
 ## Conventions
 
@@ -126,8 +119,7 @@ speed, mode, WiFi status, etc.
 ```
 `otaPassword`/`timezone` duplicate `GET /api/ota-password`/`GET /api/timezone` (same values, same
 unauthenticated-by-design reasoning) - folded in here so the Administration view can populate its
-displays from this one already-fetched response instead of two more separate requests (see
-BUGFIX_LOG.md #80).
+displays from this one already-fetched response instead of two more separate requests.
 `otaEnabled` reflects the `OTA_ENABLE` compile flag (currently `false` in this build - see
 [`POST /api/ota-mode`](#post-apiota-mode)). `wifiSettingsResettable` reflects `WIFI_USE_DIRECT`
 being off (AP-config mode).
@@ -175,8 +167,8 @@ Trivial liveness check.
 
 ### `GET /api/heap`
 
-Free-heap diagnostic, added while chasing a real out-of-memory crash this session (see
-`BUGFIX_LOG.md` #42/#43). **Deliberately plain text, not JSON** - zero allocation risk of its own
+Free-heap diagnostic, added while chasing a real out-of-memory crash. **Deliberately plain
+text, not JSON** - zero allocation risk of its own
 (stack-only `char` buffer), which is the entire point on a heap-constrained device; converting
 this to JSON would reintroduce exactly the allocation this endpoint exists to avoid.
 
@@ -192,8 +184,8 @@ free=16480 frag=1% maxBlock=16368
 
 ### `GET /api/tcp-status`
 
-Live TCP connection-pool diagnostic, added while investigating `BUGFIX_LOG.md` #70 (this
-ESP8266's lwIP hard-caps at 5 simultaneous TCP connections). Same "plain text, zero allocation"
+Live TCP connection-pool diagnostic (this ESP8266's lwIP hard-caps at 5 simultaneous TCP
+connections). Same "plain text, zero allocation"
 reasoning as `/api/heap` above - walks lwIP's own internal linked lists directly.
 
 **Response** `200 text/plain`, e.g.:
@@ -222,7 +214,7 @@ Minimal connectivity/latency check, predates most other diagnostics on this list
 
 ### `GET /api/log`
 
-Last up to 50 entries from the in-memory serial log ring buffer (see `BUGFIX_LOG.md` #21).
+Last up to 50 entries from the in-memory serial log ring buffer.
 
 **Response** `200 application/json`:
 ```json
@@ -238,15 +230,14 @@ returned); `timestamp` is milliseconds since boot.
 
 Returns `503 text/plain` instead ("Too little free heap right now to safely build the log
 response - try again shortly") if free heap is below 4000 bytes at request time, rather than
-risking an allocation failure (see `BUGFIX_LOG.md` #44).
+risking an allocation failure.
 
 ---
 
 ### `GET /api/crash-log`
 
 The persisted on-device crash log - survives even if a live serial connection wasn't available at
-the moment of the crash (see `BUGFIX_LOG.md` #38 area). One JSON object per line (JSON Lines
-format), oldest first.
+the moment of the crash. One JSON object per line (JSON Lines format), oldest first.
 
 **Response** `200 application/jsonl` - raw file content, or an empty body if no crash log exists
 yet.
@@ -267,7 +258,7 @@ Legacy raw I2C bus scanner - pings every address 0-15 directly (not limited to a
 known as units) and reports what answered. Mostly superseded by
 [`GET /api/units`](#get-apiunits) for normal use; still useful for diagnosing address/wiring
 issues at a lower level. Response is deferred to `loop()` (real I2C traffic never runs inside the
-AsyncWebServer callback itself - see `BUGFIX_LOG.md` #10), so it can take a moment.
+AsyncWebServer callback itself), so it can take a moment.
 
 **Response** `200 application/json`:
 ```json
@@ -291,12 +282,12 @@ wiring/address gap. Returns `503 text/plain` if another scan is already in progr
 
 Live status and calibration offset for every known unit - what the Administration view's Units
 card polls. Deferred to `loop()`, same reasoning as `/api/i2c-scan` above. Uses the lightweight
-3-byte I2C read (status + offset only, see `BUGFIX_LOG.md` #77) - about half the I2C interrupt
-cost per unit versus the 6-byte read internal display logic uses, since this endpoint's response
-was never used for anything beyond status/offset.
+3-byte I2C read (status + offset only) - about half the I2C interrupt cost per unit versus the
+6-byte read internal display logic uses, since this endpoint's response was never used for
+anything beyond status/offset.
 
 **Query param** `detail` (any value, e.g. `?detail=1`): opts into the heavier 6-byte read instead,
-adding `phase`/`progress` to each unit (see `BUGFIX_LOG.md` #84) - added as a diagnostic for
+adding `phase`/`progress` to each unit - added as a diagnostic for
 watching a Unit that starts rotating with no ESPMaster-issued display job involved (the normal
 display-job wait logic's phase/progress logging never runs in that case). Not used by the
 Administration page itself - pass it manually (e.g. `curl`) when actively diagnosing.
@@ -365,9 +356,8 @@ Triggers a full recalibration of every known unit (picked up on the next `loop()
 ### `POST /api/web-file`
 
 Replaces `index.html` in place on the device's LittleFS, without touching any other file - lets
-the web UI be updated without a full filesystem reflash (which would wipe runtime settings; see
-`BUGFIX_LOG.md` #56). `index.html` is the *only* accepted filename since Punkt 72 merged the
-entire UI into one file.
+the web UI be updated without a full filesystem reflash (which would wipe runtime settings).
+`index.html` is the *only* accepted filename, since the entire UI lives in one file.
 
 **Auth:** requires `X-OTA-Password` header if a password is set.
 
@@ -379,9 +369,9 @@ entire UI into one file.
 - `400 text/plain` if the filename isn't `index.html`.
 - `401 text/plain` if the password is wrong.
 
-> ⚠️ No filesystem-space check happens before writing - see `BUGFIX_LOG.md` #71 for a real
-> incident where an upload silently produced a 0-byte file because the partition was full.
-> Verify byte-for-byte after uploading (`GET /` and compare length/content against the source).
+> ⚠️ No filesystem-space check happens before writing - a full partition can silently produce a
+> 0-byte file. Verify byte-for-byte after uploading (`GET /` and compare length/content against
+> the source).
 
 ---
 
@@ -406,10 +396,10 @@ push it yet.
 Pushes the firmware previously uploaded via `/api/units/firmware` to one unit over I2C (twiboot
 protocol). Deferred to `loop()` - a real push can take several seconds to a couple minutes.
 
-**Renamed 2026-08-22** (see `BUGFIX_LOG.md` #86) from `/api/units/firmware/push` - that path was a
-strict prefix-extension of the upload endpoint above and got silently intercepted by it
-(ESPAsyncWebServer's route matching for the two-callback upload form), making it completely
-unreachable. Always use a sibling path, never a sub-path of an upload endpoint's URL.
+**Renamed 2026-08-22** from `/api/units/firmware/push` - that path was a strict prefix-extension
+of the upload endpoint above and got silently intercepted by it (ESPAsyncWebServer's route
+matching for the two-callback upload form), making it completely unreachable. Always use a
+sibling path, never a sub-path of an upload endpoint's URL.
 
 **Auth:** requires `X-OTA-Password` header if a password is set.
 
@@ -436,9 +426,9 @@ On failure, `success: false` and an `error` field instead of `message`/`started`
 missing `bootAddress`/`pageSize`/`totalPages`/`pagesWritten` if the failure happened before the
 unit was even found, e.g. no unit answered in bootloader mode). The critical first flash page
 (interrupt vector table) is always written last and only after every other page is verified - a
-failed push leaves the old firmware fully intact (see `BUGFIX_LOG.md`'s twiboot section for the
-full safety argument). `400` if `id` is missing/invalid/out of range or no firmware has been
-uploaded yet; `401` on a wrong password; `503` if another push is already in progress.
+failed push leaves the old firmware fully intact. `400` if `id` is missing/invalid/out of range
+or no firmware has been uploaded yet; `401` on a wrong password; `503` if another push is already
+in progress.
 
 ---
 
@@ -479,7 +469,7 @@ in progress.
 
 Begins a browser-based ESPMaster firmware update (a compiled `.bin` sketch, no Arduino IDE
 required) - three-step, chunked protocol. See `POST /api/firmware-chunk` below for why this
-replaced a single-request upload (BUGFIX_LOG.md #88).
+replaced a single-request upload.
 
 **Auth:** requires `X-OTA-Password` header if a password is set.
 
@@ -500,9 +490,8 @@ Uploads one chunk of the firmware previously announced via `/api/firmware-start`
 repeatedly, once per chunk, **waiting for each response before sending the next chunk** - that
 wait is the whole point: the ESP8266 has no way to slow down incoming TCP data on its own, so an
 upload sent as fast as the network allows can outrun the flash-write speed no matter how large a
-receive buffer is used (see BUGFIX_LOG.md #83's Offene Punkte for the investigation, and #88 for
-the fix). Waiting for the response to each chunk lets the request/response round-trip itself
-provide backpressure.
+receive buffer is used. Waiting for the response to each chunk lets the request/response
+round-trip itself provide backpressure.
 
 **Auth:** requires `X-OTA-Password` header if a password is set.
 
@@ -556,8 +545,7 @@ serial debug log at the bottom of the main page). Persisted across reboots.
 `400 text/plain` if `enabled` is missing.
 
 Only present if `DEBUG_ENABLE` is compiled in (it is, by default). Replaces the former
-`GET /exit-debug-mode` / `GET /enable-debug-mode` (see `BUGFIX_LOG.md` #74 - those were a
-CSRF-via-GET gap, since closed).
+`GET /exit-debug-mode` / `GET /enable-debug-mode` - those were a CSRF-via-GET gap, since closed.
 
 ---
 

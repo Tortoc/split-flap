@@ -34,7 +34,7 @@ firmware/
 ```bash
 arduino-cli compile --fqbn "esp8266:esp8266:generic:eesz=4M1M" ESPMaster
 ```
-**Änderung 2026-08-21 (siehe BUGFIX_LOG.md #83):** vorher `eesz=1M128`
+**Änderung 2026-08-21:** vorher `eesz=1M128`
 (~438KB OTA-Slot). Per neuem `/api/heap`-Diagnosefeld
 (`ESP.getFlashChipRealSize()`) wurde festgestellt, dass der tatsächlich
 verbaute Chip 4MB groß ist - vorher nur zu einem Viertel genutzt, und der
@@ -52,7 +52,7 @@ passend zu `eesz=4M1M`s `spiffs_blocksize`/`spiffs_start`/`spiffs_end` in
 Flashen ebenfalls geändert: `0x300000` statt `0xDB000` (siehe `boards.txt`s
 `generic.menu.eesz.4M1M.build.spiffs_start`).
 
-**Änderung 2026-08-31 (siehe BUGFIX_LOG.md #94):** `mklittlefs` läuft nicht
+**Änderung 2026-08-31:** `mklittlefs` läuft nicht
 mehr direkt gegen [`ESPMaster/data/`](../ESPMaster/data), sondern gegen eine
 Kopie davon, in der `index.html` durch ein gzip-komprimiertes
 `index.html.gz` ersetzt ist (`gzip -9 -k -c ESPMaster/data/index.html >
