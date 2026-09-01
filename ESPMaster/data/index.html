@@ -1055,6 +1055,11 @@
 					Countdown
 				</label>
 				<label class="ls-rail-item">
+					<input form="form" onchange="setDeviceModeTab(this.value)" type="radio" id="modeCountup" name="deviceMode" value="countup" />
+					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 3v5h5"></path><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"></path><path d="M12 7v5l4 2"></path></svg>
+					Countup
+				</label>
+				<label class="ls-rail-item">
 					<input form="form" onchange="setDeviceModeTab(this.value)" type="radio" id="modeRotation" name="deviceMode" value="rotation" />
 					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17.65 6.35A8 8 0 1 0 19.9 13"></path><path d="M17 4v5h-5"></path></svg>
 					Rotation
@@ -1165,6 +1170,25 @@
 									</div>
 								</div>
 								<p class="note">Ohne Präfix und Suffix wird nur die Anzahl der Tage angezeigt.</p>
+							</div>
+
+							<div id="tab-countup" class="tab hidden">
+								<div class="ls-field-grid">
+									<div class="ls-field">
+										<label for="inputCountupPrefix" class="ls-microlabel">Präfix (optional)</label>
+										<input type="text" id="inputCountupPrefix" name="countupPrefix" autocomplete="off" maxlength="40" placeholder="z.B. Seit" />
+									</div>
+									<div class="ls-field">
+										<label for="inputCountupDateTime" class="ls-microlabel">Countup-Startdatum</label>
+										<input type="date" id="inputCountupDateTime" name="countupDateTime">
+										<input type="hidden" id="inputHiddenCountupDateTimeUnix" name="countupDateTimeUnix" value="0" />
+									</div>
+									<div class="ls-field">
+										<label for="inputCountupSuffix" class="ls-microlabel">Suffix (optional)</label>
+										<input type="text" id="inputCountupSuffix" name="countupSuffix" autocomplete="off" maxlength="40" placeholder="z.B. Tage" />
+									</div>
+								</div>
+								<p class="note">Zeigt die Anzahl der vollen Tage seit dem Startdatum. Ohne Präfix und Suffix wird nur die Anzahl der Tage angezeigt.</p>
 							</div>
 
 							<div id="tab-clock" class="tab hidden">
@@ -1476,6 +1500,7 @@
 		//Set on countdown submit, read by loadPage() right after - keeps the field showing what the
 		//user typed instead of the timezone-round-tripped server value (same idea as encodedTextValue).
 		var pendingCountdownDateOverride = null;
+		var pendingCountupDateOverride = null;
 
 		//Used for submission!
 		const form = document.getElementById('form');
@@ -1525,6 +1550,15 @@
 						var currentCountdownDateTime = new Date(currentCountdownDateTimeText);
 						var time = Math.floor((currentCountdownDateTime.getTime() - tzOffset) / 1000);
 						document.getElementById('inputHiddenCountdownDateTimeUnix').value = time;
+
+						break;
+					case "countup":
+						var currentCountupDateTimeText = document.getElementById('inputCountupDateTime').value;
+						pendingCountupDateOverride = currentCountupDateTimeText;
+
+						var currentCountupDateTime = new Date(currentCountupDateTimeText);
+						var time = Math.floor((currentCountupDateTime.getTime() - tzOffset) / 1000);
+						document.getElementById('inputHiddenCountupDateTimeUnix').value = time;
 
 						break;
 					case "rotation":
@@ -1624,6 +1658,7 @@
 				setUnitCount("10");
 				setWiFiStatus("Connected", -65, "192.168.1.100"); // Mock WiFi status for development
 				setCountdownDate((Date.now() / 1000) + (24 * 60 * 60));
+				setCountupDate(Date.now() / 1000);
 				showScheduledMessages([
 					{
 						"scheduledDateTimeUnix": 1690134480,
@@ -1674,12 +1709,19 @@
 									document.getElementById('inputCountdownDateTime').value = pendingCountdownDateOverride;
 									pendingCountdownDateOverride = null;
 								}
+								setCountupDate(responseObject.countupSinceDateUnix);
+								if (pendingCountupDateOverride !== null) {
+									document.getElementById('inputCountupDateTime').value = pendingCountupDateOverride;
+									pendingCountupDateOverride = null;
+								}
 								setWiFiStatus(responseObject.wifiStatus, responseObject.wifiRssi, responseObject.wifiIp);
 
 								document.getElementById('inputClockFormat').value = responseObject.clockFormat || "";
 								document.getElementById('inputDateFormat').value = responseObject.dateFormat || "";
 								document.getElementById('inputCountdownPrefix').value = responseObject.countdownPrefix || "";
 								document.getElementById('inputCountdownSuffix').value = responseObject.countdownSuffix || "";
+								document.getElementById('inputCountupPrefix').value = responseObject.countupPrefix || "";
+								document.getElementById('inputCountupSuffix').value = responseObject.countupSuffix || "";
 								//Rotation items aren't part of this response - load them now too if rotation is
 								//the saved mode, so the list isn't empty until the user re-clicks the tab.
 								if (responseObject.deviceMode === "rotation") {
@@ -1800,6 +1842,9 @@
 				case "countdown":
 					document.getElementById("modeCountdown").checked = true;
 					break;
+				case "countup":
+					document.getElementById("modeCountup").checked = true;
+					break;
 				case "rotation":
 					document.getElementById("modeRotation").checked = true;
 					break;
@@ -1905,6 +1950,24 @@
 			}
 
 			currentCountdownDate.min = convertDateToString(nextDayDate);
+		}
+
+		//Countup counts days elapsed since a date, so - unlike Countdown above - it's constrained to
+		//today or earlier (a "since" date in the future doesn't make sense), defaulting to today.
+		function setCountupDate(dateUnix) {
+			var currentCountupDate = document.getElementById('inputCountupDateTime');
+			var tzOffset = timezoneOffset * 60000;
+			var currentDate = (new Date(Date.now() - tzOffset));
+
+			if (dateUnix !== 0) {
+				var countupDate = new Date(dateUnix * 1000);
+				currentCountupDate.value = convertDateToString(countupDate);
+			}
+			else {
+				currentCountupDate.value = convertDateToString(currentDate);
+			}
+
+			currentCountupDate.max = convertDateToString(currentDate);
 		}
 
 		function convertDateToString(dateTime) {

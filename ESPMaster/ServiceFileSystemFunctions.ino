@@ -11,6 +11,7 @@ void initialiseFileSystem() {
 void loadValuesFromFileSystem() {
   //Load values saved in LittleFS
   countdownToDateUnix = readFile(LittleFS, countdownPath, "0");
+  countupSinceDateUnix = readFile(LittleFS, countupPath, "0");
   alignment = readFile(LittleFS, alignmentPath, ALIGNMENT_MODE_LEFT);
   flapSpeed = readFile(LittleFS, flapSpeedPath, "80");
   deviceMode = readFile(LittleFS, deviceModePath, DEVICE_MODE_TEXT);
@@ -22,6 +23,8 @@ void loadValuesFromFileSystem() {
   //stays "" on later boots.
   countdownPrefix = readFile(LittleFS, countdownPrefixPath, countdownPrefix);
   countdownSuffix = readFile(LittleFS, countdownSuffixPath, countdownSuffix);
+  countupPrefix = readFile(LittleFS, countupPrefixPath, countupPrefix);
+  countupSuffix = readFile(LittleFS, countupSuffixPath, countupSuffix);
 
   String scheduledMessagesJson = readFile(LittleFS, scheduledMessagesPath, "");
   if (scheduledMessagesJson != "") {
@@ -58,6 +61,7 @@ void loadValuesFromFileSystem() {
   SerialPrintln("   Flap Speed: " + flapSpeed);
   SerialPrintln("   Device Mode: " + deviceMode);
   SerialPrintln("   Countdown to Date UNIX: " + countdownToDateUnix);
+  SerialPrintln("   Countup since Date UNIX: " + countupSinceDateUnix);
   SerialPrint("   Scheduled Message Count: ");
   SerialPrintln(scheduledMessages.size());
   SerialPrint("   Rotation Item Count: ");

@@ -111,6 +111,11 @@ String clockFormat = "HH:mm";
 String countdownPrefix = "";
 String countdownSuffix = "Tage";
 
+//Countup display prefix/suffix - same idea as Countdown above, but for days elapsed *since* a
+//date instead of days remaining *until* one. See buildCountupText().
+String countupPrefix = "";
+String countupSuffix = "Tage";
+
 //How long to show a message for when a scheduled message is shown for
 const int scheduledMessageDisplayTimeMillis = 7500;
 
@@ -173,6 +178,9 @@ const char* PARAM_DATE_FORMAT = "dateFormat";
 const char* PARAM_ROTATION_ITEMS = "rotationItems";
 const char* PARAM_COUNTDOWN_PREFIX = "countdownPrefix";
 const char* PARAM_COUNTDOWN_SUFFIX = "countdownSuffix";
+const char* PARAM_COUNTUP_DATE = "countupDateTimeUnix";
+const char* PARAM_COUNTUP_PREFIX = "countupPrefix";
+const char* PARAM_COUNTUP_SUFFIX = "countupSuffix";
 const char* PARAM_ID = "id";
 const char* PARAM_UNIT_OFFSET = "offset";
 
@@ -181,6 +189,7 @@ const char* DEVICE_MODE_TEXT = "text";
 const char* DEVICE_MODE_CLOCK = "clock";
 const char* DEVICE_MODE_DATE = "date";
 const char* DEVICE_MODE_COUNTDOWN = "countdown";
+const char* DEVICE_MODE_COUNTUP = "countup";
 const char* DEVICE_MODE_ROTATION = "rotation";
 
 //Alignment options
@@ -201,6 +210,9 @@ const char* dateFormatPath = "/dateformat.txt";
 const char* rotationItemsPath = "/rotation-items.txt";
 const char* countdownPrefixPath = "/countdownprefix.txt";
 const char* countdownSuffixPath = "/countdownsuffix.txt";
+const char* countupPath = "/countup.txt";
+const char* countupPrefixPath = "/countupprefix.txt";
+const char* countupSuffixPath = "/countupsuffix.txt";
 
 //Variables for storing things for checking and use in normal running
 String alignment = "";
@@ -208,6 +220,7 @@ String flapSpeed = "";
 String inputText = "";
 String deviceMode = "";
 String countdownToDateUnix = "";
+String countupSinceDateUnix = "";
 String lastWrittenText = "";
 String lastReceivedMessageDateTime = "";
 bool alignmentUpdated = false;
@@ -604,6 +617,7 @@ void setup() {
       minimalDoc["lastTimeReceivedMessageDateTime"] = lastReceivedMessageDateTime;
       minimalDoc["lastWrittenText"] = lastWrittenText;
       minimalDoc["countdownToDateUnix"] = atol(countdownToDateUnix.c_str());
+      minimalDoc["countupSinceDateUnix"] = atol(countupSinceDateUnix.c_str());
       minimalDoc["wifiStatus"] = WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected";
       minimalDoc["wifiRssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
       minimalDoc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
@@ -622,6 +636,8 @@ void setup() {
       minimalDoc["dateFormat"] = dateFormat;
       minimalDoc["countdownPrefix"] = countdownPrefix;
       minimalDoc["countdownSuffix"] = countdownSuffix;
+      minimalDoc["countupPrefix"] = countupPrefix;
+      minimalDoc["countupSuffix"] = countupSuffix;
 
       // Try to get scheduled messages quickly (with timeout)
       unsigned long beforeScheduled = millis();
@@ -1277,7 +1293,12 @@ void setup() {
       String newCountdownPrefixValue = "";
       bool hasNewCountdownSuffixValue = false;
       String newCountdownSuffixValue = "";
-      
+      String newCountupSinceDateUnixValue = "";
+      bool hasNewCountupPrefixValue = false;
+      String newCountupPrefixValue = "";
+      bool hasNewCountupSuffixValue = false;
+      String newCountupSuffixValue = "";
+
       int params = request->params();
       for (int paramIndex = 0; paramIndex < params; paramIndex++) {
         AsyncWebParameter* p = request->getParam(paramIndex);
@@ -1297,7 +1318,7 @@ void setup() {
           //HTTP POST device mode value
           if (p->name() == PARAM_DEVICEMODE) {
             String receivedValue = p->value();
-            if (receivedValue == DEVICE_MODE_TEXT || receivedValue == DEVICE_MODE_CLOCK || receivedValue == DEVICE_MODE_DATE || receivedValue == DEVICE_MODE_COUNTDOWN || receivedValue == DEVICE_MODE_ROTATION) {
+            if (receivedValue == DEVICE_MODE_TEXT || receivedValue == DEVICE_MODE_CLOCK || receivedValue == DEVICE_MODE_DATE || receivedValue == DEVICE_MODE_COUNTDOWN || receivedValue == DEVICE_MODE_COUNTUP || receivedValue == DEVICE_MODE_ROTATION) {
               newDeviceModeValue = receivedValue;
             }
             else {
@@ -1371,6 +1392,18 @@ void setup() {
             }
           }
 
+          //HTTP POST Countup Seconds (the date to count days elapsed since)
+          if (p->name() == PARAM_COUNTUP_DATE) {
+            String receivedValue = p->value().c_str();
+            if (isNumber(receivedValue)) {
+              newCountupSinceDateUnixValue = receivedValue;
+            }
+            else {
+              SerialPrintln("Countup date provided was not valid. Invalid Value: " + receivedValue);
+              submissionError = true;
+            }
+          }
+
           //Clock/date format, e.g. "HH:mm:ss" - see convertUserDateFormatToEzTime().
           if (p->name() == PARAM_CLOCK_FORMAT) {
             if (p->value().length() > 40) {
@@ -1407,6 +1440,26 @@ void setup() {
             } else {
               newCountdownSuffixValue = p->value();
               hasNewCountdownSuffixValue = true;
+            }
+          }
+
+          //HTTP POST Countup prefix/suffix - same "" is deliberate reasoning as Countdown above.
+          if (p->name() == PARAM_COUNTUP_PREFIX) {
+            if (p->value().length() > 40) {
+              SerialPrintln("countupPrefix provided was too long (max 40 chars)");
+              submissionError = true;
+            } else {
+              newCountupPrefixValue = p->value();
+              hasNewCountupPrefixValue = true;
+            }
+          }
+          if (p->name() == PARAM_COUNTUP_SUFFIX) {
+            if (p->value().length() > 40) {
+              SerialPrintln("countupSuffix provided was too long (max 40 chars)");
+              submissionError = true;
+            } else {
+              newCountupSuffixValue = p->value();
+              hasNewCountupSuffixValue = true;
             }
           }
 
@@ -1459,6 +1512,14 @@ void setup() {
           SerialPrintln("Countdown Date Time Unix Updated: " + countdownToDateUnix);
         }
 
+        //Only if countup date has changed
+        if (newCountupSinceDateUnixValue != "" && countupSinceDateUnix != newCountupSinceDateUnixValue) {
+          countupSinceDateUnix = newCountupSinceDateUnixValue;
+
+          writeFile(LittleFS, countupPath, countupSinceDateUnix.c_str());
+          SerialPrintln("Countup Since Date Unix Updated: " + countupSinceDateUnix);
+        }
+
         //Only if the clock/date format has changed
         if (newClockFormatValue != "" && clockFormat != newClockFormatValue) {
           clockFormat = newClockFormatValue;
@@ -1483,6 +1544,18 @@ void setup() {
 
           writeFile(LittleFS, countdownSuffixPath, countdownSuffix.c_str());
           SerialPrintln("Countdown Suffix Updated: " + countdownSuffix);
+        }
+        if (hasNewCountupPrefixValue && countupPrefix != newCountupPrefixValue) {
+          countupPrefix = newCountupPrefixValue;
+
+          writeFile(LittleFS, countupPrefixPath, countupPrefix.c_str());
+          SerialPrintln("Countup Prefix Updated: " + countupPrefix);
+        }
+        if (hasNewCountupSuffixValue && countupSuffix != newCountupSuffixValue) {
+          countupSuffix = newCountupSuffixValue;
+
+          writeFile(LittleFS, countupSuffixPath, countupSuffix.c_str());
+          SerialPrintln("Countup Suffix Updated: " + countupSuffix);
         }
 
         //Rotation items are always submitted as the complete list (see index.html) - a full
@@ -2218,6 +2291,7 @@ void loop() {
 
     checkScheduledMessages();
     checkCountdown();
+    checkCountup();
     checkRotation();
 #if WIFI_USE_DIRECT == false
     checkWifiScanRequest();
@@ -2232,7 +2306,7 @@ void loop() {
         //rotationCurrentAlignment ("" = inherit the default) is set every tick by checkRotation().
         showText(inputText, 0, rotationCurrentAlignment);
       }
-      else if (deviceMode == DEVICE_MODE_TEXT || deviceMode == DEVICE_MODE_COUNTDOWN) {
+      else if (deviceMode == DEVICE_MODE_TEXT || deviceMode == DEVICE_MODE_COUNTDOWN || deviceMode == DEVICE_MODE_COUNTUP) {
         showText(inputText);
       }
       else if (deviceMode == DEVICE_MODE_DATE) {
