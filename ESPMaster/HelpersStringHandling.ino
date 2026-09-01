@@ -204,6 +204,43 @@ LList<String> processSentenceToLines(String sentence) {
   return lines;
 }
 
+//Translates the user-facing format syntax (e.g. "HH:mm:ss", "dd.MM.yyyy") into ezTime's own
+//PHP-date()-style tokens, which Timezone::dateTime() understands. Longest tokens first, so "yyyy"
+//isn't chopped into four "y" matches.
+String convertUserDateFormatToEzTime(String userFormat) {
+  struct FormatToken { const char* from; const char* to; };
+  static const FormatToken tokens[] = {
+    {"yyyy", "Y"}, {"yy", "y"},
+    {"MMMM", "F"}, {"MMM", "M"}, {"MM", "m"}, {"M", "n"},
+    {"dd", "d"}, {"d", "j"},
+    {"EEEE", "l"}, {"EEE", "D"},
+    {"HH", "H"}, {"H", "G"},
+    {"hh", "h"}, {"h", "g"},
+    {"mm", "i"},
+    {"ss", "s"},
+  };
+
+  String result = "";
+  int i = 0;
+  while (i < (int)userFormat.length()) {
+    bool matched = false;
+    for (unsigned int t = 0; t < sizeof(tokens) / sizeof(tokens[0]); t++) {
+      String from = tokens[t].from;
+      if (userFormat.substring(i, i + from.length()) == from) {
+        result += tokens[t].to;
+        i += from.length();
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      result += userFormat[i];
+      i++;
+    }
+  }
+  return result;
+}
+
 //Used for ensuring a string is a number
 bool isNumber(String str) {
   char* endPtr;

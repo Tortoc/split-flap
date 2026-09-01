@@ -16,13 +16,43 @@ void loadValuesFromFileSystem() {
   deviceMode = readFile(LittleFS, deviceModePath, DEVICE_MODE_TEXT);
   otaPassword = readFile(LittleFS, otaPasswordPath, "splitflap"); //persisted, not a compile-time constant
   timezoneSetting = readFile(LittleFS, timezonePath, "Europe/Berlin"); //persisted, not a compile-time constant
+  clockFormat = readFile(LittleFS, clockFormatPath, clockFormat);
+  dateFormat = readFile(LittleFS, dateFormatPath, dateFormat);
+  //readFile()'s defaultValue only applies if the file doesn't exist yet - a deliberately saved ""
+  //stays "" on later boots.
+  countdownPrefix = readFile(LittleFS, countdownPrefixPath, countdownPrefix);
+  countdownSuffix = readFile(LittleFS, countdownSuffixPath, countdownSuffix);
 
   String scheduledMessagesJson = readFile(LittleFS, scheduledMessagesPath, "");
-  if (scheduledMessagesJson != "") {    
+  if (scheduledMessagesJson != "") {
     SerialPrintln("Loading Scheduled Messages");
     readScheduledMessagesFromJson(scheduledMessagesJson);
   }
-  
+
+  //Loaded directly, not via replaceRotationItemsFromJson() - that also resets playback position
+  //and re-persists the file, which shouldn't happen on a plain boot load.
+  String rotationItemsJson = readFile(LittleFS, rotationItemsPath, "[]");
+  if (rotationItemsJson != "" && rotationItemsJson != "[]") {
+    SerialPrintln("Loading Rotation Items");
+    JsonDocument rotationJsonDocument;
+    DeserializationError rotationDeserialisationError = deserializeJson(rotationJsonDocument, rotationItemsJson);
+    if (!rotationDeserialisationError && rotationJsonDocument.is<JsonArray>()) {
+      for (JsonVariant value : rotationJsonDocument.as<JsonArray>()) {
+        if (rotationItemCount >= ROTATION_ITEMS_MAX) {
+          break;
+        }
+        RotationItem &item = rotationItems[rotationItemCount];
+        item.Type = value["type"] | DEVICE_MODE_TEXT;
+        item.Value = String((const char*)(value["value"] | ""));
+        item.Format = String((const char*)(value["format"] | ""));
+        item.TargetDateTimeUnix = value["targetDateTimeUnix"] | 0;
+        item.DurationSeconds = value["durationSeconds"] | 5;
+        item.Alignment = String((const char*)(value["alignment"] | ""));
+        rotationItemCount++;
+      }
+    }
+  }
+
   SerialPrintln("Loaded Settings:");
   SerialPrintln("   Alignment: " + alignment);
   SerialPrintln("   Flap Speed: " + flapSpeed);
@@ -30,6 +60,8 @@ void loadValuesFromFileSystem() {
   SerialPrintln("   Countdown to Date UNIX: " + countdownToDateUnix);
   SerialPrint("   Scheduled Message Count: ");
   SerialPrintln(scheduledMessages.size());
+  SerialPrint("   Rotation Item Count: ");
+  SerialPrintln(rotationItemCount);
 }
 
 //Read File from LittleFS

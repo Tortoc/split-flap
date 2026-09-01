@@ -1,15 +1,14 @@
 //twiboot I2C client + push orchestration for updating Unit.ino firmware over I2C. Only used when
-//UNIT_BOOTLOADER_ENABLE is true - see Unit/BOOTLOADER_SETUP.md (every unit must already run twiboot).
+//UNIT_BOOTLOADER_ENABLE is true - every unit must already run twiboot, see Unit/BOOTLOADER_SETUP.md.
 //
-//Protocol (verified against https://github.com/orempel/twiboot main.c):
-//  - abort boot timeout (heartbeat): SLA+W, 0x00, STOP
-//  - start application:              SLA+W, 0x01, 0x80, STOP
-//  - read chip info (8 bytes):       SLA+W, 0x02, 0x00, 0x00, 0x00, SLA+R, {8 bytes}, STOP
-//  - read flash:                     SLA+W, 0x02, 0x01, addrH, addrL, SLA+R, {N bytes}, STOP
-//  - write one flash page:           SLA+W, 0x02, 0x01, addrH, addrL, {pageSize bytes}, STOP
-//    (read vs write is NOT a different opcode - only whether a repeated-start read follows,
-//    or exactly pageSize data bytes are written directly. A page only commits on STOP if
-//    exactly pageSize data bytes were sent - fewer bytes are silently ignored.)
+//Protocol (https://github.com/orempel/twiboot):
+//  - abort boot timeout: SLA+W, 0x00, STOP
+//  - start application:  SLA+W, 0x01, 0x80, STOP
+//  - read chip info:     SLA+W, 0x02, 0x00, 0x00, 0x00, SLA+R, {8 bytes}, STOP
+//  - read flash:         SLA+W, 0x02, 0x01, addrH, addrL, SLA+R, {N bytes}, STOP
+//  - write flash page:   SLA+W, 0x02, 0x01, addrH, addrL, {pageSize bytes}, STOP
+//    (read vs write differ only in whether a repeated-start read follows; a page only commits if
+//    exactly pageSize bytes were sent)
 #if UNIT_BOOTLOADER_ENABLE == true
 
 #include <string.h>
@@ -37,16 +36,13 @@ void requestUnitEnterBootloader(int unitIndex) {
   Wire.endTransmission();
 }
 
-//Scans UNIT_BOOTLOADER_BASE_ADDRESS..+63 for a unit currently sitting in twiboot, rather than
-//assuming bootAddress == base+unitIndex - defense in depth against more than one unit landing in
-//bootloader mode at once (e.g. a shared power-cycle). Only proceeds if exactly one answers.
-//Returns the found address, or a negative sentinel: -1 = none found, -2 = more than one found.
+//Scans UNIT_BOOTLOADER_BASE_ADDRESS..+63 for a unit sitting in twiboot, rather than assuming
+//bootAddress == base+unitIndex - guards against more than one unit being in bootloader mode at
+//once. Returns the found address, or -1 (none found) / -2 (more than one found).
 //
-//Two passes, not one repeated-start read per address: a repeated-start read against every
-//address (even ones with nothing listening) was found to leave the ESP8266's software I2C state
-//stuck, making the real unit's own address stop acknowledging right after (esp8266/Arduino issue
-//#5718). So: a cheap presence-only check against every address first, then the real
-//repeated-start chip-info read only once, against the single confirmed candidate.
+//Two passes, not one repeated-start read per address: a repeated-start read against an address
+//with nothing listening leaves the ESP8266's software I2C state stuck (esp8266/Arduino #5718). So:
+//a cheap presence check against every address first, then one real chip-info read.
 int scanForBootloaderAddress(TwibootChipInfo &infoOut) {
   int foundAddress = -1;
   int foundCount = 0;
@@ -84,12 +80,9 @@ bool twibootHeartbeat(int bootAddress) {
   return Wire.endTransmission() == 0;
 }
 
-//Reads chip signature, flash page size and bootloader start address (= max writable flash address)
-//
-//Uses a real STOP + short settle delay between the address-select write and the read, not a
-//repeated START - a repeated START here triggered a deterministic push failure (esp8266/Arduino
-//issue #5718). twiboot doesn't reset its cmd/addr state on STOP, so this behaves the same from
-//twiboot's side without tripping the ESP8266 core bug.
+//Reads chip signature, flash page size and bootloader start address (= max writable flash address).
+//Uses a real STOP + short settle delay, not a repeated START - a repeated START here triggers an
+//ESP8266 core bug (esp8266/Arduino #5718); twiboot doesn't reset its state on STOP either way.
 bool twibootReadChipInfo(int bootAddress, TwibootChipInfo &infoOut) {
   Wire.beginTransmission(bootAddress);
   Wire.write(TWIBOOT_CMD_ACCESS_MEMORY);
@@ -140,12 +133,8 @@ bool twibootReadFlash(int bootAddress, uint16_t flashAddress, uint8_t* bufferOut
 }
 
 //Writes one full flash page. `data` must be exactly `pageSize` bytes (pad the final partial page
-//with 0xFF) - twiboot only commits once it has received exactly pageSize bytes, a short write is
-//silently ignored.
-//
-//IMPORTANT: uses twi_writeTo() (raw unbuffered I2C write), NOT Wire - this transaction is 132
-//bytes (4-byte header + 128-byte page), which exceeds Wire's 128-byte TX buffer and silently
-//drops the tail, so the flash never actually gets written even though the call appears to succeed.
+//with 0xFF) - a short write is silently ignored. Uses twi_writeTo() (raw I2C), not Wire - this
+//transaction is 132 bytes, over Wire's 128-byte TX buffer, which would silently drop the tail.
 bool twibootWriteFlashPage(int bootAddress, uint16_t flashAddress, const uint8_t* data, uint8_t pageSize) {
   uint8_t buf[4 + UNIT_BOOTLOADER_MAX_PAGE_SIZE];
   buf[0] = TWIBOOT_CMD_ACCESS_MEMORY;
@@ -172,15 +161,12 @@ bool twibootStartApplication(int bootAddress) {
 
 //Pushes the firmware currently stored at unitFirmwarePath to the given unit over I2C.
 //
-//Safety property: every page except page 0 (the vector table, where a partial write means
-//unbootable) is written and verified FIRST - page 0 only after everything else is confirmed
-//byte-for-byte. A failed/interrupted push always leaves either the old, intact app or the fully
-//verified new one, never a half-written straddle. The bootloader itself is never touched by this
-//protocol, so a stuck unit isn't bricked - a fresh push attempt on next reset can recover it.
+//Safety: every page except page 0 (the vector table) is written and verified FIRST - page 0 only
+//after everything else is confirmed byte-for-byte, so a failed push never leaves a half-written
+//app. The bootloader itself is never touched, so a stuck unit isn't bricked.
 //
-//writeAndVerifyPage() below retries with a bus-recovery pass in between: a repeated-start read
-//can occasionally confuse the ESP8266's software I2C state and corrupt just the read-back (not a
-//real write problem) - a retry gives that a chance to clear first. Cheap, well under 100ms.
+//writeAndVerifyPage() retries with a bus-recovery pass in between - a repeated-start read can
+//occasionally corrupt just the read-back (not the actual write), and a retry clears that.
 bool writeAndVerifyPage(int bootAddress, uint16_t flashAddress, uint8_t* writeBuffer, uint8_t* verifyBuffer,
                          uint8_t pageSize, String &failureReasonOut) {
   const int maxAttempts = 3;

@@ -1,8 +1,5 @@
-// Shared struct/constants for the on-device crash reporter (see
-// ServiceCrashLogFunctions.cpp and ServiceCrashLogFunctions.ino). In its own header because
-// custom_crash_callback() had to move into a real .cpp file (see the comment in
-// ServiceCrashLogFunctions.cpp for why) - unlike .ino files, .cpp files are separate
-// translation units and don't share definitions automatically.
+//Shared struct/constants for the on-device crash reporter. In its own header since
+//custom_crash_callback() lives in a real .cpp file, a separate translation unit from the .ino files.
 #pragma once
 #include <stdint.h>
 

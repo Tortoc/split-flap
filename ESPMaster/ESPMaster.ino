@@ -1,173 +1,51 @@
-/* ####################################################################################################################### */
-/* # ____  ____  _     ___ _____   _____ _        _    ____    _____ ____  ____    __  __    _    ____ _____ _____ ____  # */
-/* #/ ___||  _ \| |   |_ _|_   _| |  ___| |      / \  |  _ \  | ____/ ___||  _ \  |  \/  |  / \  / ___|_   _| ____|  _ \ # */
-/* #\___ \| |_) | |    | |  | |   | |_  | |     / _ \ | |_) | |  _| \___ \| |_) | | |\/| | / _ \ \___ \ | | |  _| | |_) |# */
-/* # ___) |  __/| |___ | |  | |   |  _| | |___ / ___ \|  __/  | |___ ___) |  __/  | |  | |/ ___ \ ___) || | | |___|  _ < # */
-/* #|____/|_|   |_____|___| |_|   |_|   |_____/_/   \_|_|     |_____|____/|_|     |_|  |_/_/   \_|____/ |_| |_____|_| \_\# */
-/* ####################################################################################################################### */
 /*
-  This project project is done for fun as part of: https://github.com/JonnyBooker/split-flap
-  None of this would be possible without the brilliant work of David Königsmann: https://github.com/Dave19171/split-flap
-
-  Licensed under GNU: https://github.com/JonnyBooker/split-flap/blob/master/LICENSE
-  
-  Modified by Scott - Added LED debug codes and non-blocking operations for better web server responsiveness
+  SplitFlap ESPMaster firmware.
+  Based on https://github.com/JonnyBooker/split-flap, built on the work of David Königsmann
+  (https://github.com/Dave19171/split-flap). Licensed under GNU:
+  https://github.com/JonnyBooker/split-flap/blob/master/LICENSE
 */
 
-/* .--------------------------------------------------------------------------------. */
-/* |  ___           __ _                    _    _       ___       __ _             | */
-/* | / __|___ _ _  / _(_)__ _ _  _ _ _ __ _| |__| |___  |   \ ___ / _(_)_ _  ___ ___| */
-/* || (__/ _ | ' \|  _| / _` | || | '_/ _` | '_ | / -_) | |) / -_|  _| | ' \/ -_(_-<| */
-/* | \___\___|_||_|_| |_\__, |\_,_|_| \__,_|_.__|_\___| |___/\___|_| |_|_||_\___/__/| */
-/* |                    |___/                                                       | */
-/* '--------------------------------------------------------------------------------' */
-/*
-  These define statements can be changed as you desire for changing the functionality and
-  behaviour of your device.
-*/
-#define SERIAL_ENABLE       true   //Option to enable serial debug messages
-#define UNIT_CALLS_DISABLE  false   //Option to disable the call to the units so can just debug the ESP with no connections
-#define OTA_ENABLE          true    //Option to enable OTA functionality via the Arduino IDE (same WiFi network + IDE required).
-                                     //Prefer flashing over the network (this, or WEB_FIRMWARE_UPDATE_ENABLE below) - reserve the
-                                     //physical USB/serial programmer mainly for diagnostics (serial log capture).
-#define WEB_FIRMWARE_UPDATE_ENABLE true //Option to enable browser-based firmware upload from the Admin page, no Arduino IDE required
-#define UNIT_BOOTLOADER_ENABLE true //Option to enable pushing Unit.ino firmware updates to units over I2C via the twiboot bootloader.
-                                     //Requires every unit to first be flashed with twiboot per Unit/BOOTLOADER_SETUP.md - leave false until that's done!
-#define UNITS_AMOUNT_MAX    64     //Maximum possible units (matches the 6-bit DIP switch addressing range 0-63).
-                                    //The actual amount is auto-detected at startup via I2C scan, see scanI2CBus() - no longer set here.
-#define SERIAL_BAUDRATE     115200  //Serial debugging BAUD rate
-#define WIFI_USE_DIRECT     false  //Option to either direct connect to a WiFi Network or setup a AP to configure WiFi. Setting to false will setup as a AP.
-#define LED_ENABLE          true   //Option to enable LED debug blink codes (set to false if not using LED at all)
-#define DEBUG_ENABLE true  //Enable debug features: startup debug page, error status panel, page load debug log, serial
-                           //debug log at bottom of page, and whether the LED_ENABLE blink codes below actually light up -
-                           //the LED only blinks while the runtime debug-mode flag (showDebugPage, toggled via
-                           //POST /api/debug-mode, persisted in /debugmode.txt) is on.
+//--- Feature flags ---
+#define SERIAL_ENABLE       true   //enable serial debug messages
+#define UNIT_CALLS_DISABLE  false  //disable I2C calls to units (debug the ESP alone)
+#define OTA_ENABLE          true   //Arduino IDE OTA (same WiFi network + IDE required)
+#define WEB_FIRMWARE_UPDATE_ENABLE true //browser-based firmware upload from the Admin page
+#define UNIT_BOOTLOADER_ENABLE true //push Unit.ino updates over I2C via twiboot - needs every
+                                    //unit pre-flashed with twiboot, see Unit/BOOTLOADER_SETUP.md
+#define UNITS_AMOUNT_MAX    64     //matches the 6-bit DIP switch addressing range; actual amount
+                                    //is auto-detected at startup via scanI2CBus()
+#define SERIAL_BAUDRATE     115200
+#define WIFI_USE_DIRECT     false  //false = AP config portal (WiFiManager), true = direct connect
+#define LED_ENABLE          true
+#define DEBUG_ENABLE true  //startup debug page, error panel, page-load log, serial debug log,
+                           //and whether LED_ENABLE actually blinks - gated at runtime by
+                           //showDebugPage (POST /api/debug-mode, persisted in /debugmode.txt)
 
-/*
-  EXPERIMENTAL: Try to use your Router when possible to set a Static IP address for your device to avoid conflicts with other devices
-  on your network. This will try and setup your device with a static IP address of your chosing. See below for more details.
-*/
-#define WIFI_STATIC_IP      false
-#define FAE_MOD                   //Option for the modified PCB that includes an ESP-12F module
+#define WIFI_STATIC_IP      false //try a router-assigned static IP instead of DHCP
+#define FAE_MOD                   //modified PCB with an ESP-12F module
 
-/*
-  ============================================================================
-  ESP01 PINOUT DIAGRAM (2 rows x 4 pins)
-  ============================================================================
-  
-  ESP01 has 8 pins arranged in 2 rows of 4 pins. Looking at the module with
-  the antenna at the top:
-  
-         [Antenna]
-            |
-      ┌─────┴─────┐
-      │   ESP01   │
-      └─────┬─────┘
-            |
-  
-  Pin Layout (2 rows x 4 pins):
-  
-  TOP ROW (left to right):
-  ┌─────────┬─────────┬─────────┬─────────┐
-  │ Pin 1   │ Pin 2   │ Pin 3   │ Pin 4   │
-  │  GND    │ GPIO 2  │ GPIO 0  │GPIO 1/TX│
-  └─────────┴─────────┴─────────┴─────────┘
-  
-  BOTTOM ROW (left to right):
-  ┌─────────┬─────────┬─────────┬─────────┐
-  │ Pin 5   │ Pin 6   │ Pin 7   │ Pin 8   │
-  │ CH_PD   │  RST    │  VCC    │GPIO 3/RX│
-  └─────────┴─────────┴─────────┴─────────┘
-  
-  Detailed Pin Function Table:
-  ┌─────────┬──────────────┬─────────────────────────────────────────────┐
-  │ Pin #   │ Pin Name     │ Function / Notes                            │
-  ├─────────┼──────────────┼─────────────────────────────────────────────┤
-  │ 1       │ GND         │ Ground reference (0V)                        │
-  │ 2       │ GPIO 2      │ Available for external LED (this code)       │
-  │ 3       │ GPIO 0      │ Boot mode pin (LOW = flash/programming mode)│
-  │ 4       │ GPIO 1 / TX │ Serial TX / Built-in blue LED / I2C SDA      │
-  │         │             │   (Used for I2C in this code: Wire.begin)   │
-  │ 5       │ CH_PD       │ Chip enable (must be HIGH, connect to 3.3V) │
-  │         │             │   Typically via 10kΩ pull-up resistor        │
-  │ 6       │ RST         │ Reset (LOW = reset, HIGH = normal operation)│
-  │         │             │   Typically via 10kΩ pull-up resistor       │
-  │ 7       │ VCC         │ Power input (3.3V ONLY, NOT 5V!)            │
-  │         │             │   ⚠️ WARNING: 5V will damage the module!    │
-  │ 8       │ GPIO 3 / RX │ Serial RX / I2C SCL                         │
-  │         │             │   (Used for I2C in this code: Wire.begin)   │
-  └─────────┴──────────────┴─────────────────────────────────────────────┘
-  
-  Important Notes:
-  - VCC must be 3.3V (NOT 5V - will damage the module!)
-  - GPIO 0 must be HIGH during normal operation (LOW = programming mode)
-  - CH_PD must be HIGH (connect to 3.3V, typically via 10kΩ resistor)
-  - RST must be HIGH (connect to 3.3V, typically via 10kΩ resistor)
-  - GPIO 1 has built-in blue LED (active LOW) but is used for I2C in this code
-  - GPIO 2 is available for external LED connection
-  - GPIO 1 and GPIO 3 are used for I2C communication (Wire.begin(1, 3))
-  
-  ============================================================================
-*/
-
-// LED Debug Pin Configuration for ESP01
-// Since GPIO 1 is used for I2C (Wire.begin(1, 3)), we use GPIO 2 for LED
-// You need to connect an external LED: LED anode -> GPIO 2, LED cathode -> GND
-// Use a 220-470 ohm resistor in series with the LED
-//
-// Alternative: If not using I2C, change to GPIO 1 to use built-in blue LED
-#define LED_DEBUG_PIN 2  // GPIO 2 = external LED (GPIO 1 is used for I2C)
-#define LED_ON HIGH      // External LED: HIGH = ON (opposite of built-in LED)
+//ESP01 GPIO1/TX is used for I2C SDA and GPIO3/RX for I2C SCL (Wire.begin(1, 3)) - so the debug LED
+//goes on GPIO2 instead of the built-in GPIO1 LED. VCC must be 3.3V only.
+#define LED_DEBUG_PIN 2
+#define LED_ON HIGH
 #define LED_OFF LOW
 
-/*
-  LED BLINK CODE REFERENCE:
-  The LED on GPIO 2 will blink to indicate system status during initialization -
-  but only while debug mode is on (POST /api/debug-mode, persisted in /debugmode.txt).
-  Leave debug mode off for normal operation and the LED simply stays dark; turn it
-  on when you actually want to watch the boot sequence.
+//LED blink codes during startup (only while debug mode is on):
+//1=WiFi connecting, 2=WiFi connected, 3=NTP starting, 4=NTP success, 5=NTP failed,
+//6=filesystem init, 7=web server starting, 8=ready. Continuous=error.
 
-  1 blink   = WiFi connecting
-  2 blinks  = WiFi connected successfully
-  3 blinks  = NTP time synchronization starting
-  4 blinks  = NTP sync successful
-  5 blinks  = NTP sync failed or timed out
-  6 blinks  = File system initialization
-  7 blinks  = Web server starting
-  8 blinks  = Web server ready - system operational
-  Continuous = Error detected (WiFi connection failed, etc.)
-  
-  These codes help identify where the system is during startup and can aid in
-  troubleshooting initialization issues.
-*/
+//--- Constants - only change if you know what you're doing ---
+#define ANSWER_SIZE         6 //status + offset + phase + progress bytes, must match Unit.ino's requestEvent()
+#define ANSWER_SIZE_LIGHT   3 //status + offset only, see readUnitInfo()'s 3-arg overload
+#define FLAP_AMOUNT         45
+#define MIN_SPEED           1
+#define MAX_SPEED           12
+#define UNIT_STEPS          2038    //must match STEPS in Unit.ino
+#define UNIT_BOOTLOADER_CMD 255     //must match CMD_ENTER_BOOTLOADER in Unit.ino
+#define UNIT_BOOTLOADER_BASE_ADDRESS 0x29 //start of the twiboot bootloader address range (0x29-0x68)
+#define CRASH_LOG_PATH "/crash-log.jsonl"
 
-/* .--------------------------------------------------------. */
-/* | ___         _               ___       __ _             | */
-/* |/ __|_  _ __|_| ___ _ __   |   \ ___ / _(_)_ _  ___ ___| */
-/* |\__ | || (_-|  _/ -_| '  \  | |) / -_|  _| | ' \/ -_(_-<| */
-/* ||___/\_, /__/\__\___|_|_|_| |___/\___|_| |_|_||_\___/__/| */
-/* |     |__/                                               | */
-/* '--------------------------------------------------------' */
-/*
-  These are important to maintain normal system behaviour. Only change if you know 
-  what your doing.
-*/
-//Status byte + 2 offset bytes + phase byte + 2 progress bytes - must match Unit.ino's requestEvent().
-#define ANSWER_SIZE         6
-//Status + offset only (first 3 bytes of the same response) - Wire.requestFrom()'s length
-//parameter alone controls how many bytes get clocked out, so Unit.ino doesn't need to know which
-//size was requested. See readUnitInfo()'s 3-arg overload in ServiceFlapFunctions.ino.
-#define ANSWER_SIZE_LIGHT   3
-#define FLAP_AMOUNT         45      //Amount of Flaps in each unit
-#define MIN_SPEED           1       //Min Speed
-#define MAX_SPEED           12      //Max Speed
-#define UNIT_STEPS          2038    //Must match STEPS in Unit.ino - used to validate offset values sent from the Admin UI
-#define UNIT_BOOTLOADER_CMD 255     //Must match CMD_ENTER_BOOTLOADER in Unit.ino
-#define UNIT_BOOTLOADER_BASE_ADDRESS 0x29 //Start of the range scanned for a unit's twiboot bootloader (0x29-0x68).
-#define CRASH_LOG_PATH "/crash-log.jsonl" //See ServiceCrashLogFunctions.ino
-
-//I2C pins, named so ServiceI2CRecoveryFunctions.ino's bus-recovery routine can reuse the exact
-//same pins Wire.begin() is called with below, instead of duplicating the FAE_MOD #ifdef there.
+//Named so ServiceI2CRecoveryFunctions.ino's bus-recovery routine can reuse the exact same pins.
 #ifdef FAE_MOD
 #define I2C_SDA_PIN 4
 #define I2C_SCL_PIN 5
@@ -176,30 +54,18 @@
 #define I2C_SCL_PIN 3
 #endif
 
-/* .-----------------------------------. */
-/* | _    _ _                 _        | */
-/* || |  (_| |__ _ _ __ _ _ _(_)___ ___| */
-/* || |__| | '_ | '_/ _` | '_| / -_(_-<| */
-/* ||____|_|_.__|_| \__,_|_| |_\___/__/| */
-/* '-----------------------------------' */
-/*
-  External library dependencies, not much more to say!
-*/
-
-//WiFi Setup Library if we use that mode
-//Specifically put here in this order to avoid conflict with other libraries
+//--- Libraries ---
 #if WIFI_USE_DIRECT == false
-//Needed in order to be compatible with WiFiManager: https://github.com/me-no-dev/ESPAsyncWebServer/issues/418#issuecomment-667976368
+//WEBSERVER_H guard needed for WiFiManager compatibility, see
+//https://github.com/me-no-dev/ESPAsyncWebServer/issues/418#issuecomment-667976368
 #define WEBSERVER_H
 #include <WiFiManager.h>
 #endif
 
-//OTA Libary if we are into that kind of thing
 #if OTA_ENABLE == true
 #include <ArduinoOTA.h>
 #endif
 
-//Used for the browser-based firmware upload on the Admin page
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
 #include <Updater.h>
 #endif
@@ -213,25 +79,15 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <Wire.h>
-//twi.h's raw twi_writeTo() is used for twiboot flash-page writes (ServiceUnitFirmwareFunctions.ino)
-//instead of Wire - a page write is 132 bytes, which exceeds Wire's 128-byte TX buffer and silently
-//drops the tail (a #define I2C_BUFFER_LENGTH override doesn't help, Wire.cpp has its own default).
+//twi.h's raw twi_writeTo() is used for twiboot flash-page writes instead of Wire - a page write is
+//132 bytes, which exceeds Wire's 128-byte TX buffer and silently drops the tail.
 #include <twi.h>
-#include <user_interface.h> // struct rst_info, for the on-device crash reporter (ServiceCrashLogFunctions.ino)
-#include <lwip/priv/tcp_priv.h> // internal lwIP header - exposes tcp_active_pcbs/etc. for /api/tcp-status
+#include <user_interface.h> //struct rst_info, for the crash reporter
+#include <lwip/priv/tcp_priv.h> //exposes tcp_active_pcbs/etc. for /api/tcp-status
 #include "Classes.h"
 #include "LittleFS.h"
 
-/* .------------------------------------------------------------------------------------. */
-/* |  ___           __ _                    _    _       ___     _   _   _              | */
-/* | / __|___ _ _  / _(_)__ _ _  _ _ _ __ _| |__| |___  / __|___| |_| |_(_)_ _  __ _ ___| */
-/* || (__/ _ | ' \|  _| / _` | || | '_/ _` | '_ | / -_) \__ / -_|  _|  _| | ' \/ _` (_-<| */
-/* | \___\___|_||_|_| |_\__, |\_,_|_| \__,_|_.__|_\___| |___\___|\__|\__|_|_||_\__, /__/| */
-/* |                    |___/                                                  |___/    | */
-/* '------------------------------------------------------------------------------------' */
-/*
-  Settings you can feel free to change to customise how your display works.
-*/
+//--- User-facing settings ---
 //Used if connecting via "WIFI_USE_DIRECT" of "true" - Otherwise, leave blank
 const char* wifiDirectSsid = "";
 const char* wifiDirectPassword = "";
@@ -245,10 +101,15 @@ const char* otaPasswordPath = "/otapassword.txt";
 String timezoneSetting = "";
 const char* timezonePath = "/timezone.txt";
 
-//If you want to have a different date or clock format change these two
-//Complete table with every char: https://github.com/ropg/ezTime#getting-date-and-time
-const char* dateFormat = "d.m.Y"; //Examples: d.m.Y -> 11.09.2021, D M y -> SAT SEP 21
-const char* clockFormat = "H:i"; //Examples: H:i -> 21:19, h:ia -> 09:19PM
+//User-facing date/clock format (e.g. "dd.MM.yyyy"), translated to ezTime's syntax at render time
+//by convertUserDateFormatToEzTime().
+String dateFormat = "dd.MM.yyyy";
+String clockFormat = "HH:mm";
+
+//Countdown display prefix/suffix, shared by standalone Countdown mode and Rotation's countdown
+//items. Empty means "don't show that part" - see buildCountdownText().
+String countdownPrefix = "";
+String countdownSuffix = "Tage";
 
 //How long to show a message for when a scheduled message is shown for
 const int scheduledMessageDisplayTimeMillis = 7500;
@@ -266,17 +127,7 @@ IPAddress wifiSubnet(255, 255, 0, 0);
 IPAddress wifiPrimaryDns(8, 8, 8, 8);
 #endif
 
-/* .------------------------------------------------------------. */
-/* | ___         _               ___     _   _   _              | */
-/* |/ __|_  _ __|_| ___ _ __   / __|___| |_| |_(_)_ _  __ _ ___| */
-/* |\__ | || (_-|  _/ -_| '  \  \__ / -_|  _|  _| | ' \/ _` (_-<| */
-/* ||___/\_, /__/\__\___|_|_|_| |___\___|\__|\__|_|_||_\__, /__/| */
-/* |     |__/                                          |___/    | */
-/* '------------------------------------------------------------' */
-/*
-  Used for normal running of the system so changing things here might make things 
-  behave a little strange.
-*/
+//--- Core state - normal running of the system, be careful changing these ---
 //The current version of code to display on the UI
 const char* espVersion = "2.3.0-Scott";
 
@@ -284,31 +135,23 @@ const char* espVersion = "2.3.0-Scott";
 const char letters[] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '$', '&', '#', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', '-', '?', '!'};
 int displayState[UNITS_AMOUNT_MAX];
 unsigned long previousMillis = 0;
-int unitsAmount = 0; //Auto-detected at startup by scanning I2C for units 0,1,2,... sequentially
-                      //(stops at the first missing address, same "sequential from 0" requirement
-                      //the DIP switches already have) - see scanI2CBus() in setup().
+int unitsAmount = 0; //auto-detected via I2C scan, sequential from 0 - see scanI2CBus()
 
-//Calling Wire directly from an AsyncWebServer callback crashes the ESP (nested call stack has too
-//little headroom for I2C clock-stretch handling) - these handlers just stash the request here,
-//loop() does the actual I2C work and calls send() itself. One in flight at a time; a second
-//request while one's pending gets 503 instead of silently replacing it.
+//Calling Wire directly from an AsyncWebServer callback crashes the ESP (too little stack for I2C
+//clock-stretch handling) - these just stash the request, loop() does the I2C work and sends the
+//response itself. One in flight at a time; a second request while one's pending gets 503.
 AsyncWebServerRequest* pendingRescanRequest = nullptr;
 AsyncWebServerRequest* pendingUnitsInfoRequest = nullptr;
 AsyncWebServerRequest* pendingLegacyI2CScanRequest = nullptr;
 
-//ESPAsyncWebServer deletes the request object on client disconnect, even mid-flight while loop()
-//is doing the deferred I2C work for it - a plain null-the-pointer-on-disconnect only catches the
-//still-queued case. Each pendingXxxRequest gets a matching *Disconnected flag so loop() can tell
-//its local copy of the pointer is no longer safe to call send() on.
+//ESPAsyncWebServer deletes the request object on client disconnect, even mid-flight - each pending
+//request gets a matching *Disconnected flag so loop() knows its pointer is no longer safe to use.
 bool pendingRescanRequestDisconnected = false;
 bool pendingUnitsInfoRequestDisconnected = false;
 bool pendingLegacyI2CScanRequestDisconnected = false;
-//Captured from the "detail" query param at request time - query params aren't available anymore
-//once loop() picks this up later (see where this is used, below).
-bool pendingUnitsInfoRequestDetail = false;
+bool pendingUnitsInfoRequestDetail = false; //captured from the "detail" query param at request time
 
-//Same reasoning, for the twiboot/bootloader endpoints (only relevant when
-//UNIT_BOOTLOADER_ENABLE is true - see ServiceUnitFirmwareFunctions.ino).
+//Same reasoning, for the twiboot/bootloader endpoints (UNIT_BOOTLOADER_ENABLE).
 AsyncWebServerRequest* pendingFirmwarePushRequest = nullptr;
 int pendingFirmwarePushUnitIndex = -1;
 bool pendingFirmwarePushRequestDisconnected = false;
@@ -325,6 +168,11 @@ const char* PARAM_SCHEDULE_ENABLED = "scheduleEnabled";
 const char* PARAM_SCHEDULE_DATE_TIME = "scheduledDateTimeUnix";
 const char* PARAM_SCHEDULE_SHOW_INDEFINITELY = "scheduleShowIndefinitely";
 const char* PARAM_COUNTDOWN_DATE = "countdownDateTimeUnix";
+const char* PARAM_CLOCK_FORMAT = "clockFormat";
+const char* PARAM_DATE_FORMAT = "dateFormat";
+const char* PARAM_ROTATION_ITEMS = "rotationItems";
+const char* PARAM_COUNTDOWN_PREFIX = "countdownPrefix";
+const char* PARAM_COUNTDOWN_SUFFIX = "countdownSuffix";
 const char* PARAM_ID = "id";
 const char* PARAM_UNIT_OFFSET = "offset";
 
@@ -333,6 +181,7 @@ const char* DEVICE_MODE_TEXT = "text";
 const char* DEVICE_MODE_CLOCK = "clock";
 const char* DEVICE_MODE_DATE = "date";
 const char* DEVICE_MODE_COUNTDOWN = "countdown";
+const char* DEVICE_MODE_ROTATION = "rotation";
 
 //Alignment options
 const char* ALIGNMENT_MODE_LEFT = "left";
@@ -347,6 +196,11 @@ const char* countdownPath = "/countdown.txt";
 const char* scheduledMessagesPath = "/scheduled-messages.txt";
 const char* debugModePath = "/debugmode.txt";
 const char* unitFirmwarePath = "/unit-firmware.bin";
+const char* clockFormatPath = "/clockformat.txt";
+const char* dateFormatPath = "/dateformat.txt";
+const char* rotationItemsPath = "/rotation-items.txt";
+const char* countdownPrefixPath = "/countdownprefix.txt";
+const char* countdownSuffixPath = "/countdownsuffix.txt";
 
 //Variables for storing things for checking and use in normal running
 String alignment = "";
@@ -360,20 +214,47 @@ bool alignmentUpdated = false;
 bool isPendingReboot = false;
 bool isPendingUnitsReset = false;
 bool isWifiConfigured = false;
-//Defaults off - the dynamically-built startup debug page caused blank/corrupted pages on fresh
-//boots. Toggle via POST /api/debug-mode.
-bool showDebugPage = false;
-volatile bool webRequestActive = false; // Flag to skip display updates during web requests
+bool showDebugPage = false; //defaults off - the startup debug page can render blank on fresh boots
+volatile bool webRequestActive = false; //skip display updates while a web request is in flight
 LList<ScheduledMessage> scheduledMessages;
-Timezone timezone; 
+//Fixed array, not LList<RotationItem>: LinkedList's operator[] can dereference a NULL node under
+//interleaved access - a real, reproduced crash. Direct indexing avoids it.
+#define ROTATION_ITEMS_MAX 20
+RotationItem rotationItems[ROTATION_ITEMS_MAX];
+int rotationItemCount = 0;
+int rotationCurrentIndex = 0;
+unsigned long rotationItemStartedAtSeconds = 0; //0 = not started yet (real timestamps are never 0)
+//Set by checkRotation() from the current item's Alignment field ("" = inherit the default) and
+//threaded through to showText() as an override.
+String rotationCurrentAlignment = "";
+Timezone timezone;
 
-//Create AsyncWebServer object on port 80
 AsyncWebServer webServer(80);
 
-//Used for creating a Access Point to allow WiFi setup
 #if WIFI_USE_DIRECT == false
 WiFiManager wifiManager;
 bool isPendingWifiReset = false;
+
+//Lets the user scan for and connect to a WiFi network from the running web UI, in addition to the
+//"Reset WiFi -> reboot into AP portal" flow.
+bool wifiScanRequested = false;
+
+enum WifiConnectPhase {
+  WIFI_CONNECT_NONE,
+  WIFI_CONNECT_PENDING,          //POST /api/wifi/connect received, loop() hasn't called WiFi.begin() yet
+  WIFI_CONNECT_TESTING,          //WiFi.begin() called with the new credentials, waiting for a result
+  WIFI_CONNECT_SUCCESS,
+  WIFI_CONNECT_FAILED_REVERTED   //new credentials didn't connect in time, reverted to the old ones
+};
+WifiConnectPhase wifiConnectPhase = WIFI_CONNECT_NONE;
+String wifiConnectNewSsid = "";
+String wifiConnectNewPassword = "";
+String wifiConnectOldSsid = "";
+String wifiConnectOldPassword = "";
+unsigned long wifiConnectPhaseChangedAt = 0;
+//The ESP can only be associated with one AP at a time, so WiFi.begin() drops the current connection
+//immediately - this bounds how long a bad new network gets before reverting to the old one.
+const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
 #endif
 
 //Used to denote that the system has gone into OTA mode
@@ -385,29 +266,24 @@ bool isInOtaMode = false;
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
 bool firmwareUpdateAuthFailed = false;
 
-//Client-paced chunked upload (/api/firmware-start, -chunk, -finish, below) - the browser sends
-//the next chunk only after the ESP confirms the previous one is flashed, so the round-trip itself
-//provides backpressure. Needed because the ESP8266 can't slow down incoming TCP data, so a plain
-//streamed upload into any fixed buffer eventually overflows. Update.* still runs from loop(), not
-//the AsyncWebServer callback (too little stack there).
+//Client-paced chunked upload (/api/firmware-start/-chunk/-finish) - the browser sends the next
+//chunk only after the ESP confirms the previous one is flashed, giving natural backpressure since
+//the ESP8266 can't otherwise slow down incoming TCP data. Update.* runs from loop(), not the
+//AsyncWebServer callback (too little stack there).
 #define OTA_CHUNK_SIZE 4096 //must match CHUNK_SIZE in index.html's uploadFirmware()
-uint8_t* otaChunkBuffer = nullptr; //allocated only while an upload is in progress, freed after
-volatile size_t otaChunkLen = 0;   //bytes currently buffered for the in-progress chunk
+uint8_t* otaChunkBuffer = nullptr; //allocated only while an upload is in progress
+volatile size_t otaChunkLen = 0;
 enum OtaPhase { OTA_PHASE_NONE, OTA_PHASE_BEGIN, OTA_PHASE_WRITE, OTA_PHASE_FINISH };
 volatile OtaPhase otaPendingPhase = OTA_PHASE_NONE; //what loop() should do next
-volatile OtaPhase otaCompletedPhase = OTA_PHASE_NONE; //which phase otaResultReady refers to
-volatile uint32_t otaBeginSize = 0; //total firmware size, from /api/firmware-start's "size" param
-volatile bool otaChunkRejected = false; //oversized/out-of-sequence chunk - separate from auth so
-                                         //the error message told to the user is accurate
-volatile bool otaResultReady = false;     //loop() has finished the pending phase (success or not)
-volatile bool otaResultSuccess = false;   //valid once otaResultReady is true
-String otaResultMessage = "";             //valid once otaResultReady is true
-//Watchdog for an abandoned upload (client vanished mid-upload, e.g. a network drop) - loop()
-//frees otaChunkBuffer if this goes too long without any of the three endpoints touching it.
-volatile unsigned long otaLastActivityAt = 0;
-//90s, not a shorter value: a client retrying a dropped chunk over a flaky WiFi path (network
-//timeout + backoff per attempt) can genuinely take a while even though the upload itself is fine -
-//abandoning it out from under a client about to succeed on its next retry is worse than waiting.
+volatile OtaPhase otaCompletedPhase = OTA_PHASE_NONE;
+volatile uint32_t otaBeginSize = 0;
+volatile bool otaChunkRejected = false;
+volatile bool otaResultReady = false;
+volatile bool otaResultSuccess = false;
+String otaResultMessage = "";
+volatile unsigned long otaLastActivityAt = 0; //watchdog for an abandoned upload (client vanished)
+//90s: a client retrying a dropped chunk over flaky WiFi can genuinely take a while even though the
+//upload itself is fine.
 #define OTA_ABANDONED_TIMEOUT_MS 90000
 AsyncWebServerRequest* pendingFirmwareUploadRequest = nullptr;
 bool pendingFirmwareUploadRequestDisconnected = false;
@@ -417,16 +293,10 @@ bool unitFirmwareUploadAuthFailed = false;
 #endif
 bool webFileUploadAuthFailed = false;
 
-// LED Debugging variables
 String debugStatus = "";
 
-// Serial log buffer for web interface (circular, last N messages) - fixed-size char buffer, not
-// String, to avoid heap fragmentation given how often addToSerialLog() runs. Longer messages
-// truncate silently.
-//
-// IMPORTANT: keep this buffer small - a much larger version once left only ~8KB free heap on a
-// freshly booted device (of ~80KB total), enough for ordinary allocations to fail outright
-// (`operator new` aborts on failure here, doesn't return null). 40*120=4800 bytes is deliberate.
+//Circular serial log buffer for the web UI - fixed-size char array, not String, to avoid heap
+//fragmentation. Keep this small - a much larger version once left too little free heap after boot.
 #define SERIAL_LOG_SIZE 40
 #define SERIAL_LOG_MESSAGE_MAX 120
 struct SerialLogEntry {
@@ -436,37 +306,20 @@ struct SerialLogEntry {
 SerialLogEntry serialLog[SERIAL_LOG_SIZE];
 int serialLogIndex = 0;
 int serialLogCount = 0;
-String currentSerialLine = ""; // Buffer for building complete lines
+String currentSerialLine = ""; //buffer for building complete lines
 
-// Function to add message to serial log buffer
 void addToSerialLog(const String &message) {
-  if (message.length() == 0) return; // Don't log empty messages
+  if (message.length() == 0) return;
 
-  // Add timestamp
-  unsigned long timestamp = millis();
-
-  // Store in circular buffer (fixed-size copy, see the comment on SerialLogEntry above)
   strncpy(serialLog[serialLogIndex].message, message.c_str(), SERIAL_LOG_MESSAGE_MAX - 1);
   serialLog[serialLogIndex].message[SERIAL_LOG_MESSAGE_MAX - 1] = '\0';
-  serialLog[serialLogIndex].timestamp = timestamp;
+  serialLog[serialLogIndex].timestamp = millis();
 
-  // Update indices
   serialLogIndex = (serialLogIndex + 1) % SERIAL_LOG_SIZE;
   if (serialLogCount < SERIAL_LOG_SIZE) {
     serialLogCount++;
   }
 }
-
-/* .-----------------------------------------------. */
-/* | ___          _          ___     _             | */
-/* ||   \ _____ _(_)__ ___  / __|___| |_ _  _ _ __ | */
-/* || |) / -_\ V | / _/ -_) \__ / -_|  _| || | '_ \| */
-/* ||___/\___|\_/|_\__\___| |___\___|\__|\_,_| .__/| */
-/* |                                         |_|   | */
-/* '-----------------------------------------------' */
-
-// LED Blink Code Functions
-// See header section for complete blink code reference
 
 void ledOn() {
 #if LED_ENABLE == true
@@ -496,14 +349,13 @@ void blinkLed(int count, int onTime, int offTime) {
 }
 
 void setup() {
-  //First thing this firmware does - pull SDA/SCL to idle-high before anything can glitch them.
-  //The Unit's TWI hardware doesn't reset when the ESP does and stays armed/listening.
+  //Pull SDA/SCL to idle-high before anything can glitch them - the Unit's TWI hardware doesn't
+  //reset when the ESP does and stays armed/listening.
   pinMode(I2C_SDA_PIN, INPUT_PULLUP);
   pinMode(I2C_SCL_PIN, INPUT_PULLUP);
 
-  //Load the debug-mode flag before the first blinkLed() call - some blink codes (WiFi
-  //connecting/failed) fire before the normal filesystem-init point in the boot sequence.
-  //LittleFS.begin() here is idempotent, safe to call again later.
+  //Load the debug-mode flag before the first blinkLed() call - some blink codes fire before the
+  //normal filesystem-init point.
 #if DEBUG_ENABLE == true
   if (LittleFS.begin()) {
     showDebugPage = (readFile(LittleFS, debugModePath, "false") == "true");
@@ -511,30 +363,20 @@ void setup() {
 #endif
 
 #if SERIAL_ENABLE == true
-  //Setup so we can see serial messages
   Serial.begin(SERIAL_BAUDRATE);
 #elif !defined(FAE_MOD)
-  //For ESP01 only
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-
-  //De-activate I2C if debugging the ESP, otherwise serial does not work
-  //Wire.begin(D1, D2); //For NodeMCU testing only SDA=D1 and SCL=D2
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN); //ESP01 only
 #endif
 
 #ifdef FAE_MOD
-  //Fae Mod
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
 #endif
 
-  //Fast Mode (400kHz) - every I2C read briefly blocks the Unit's main loop via its TWI interrupt,
-  //so a faster bus steals less time per transaction. Units run at 16MHz with 4.7k pull-ups, both
-  //comfortably support this.
-  Wire.setClock(400000);
+  Wire.setClock(400000); //400kHz - units run at 16MHz with 4.7k pull-ups, comfortably support this
 
 #if UNIT_BOOTLOADER_ENABLE == true
-  //twiboot (compiled with USE_CLOCKSTRETCH=1, see Unit/BOOTLOADER_SETUP.md) holds SCL low
-  //while a flash page write is in progress. Give it comfortably more time than the ATmega328p's
-  //worst-case erase+write duration so a page write never gets misread as a bus error.
+  //twiboot holds SCL low during a flash page write - give it more time than the worst-case
+  //erase+write duration so it never gets misread as a bus error.
   Wire.setClockStretchLimit(25000);
 #endif
 
@@ -576,10 +418,7 @@ void setup() {
     SerialPrintln("DEBUG: Status = " + debugStatus);
     blinkLed(3, 200, 100); // 3 blinks = NTP syncing
     
-    // 6h: a wall-clock display doesn't need minute-level freshness, and a short interval gives
-    // ezTime's 20s post-failure retry frequent chances to fire. uint16_t max is ~18.2h, so a true
-    // 24h interval isn't representable.
-    setInterval(21600); // Sync every 6 hours
+    setInterval(21600); //sync every 6h - a wall clock doesn't need minute-level freshness
 
     //Not setDebug(INFO) - ezTime's own internal logging fires extremely often around WiFi
     //hiccups, wasting loop()/UART time. Our own SerialPrintln() logging is unaffected.
@@ -739,7 +578,8 @@ void setup() {
         return;
       }
 #endif
-      // Normal mode - serve regular index.html
+      //Actually stored gzip-compressed as "/index.html.gz" - AsyncFileResponse falls back to that
+      //automatically and adds Content-Encoding: gzip itself.
       unsigned long beforeSend = millis();
       SerialPrintln("DEBUG: Serving index.html (took " + String(beforeSend - pageRequestStart) + "ms to get here)");
       request->send(LittleFS, "/index.html", "text/html");
@@ -774,12 +614,15 @@ void setup() {
 #else
       minimalDoc["otaEnabled"] = false;
 #endif
-      //otaPassword/timezone included here so the Administration view can populate its displays
-      //from this one /api/settings fetch instead of firing more separate XHRs against this
-      //device's hard 5-connection TCP limit.
+      //otaPassword/timezone included so Administration can populate from this one fetch, given
+      //this device's hard 5-connection TCP limit.
       minimalDoc["otaPassword"] = otaPassword;
       minimalDoc["timezone"] = timezoneSetting;
-      
+      minimalDoc["clockFormat"] = clockFormat;
+      minimalDoc["dateFormat"] = dateFormat;
+      minimalDoc["countdownPrefix"] = countdownPrefix;
+      minimalDoc["countdownSuffix"] = countdownSuffix;
+
       // Try to get scheduled messages quickly (with timeout)
       unsigned long beforeScheduled = millis();
       int scheduledCount = scheduledMessages.size();
@@ -792,7 +635,12 @@ void setup() {
           yield();
         }
       }
-      
+
+      //Rotation items themselves aren't built here - looping over them in this handler caused a
+      //stack-overflow panic. Just the count (cheap); the client fetches the full list from
+      //GET /api/rotation-items only when the Rotation tab is opened.
+      minimalDoc["rotationItemCount"] = rotationItemCount;
+
       //beginResponseStream() avoids building the JSON into one contiguous String first.
       unsigned long totalTime = millis() - settingsStart;
       SerialPrintln("DEBUG: Settings response ready in " + String(totalTime) + "ms, JSON size: " + String(measureJson(minimalDoc)) + " bytes");
@@ -806,7 +654,37 @@ void setup() {
       // Clear flag after request completes
       webRequestActive = false;
     });
-    
+
+    //Own small handler, not sharing a stack frame with /api/settings - only fetched when the
+    //Rotation tab is opened.
+    webServer.on("/api/rotation-items", HTTP_GET, [](AsyncWebServerRequest * request) {
+      webRequestActive = true;
+
+      JsonDocument rotationDoc;
+      JsonArray rotationArray = rotationDoc.to<JsonArray>();
+      unsigned long rotationRequestStart = millis();
+
+      //No yield() here - pure in-memory struct->JSON copying, finishes in microseconds; a yield()
+      //here previously overflowed the AsyncWebServer callback's stack. Time budget below is a
+      //defensive fallback only.
+      for (int i = 0; i < rotationItemCount && (millis() - rotationRequestStart) < 1000; i++) {
+        RotationItem &item = rotationItems[i]; //plain array indexing, see rotationItems' declaration
+        JsonObject itemObject = rotationArray.add<JsonObject>();
+        itemObject["type"] = item.Type;
+        itemObject["value"] = item.Value;
+        itemObject["format"] = item.Format;
+        itemObject["targetDateTimeUnix"] = item.TargetDateTimeUnix;
+        itemObject["durationSeconds"] = item.DurationSeconds;
+        itemObject["alignment"] = item.Alignment;
+      }
+
+      AsyncResponseStream *response = request->beginResponseStream("application/json");
+      serializeJson(rotationDoc, *response);
+      request->send(response);
+
+      webRequestActive = false;
+    });
+
     webServer.on("/api/health", HTTP_GET, [](AsyncWebServerRequest * request) {
       SerialPrintln("DEBUG: Request for Health Check Received");
       request->send(200, "text/plain", "Healthy");
@@ -871,9 +749,7 @@ void setup() {
         document["logs"][i]["timestamp"] = serialLog[idx].timestamp;
       }
       
-      // beginResponseStream() serializes into small chunks instead of one contiguous String,
-      // which needs a multi-KB allocation that fails first on a fragmented heap. operator new
-      // aborts on failure here, so check free heap before allocating at all.
+      //Check free heap before allocating - operator new aborts on failure here.
       if (ESP.getFreeHeap() < 4000) {
         SerialPrintln("WARNING: /log skipped building response - free heap too low (" + String(ESP.getFreeHeap()) + " bytes)");
         request->send(503, "text/plain", "Too little free heap right now to safely build the log response - try again shortly");
@@ -926,9 +802,7 @@ void setup() {
         request->send(503, "text/plain", "Another units request is already in progress, try again shortly");
         return;
       }
-      //Opt-in heavy 6-byte read (adds phase/progress) instead of the default light 3-byte one,
-      //only when explicitly asked for via ?detail=1, so routine Administration-page polling
-      //stays on the cheaper path.
+      //Opt-in heavy 6-byte read (adds phase/progress) only via ?detail=1 - routine polling stays cheap.
       pendingUnitsInfoRequestDetail = request->hasParam("detail");
       pendingUnitsInfoRequestDisconnected = false;
       pendingUnitsInfoRequest = request;
@@ -1019,12 +893,18 @@ void setup() {
             }
           }
 
-          //"index.html" is the only valid target - the whole UI is one file now.
-          webUploadFilenameValid = (filename == "index.html");
+          //"index.html.gz" is the only valid target - the whole UI is one gzip-compressed file,
+          //served automatically with Content-Encoding: gzip.
+          webUploadFilenameValid = (filename == "index.html.gz");
           if (!webUploadFilenameValid) {
             SerialPrintln("Web file upload rejected: filename not in allowlist: " + filename);
             request->send(400, "text/plain", "Filename must be one of the known static assets");
             return;
+          }
+
+          //A leftover uncompressed "/index.html" would take precedence over "/index.html.gz".
+          if (LittleFS.exists("/index.html")) {
+            LittleFS.remove("/index.html");
           }
 
           SerialPrintln("DEBUG: Web file upload starting: " + filename);
@@ -1101,10 +981,9 @@ void setup() {
       }
     );
 
-    // Admin: push the currently stored unit firmware to a single unit over I2C (twiboot).
-    // Deferred to loop(), same reasoning as pendingRescanRequest above. Requires X-OTA-Password.
-    //IMPORTANT: must be a sibling path, not a sub-path of "/api/units/firmware" above - its
-    //two-callback upload route would intercept any prefix-extension of it, silently unreachable.
+    //Pushes the currently stored unit firmware to a single unit over I2C (twiboot), deferred to
+    //loop(). Must be a sibling path, not a sub-path of "/api/units/firmware" - that upload route
+    //would otherwise intercept it.
     webServer.on("/api/units/firmware-push", HTTP_POST, [](AsyncWebServerRequest * request) {
       if (String(otaPassword) != "") {
         String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
@@ -1153,9 +1032,8 @@ void setup() {
       });
     });
 
-    // Admin/diagnostic: send a unit into bootloader mode and report which I2C address it answers
-    // on, without writing anything - verifies the DIP-jumper address twiboot reads live, without
-    // risking a real firmware push.
+    //Sends a unit into bootloader mode and reports which I2C address it answers on, without
+    //writing anything - verifies the DIP-jumper address without risking a real firmware push.
     webServer.on("/api/units/bootloader-probe", HTTP_POST, [](AsyncWebServerRequest * request) {
       if (!request->hasParam(PARAM_ID, true)) {
         request->send(400, "text/plain", "'id' is required");
@@ -1190,10 +1068,7 @@ void setup() {
 #endif
 
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
-    // Admin: browser-based firmware upload (no Arduino IDE required), in three steps - see the
-    // comment on the ota* globals near firmwareUpdateAuthFailed above for why it's chunked.
-    //
-    // Shared password check - all three endpoints require it identically.
+    //Browser-based firmware upload in three chunked steps. Shared password check for all three.
     auto checkOtaPassword = [](AsyncWebServerRequest * request) -> bool {
       if (String(otaPassword) == "") {
         return true; //no password configured, nothing to check
@@ -1236,9 +1111,8 @@ void setup() {
       otaPendingPhase = OTA_PHASE_BEGIN; //loop() calls Update.begin()
     });
 
-    // Step 2: one chunk of firmware data (at most OTA_CHUNK_SIZE bytes), called once per chunk -
-    // the browser waits for this to return before sending the next one, which is the whole point
-    // (natural backpressure via the request/response round-trip, see the comment above).
+    //Step 2: one chunk of firmware data - the browser waits for this to return before sending
+    //the next one, giving natural backpressure.
     webServer.on("/api/firmware-chunk", HTTP_POST,
       [checkOtaPassword](AsyncWebServerRequest * request) {
         if (!checkOtaPassword(request)) {
@@ -1393,6 +1267,16 @@ void setup() {
       long newMessageScheduleDateTimeUnixValue = -1;
       String newAlignmentValue, newDeviceModeValue, newFlapSpeedValue, newInputTextValue, newCountdownToDateUnixValue = "";
       bool hasNewInputTextValue = false;
+      String newClockFormatValue = "";
+      String newDateFormatValue = "";
+      bool hasNewRotationItems = false;
+      String newRotationItemsJson = "";
+      //Distinct hasNew*/empty-allowed pattern (unlike clockFormat/dateFormat above) - "" is a
+      //meaningful, deliberate value here (show the bare day count), not "field not submitted".
+      bool hasNewCountdownPrefixValue = false;
+      String newCountdownPrefixValue = "";
+      bool hasNewCountdownSuffixValue = false;
+      String newCountdownSuffixValue = "";
       
       int params = request->params();
       for (int paramIndex = 0; paramIndex < params; paramIndex++) {
@@ -1413,8 +1297,8 @@ void setup() {
           //HTTP POST device mode value
           if (p->name() == PARAM_DEVICEMODE) {
             String receivedValue = p->value();
-            if (receivedValue == DEVICE_MODE_TEXT || receivedValue == DEVICE_MODE_CLOCK || receivedValue == DEVICE_MODE_DATE || receivedValue == DEVICE_MODE_COUNTDOWN) {
-              newDeviceModeValue = receivedValue;          
+            if (receivedValue == DEVICE_MODE_TEXT || receivedValue == DEVICE_MODE_CLOCK || receivedValue == DEVICE_MODE_DATE || receivedValue == DEVICE_MODE_COUNTDOWN || receivedValue == DEVICE_MODE_ROTATION) {
+              newDeviceModeValue = receivedValue;
             }
             else {
               SerialPrintln("Device Mode provided was not valid. Invalid Value: " + receivedValue); 
@@ -1424,9 +1308,8 @@ void setup() {
 
           //HTTP POST Flap Speed Slider value
           if (p->name() == PARAM_FLAP_SPEED) {
-            //index.html's <input min="1" max="100"> is client-side only - validate server-side
-            //too, since convertSpeed() extrapolates (not clamps) out-of-range values, and a
-            //garbage speed reaching the unit is a real physical-motor safety concern.
+            //Client-side min/max isn't enough - convertSpeed() extrapolates out-of-range values,
+            //and a garbage speed reaching the unit is a real motor safety concern.
             String rawFlapSpeed = p->value();
             if (!isNumber(rawFlapSpeed) || rawFlapSpeed.toInt() < 1 || rawFlapSpeed.toInt() > 100) {
               SerialPrintln("flapSpeed provided was invalid (must be a number 1-100): " + rawFlapSpeed);
@@ -1438,8 +1321,7 @@ void setup() {
 
           //HTTP POST inputText value
           if (p->name() == PARAM_INPUT_TEXT) {
-            //index.html's maxlength="75" is client-side only - enforce server-side too (generously
-            //above the UI's own limit), an unbounded String is needless heap pressure otherwise.
+            //Enforce a max length server-side too - an unbounded String is needless heap pressure.
             if (p->value().length() > 500) {
               SerialPrintln("inputText provided was too long (" + String(p->value().length()) + " chars, max 500)");
               submissionError = true;
@@ -1484,12 +1366,63 @@ void setup() {
               newCountdownToDateUnixValue = receivedValue;
             }
             else {
-              SerialPrintln("Countdown date provided was not valid. Invalid Value: " + receivedValue); 
+              SerialPrintln("Countdown date provided was not valid. Invalid Value: " + receivedValue);
               submissionError = true;
             }
           }
+
+          //Clock/date format, e.g. "HH:mm:ss" - see convertUserDateFormatToEzTime().
+          if (p->name() == PARAM_CLOCK_FORMAT) {
+            if (p->value().length() > 40) {
+              SerialPrintln("clockFormat provided was too long (max 40 chars)");
+              submissionError = true;
+            } else {
+              newClockFormatValue = p->value();
+            }
+          }
+          if (p->name() == PARAM_DATE_FORMAT) {
+            if (p->value().length() > 40) {
+              SerialPrintln("dateFormat provided was too long (max 40 chars)");
+              submissionError = true;
+            } else {
+              newDateFormatValue = p->value();
+            }
+          }
+
+          //HTTP POST Countdown prefix/suffix - "" is a valid, deliberate value (show the bare day
+          //count), so tracked via hasNew*/empty-allowed rather than the newX != "" pattern above.
+          if (p->name() == PARAM_COUNTDOWN_PREFIX) {
+            if (p->value().length() > 40) {
+              SerialPrintln("countdownPrefix provided was too long (max 40 chars)");
+              submissionError = true;
+            } else {
+              newCountdownPrefixValue = p->value();
+              hasNewCountdownPrefixValue = true;
+            }
+          }
+          if (p->name() == PARAM_COUNTDOWN_SUFFIX) {
+            if (p->value().length() > 40) {
+              SerialPrintln("countdownSuffix provided was too long (max 40 chars)");
+              submissionError = true;
+            } else {
+              newCountdownSuffixValue = p->value();
+              hasNewCountdownSuffixValue = true;
+            }
+          }
+
+          //HTTP POST Rotation Items (JSON array, the client always submits the whole list) -
+          //bounded well above any realistic sequence, still a needless-heap-pressure safeguard.
+          if (p->name() == PARAM_ROTATION_ITEMS) {
+            if (p->value().length() > 8000) {
+              SerialPrintln("rotationItems provided was too long (max 8000 chars)");
+              submissionError = true;
+            } else {
+              newRotationItemsJson = p->value();
+              hasNewRotationItems = true;
+            }
+          }
         }
-      }    
+      }
 
       //If there was an error, report back to check what has been input
       if (submissionError) {
@@ -1526,6 +1459,39 @@ void setup() {
           SerialPrintln("Countdown Date Time Unix Updated: " + countdownToDateUnix);
         }
 
+        //Only if the clock/date format has changed
+        if (newClockFormatValue != "" && clockFormat != newClockFormatValue) {
+          clockFormat = newClockFormatValue;
+
+          writeFile(LittleFS, clockFormatPath, clockFormat.c_str());
+          SerialPrintln("Clock Format Updated: " + clockFormat);
+        }
+        if (newDateFormatValue != "" && dateFormat != newDateFormatValue) {
+          dateFormat = newDateFormatValue;
+
+          writeFile(LittleFS, dateFormatPath, dateFormat.c_str());
+          SerialPrintln("Date Format Updated: " + dateFormat);
+        }
+        if (hasNewCountdownPrefixValue && countdownPrefix != newCountdownPrefixValue) {
+          countdownPrefix = newCountdownPrefixValue;
+
+          writeFile(LittleFS, countdownPrefixPath, countdownPrefix.c_str());
+          SerialPrintln("Countdown Prefix Updated: " + countdownPrefix);
+        }
+        if (hasNewCountdownSuffixValue && countdownSuffix != newCountdownSuffixValue) {
+          countdownSuffix = newCountdownSuffixValue;
+
+          writeFile(LittleFS, countdownSuffixPath, countdownSuffix.c_str());
+          SerialPrintln("Countdown Suffix Updated: " + countdownSuffix);
+        }
+
+        //Rotation items are always submitted as the complete list (see index.html) - a full
+        //replace, not an incremental add.
+        if (hasNewRotationItems) {
+          replaceRotationItemsFromJson(newRotationItemsJson);
+          SerialPrintln("Rotation Items Updated, count: " + String(rotationItemCount));
+        }
+
         //If its a new scheduled message, add it to the backlog and proceed, don't want to change device mode
         //Else, we do want to change the device mode and clear out the input text
         if (newMessageScheduleEnabledValue) {
@@ -1536,6 +1502,12 @@ void setup() {
           //Only if device mode has changed
           if (newDeviceModeValue != "" && deviceMode != newDeviceModeValue) {
             deviceMode = newDeviceModeValue;
+
+            //Always (re-)start a sequence from the beginning when switching into Rotation mode.
+            if (deviceMode == DEVICE_MODE_ROTATION) {
+              rotationCurrentIndex = 0;
+              rotationItemStartedAtSeconds = 0;
+            }
 
             writeFile(LittleFS, deviceModePath, deviceMode.c_str());
             SerialPrintln("Device Mode Set: " + deviceMode);
@@ -1650,6 +1622,117 @@ void setup() {
       request->send(200, "text/html", html);
       isPendingWifiReset = true;
     });
+
+    //Kicks off an async network scan - see wifiScanRequested's comment above. Just sets a flag,
+    //the actual WiFi.scanNetworksAsync() call happens in loop().
+    webServer.on("/api/wifi/scan", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (WiFi.scanComplete() == WIFI_SCAN_RUNNING || wifiScanRequested) {
+        request->send(409, "text/plain", "A scan is already in progress");
+        return;
+      }
+      SerialPrintln("WiFi scan requested");
+      wifiScanRequested = true;
+      request->send(200, "text/plain", "Scan started");
+    });
+
+    //Polled by the client after POST /api/wifi/scan. WiFi.scanComplete() returns WIFI_SCAN_RUNNING
+    //(-1) while still scanning, WIFI_SCAN_FAILED (-2) on failure, otherwise the network count.
+    webServer.on("/api/wifi/scan-result", HTTP_GET, [](AsyncWebServerRequest * request) {
+      int8_t scanResult = WiFi.scanComplete();
+
+      JsonDocument doc;
+      if (scanResult == WIFI_SCAN_RUNNING || wifiScanRequested) {
+        doc["scanning"] = true;
+      } else if (scanResult == WIFI_SCAN_FAILED) {
+        doc["scanning"] = false;
+        doc["error"] = "Scan failed";
+      } else {
+        doc["scanning"] = false;
+        JsonArray networks = doc["networks"].to<JsonArray>();
+
+        //Dedupe by SSID (the same network can show up once per BSSID/channel/repeater) - keep only
+        //the strongest-signal entry for each name, sorted strongest-first by scan order already.
+        for (int i = 0; i < scanResult; i++) {
+          String ssid = WiFi.SSID(i);
+          if (ssid == "") {
+            continue; //hidden network - nothing to show/select by name
+          }
+
+          int32_t rssi = WiFi.RSSI(i);
+          bool secure = WiFi.encryptionType(i) != ENC_TYPE_NONE;
+
+          bool alreadyListed = false;
+          for (JsonObject existingNetwork : networks) {
+            if (existingNetwork["ssid"] == ssid) {
+              alreadyListed = true;
+              if (rssi > (int32_t)existingNetwork["rssi"]) {
+                existingNetwork["rssi"] = rssi;
+              }
+              break;
+            }
+          }
+          if (!alreadyListed) {
+            JsonObject network = networks.add<JsonObject>();
+            network["ssid"] = ssid;
+            network["rssi"] = rssi;
+            network["secure"] = secure;
+          }
+        }
+        WiFi.scanDelete();
+      }
+
+      AsyncResponseStream *response = request->beginResponseStream("application/json");
+      serializeJson(doc, *response);
+      request->send(response);
+    });
+
+    //Connects to a new WiFi network without rebooting - drops the current connection immediately,
+    //before the new credentials are known to work; checkWifiConnectAttempt() reverts on failure.
+    webServer.on("/api/wifi/connect", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (wifiConnectPhase != WIFI_CONNECT_NONE) {
+        request->send(409, "text/plain", "A connection attempt is already in progress");
+        return;
+      }
+      if (!request->hasParam("ssid", true) || request->getParam("ssid", true)->value() == "") {
+        request->send(400, "text/plain", "'ssid' is required");
+        return;
+      }
+
+      //Captured now, fast/synchronous - by the time loop() actually calls WiFi.begin() with the
+      //new credentials, WiFi.SSID()/psk() would already reflect them, not the old ones anymore.
+      wifiConnectOldSsid = WiFi.SSID();
+      wifiConnectOldPassword = WiFi.psk();
+      wifiConnectNewSsid = request->getParam("ssid", true)->value();
+      wifiConnectNewPassword = request->hasParam("password", true) ? request->getParam("password", true)->value() : "";
+
+      SerialPrintln("WiFi connect requested: SSID=\"" + wifiConnectNewSsid + "\"");
+      wifiConnectPhase = WIFI_CONNECT_PENDING;
+      request->send(200, "text/plain", "Connection attempt started");
+    });
+
+    //Polled to find out how the attempt above went. A terminal result is only reported once - the
+    //phase resets to "none" right after being read.
+    webServer.on("/api/wifi/connect-status", HTTP_GET, [](AsyncWebServerRequest * request) {
+      JsonDocument doc;
+      switch (wifiConnectPhase) {
+        case WIFI_CONNECT_NONE: doc["phase"] = "none"; break;
+        case WIFI_CONNECT_PENDING: doc["phase"] = "pending"; break;
+        case WIFI_CONNECT_TESTING: doc["phase"] = "testing"; break;
+        case WIFI_CONNECT_SUCCESS: doc["phase"] = "success"; break;
+        case WIFI_CONNECT_FAILED_REVERTED: doc["phase"] = "failed_reverted"; break;
+      }
+      doc["wifiStatus"] = WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected";
+      doc["wifiSsid"] = WiFi.SSID();
+      doc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
+
+      if (wifiConnectPhase == WIFI_CONNECT_SUCCESS || wifiConnectPhase == WIFI_CONNECT_FAILED_REVERTED) {
+        wifiConnectPhase = WIFI_CONNECT_NONE;
+      }
+
+      AsyncResponseStream *response = request->beginResponseStream("application/json");
+      serializeJson(doc, *response);
+      request->send(response);
+    });
 #endif
 
     //Freely readable without auth (this device has no separate login) - changing it still
@@ -1721,6 +1804,11 @@ void setup() {
       request->send(200, "text/plain", "Timezone changed");
     });
 
+    //Without this, ESPAsyncWebSrv's catch-all handler returns 500 instead of 404 for unknown routes.
+    webServer.onNotFound([](AsyncWebServerRequest * request) {
+      request->send(404, "text/plain", "Not Found");
+    });
+
     delay(250);
     webServer.begin();
     
@@ -1750,13 +1838,6 @@ void setup() {
   }
 }
 
-/* .----------------------------------------------------. */
-/* | ___                _             _                 | */
-/* || _ \_  _ _ _  _ _ (_)_ _  __ _  | |   ___ ___ _ __ | */
-/* ||   | || | ' \| ' \| | ' \/ _` | | |__/ _ / _ | '_ \| */
-/* ||_|_\\_,_|_||_|_||_|_|_||_\__, | |____\___\___| .__/| */
-/* |                          |___/               |_|   | */
-/* '----------------------------------------------------' */
 void loop() {
   //First I2C scan, delayed 30s after boot (see setup()) - runs here instead of blocking setup(),
   //so WiFi/the web server start immediately. Fires exactly once.
@@ -1890,9 +1971,8 @@ void loop() {
   }
 
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
-  // Does the one pending Update.* call for whichever phase a client is currently waiting on, here
-  // in loop()'s large safe stack - Update.begin()/write()/end() need more stack than an
-  // AsyncWebServer callback has available.
+  //Does the pending Update.* call from loop()'s stack - Update.begin()/write()/end() need more
+  //stack than an AsyncWebServer callback has available.
   if (otaPendingPhase == OTA_PHASE_BEGIN) {
     uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
     uint32_t rounded = (otaBeginSize + 0xFFF) & 0xFFFFF000; //round up to a flash sector
@@ -2045,9 +2125,8 @@ void loop() {
       doc["pageSize"] = chipInfo.pageSize;
       doc["bootloaderStart"] = chipInfo.bootloaderStart;
 
-      //Unconditional re-init: repeated-start I2C reads (what the scan above just did) can leave
-      //the ESP8266 core's *software* I2C state stuck (NACK on every later transaction) even when
-      //the physical bus is idle - recoverI2CBus() alone doesn't catch that case.
+      //Unconditional re-init: repeated-start I2C reads can leave the software I2C state stuck even
+      //when the physical bus is idle - recoverI2CBus() alone doesn't catch that.
       Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
       Wire.setClock(400000);
 #if UNIT_BOOTLOADER_ENABLE == true
@@ -2095,9 +2174,8 @@ void loop() {
   }
 #endif
 
-  // IMPORTANT: no custom WiFi reconnect-monitoring block here, deliberately - a prior version
-  // fought the SDK's own background auto-reconnect and caused instability. Trust
-  // wifiManager.setWiFiAutoReconnect(true) (set once in initWiFi()) instead of adding one.
+  //No custom WiFi reconnect-monitoring here deliberately - a prior version fought the SDK's own
+  //auto-reconnect and caused instability.
 
   //Do nothing if WiFi is not configured
   if (!isWifiConfigured) {
@@ -2111,14 +2189,11 @@ void loop() {
     return;
   }
 
-  //If no units have been detected (see scanI2CBus()), there's nothing to display to - skip
-  //anything unit-related below. Web server, OTA and settings all stay fully usable; use the
-  //Admin page's "Rescan Units" once wiring/addressing is fixed, no reboot required.
+  //If no units detected, skip anything unit-related - web server/OTA/settings stay usable; use
+  //"Rescan Units" once wiring/addressing is fixed.
   bool unitsAvailable = (unitsAmount > 0);
 
-  //updateUnitsResetSequence() (ServiceDisplayJobFunctions.ino) does a non-blocking
-  //blank1 -> pause -> blank2 sequence - a real delay(2000) here would freeze loop() itself, since
-  //showText() no longer blocks until done.
+  //updateUnitsResetSequence() does a non-blocking blank1 -> pause -> blank2 sequence.
   if (unitsAvailable && isPendingUnitsReset) {
     updateUnitsResetSequence();
   } else if (!unitsAvailable) {
@@ -2143,19 +2218,28 @@ void loop() {
 
     checkScheduledMessages();
     checkCountdown();
+    checkRotation();
+#if WIFI_USE_DIRECT == false
+    checkWifiScanRequest();
+    checkWifiConnectAttempt();
+#endif
 
     // Skip display updates if a web request is active to prevent blocking.
     // (showText() itself is a no-op when no units are detected, see scanI2CBus())
     if (!webRequestActive) {
       //Mode Selection
-      if (deviceMode == DEVICE_MODE_TEXT || deviceMode == DEVICE_MODE_COUNTDOWN) {
+      if (deviceMode == DEVICE_MODE_ROTATION) {
+        //rotationCurrentAlignment ("" = inherit the default) is set every tick by checkRotation().
+        showText(inputText, 0, rotationCurrentAlignment);
+      }
+      else if (deviceMode == DEVICE_MODE_TEXT || deviceMode == DEVICE_MODE_COUNTDOWN) {
         showText(inputText);
       }
       else if (deviceMode == DEVICE_MODE_DATE) {
-        showText(timezone.dateTime(dateFormat));
+        showText(timezone.dateTime(convertUserDateFormatToEzTime(dateFormat)));
       }
       else if (deviceMode == DEVICE_MODE_CLOCK) {
-        showText(timezone.dateTime(clockFormat));
+        showText(timezone.dateTime(convertUserDateFormatToEzTime(clockFormat)));
       }
     } else {
       // Web request is active, skip display update to keep web server responsive
@@ -2164,9 +2248,8 @@ void loop() {
   }
 }
 
-// Scans the I2C bus and (re-)determines unitsAmount: units found sequentially from address 0,
-// stopping at the first gap (mirrors the DIP switches' "must be sequential from 0" requirement -
-// a gap means a wiring/config problem, not a sparse set of units). Sets the global as a side effect.
+//Scans the I2C bus and (re-)determines unitsAmount: units found sequentially from address 0,
+//stopping at the first gap. Sets the global as a side effect.
 int scanI2CBus() {
   SerialPrintln("========================================");
   SerialPrintln("I2C Bus Scan - Checking addresses 0-" + String(UNITS_AMOUNT_MAX - 1));

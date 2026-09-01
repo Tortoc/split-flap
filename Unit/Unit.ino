@@ -37,6 +37,11 @@ const uint8_t addressPins[ADDRESS_PIN_COUNT] = {A0, A1, A2, A3, 3, 4}; //bit 0..
 #define HALLPIN 7 //Pin of hall sensor
 #define AMOUNTFLAPS 45
 
+//Deceleration ramp tuning for stepLetters() below - slows the last letter-position(s) instead of
+//hitting the target at full speed every time. 0 letters disables the ramp entirely.
+#define RAMP_DOWN_LETTERS 1
+#define RAMP_DOWN_MIN_FACTOR 0.7 //speed fraction (of stepperSpeed) reached on the final letter-position
+
 //constants others
 #define BAUDRATE 115200
 #define ROTATIONDIRECTION -1 //-1 for reverse direction
@@ -62,8 +67,7 @@ bool lastInd4 = false; //store last status of phase
 float missedSteps = 0; //cummulate steps <1, to compensate via additional step when reaching >1
 int currentlyrotating = 0; // 1 = drum is currently rotating, 0 = drum is standing still
 
-//Extra I2C status byte so ESPMaster can see *what kind* of busy the unit is (e.g. a legitimately
-//slow full-rotation calibration search vs. an actually stuck unit), not just busy/idle. See requestEvent().
+//Extra I2C status byte so ESPMaster can tell a slow calibration search from an actually stuck unit.
 #define PHASE_IDLE        0
 #define PHASE_CALIBRATING 1
 #define PHASE_ROTATING    2
@@ -74,9 +78,9 @@ int eeAddress = 0;   //EEPROM address for calibration offset
 uint16_t calOffset;       //Offset for calibration in steps, stored in EEPROM, gets read in setup
 int receivedNumber = 0;
 int i2cAddress;
-bool forceRecalibrate = false; //set when a new calibration offset is received via I2C, triggers an immediate recalibration in loop()
-bool pendingEepromWrite = false; //set when a new calibration offset arrives via I2C - see the comment on receiveLetter() for why the actual EEPROM.put() must happen in loop(), not there
-bool enterBootloaderRequested = false; //set when CMD_ENTER_BOOTLOADER is received via I2C, triggers a watchdog reset in loop()
+bool forceRecalibrate = false;   //new offset received via I2C, recalibrate immediately in loop()
+bool pendingEepromWrite = false; //new offset received via I2C, EEPROM.put() must happen in loop(), not the ISR
+bool enterBootloaderRequested = false; //CMD_ENTER_BOOTLOADER received, triggers a watchdog reset in loop()
 
 //sleep globals
 const unsigned long WAIT_TIME = 2000;    //wait time before sleep routine gets executed again in milliseconds
@@ -225,6 +229,34 @@ int translateLettertoInt(char letterchar) {
   return -1;
 }
 
+//Moves the drum forward by `letterSteps` letter-positions, decelerating over the final
+//RAMP_DOWN_LETTERS positions instead of hitting the target at full stepperSpeed. Shared by both
+//rotateToLetter() branches (direct move, and the post-calibration full-rotation move).
+void stepLetters(int letterSteps) {
+  stepper.setSpeed(stepperSpeed);
+
+  for (int i = 0; i < letterSteps; i++) {
+    currentPhaseProgress = (uint16_t)i;
+
+    int stepsRemaining = letterSteps - i;
+    if (RAMP_DOWN_LETTERS > 0 && stepsRemaining <= RAMP_DOWN_LETTERS) {
+      float rampFraction = (float)stepsRemaining / (float)(RAMP_DOWN_LETTERS + 1);
+      float speedFactor = RAMP_DOWN_MIN_FACTOR + (1.0 - RAMP_DOWN_MIN_FACTOR) * rampFraction;
+      int rampedSpeed = (int)(stepperSpeed * speedFactor);
+      stepper.setSpeed(rampedSpeed > 0 ? rampedSpeed : 1); //never 0, Stepper::step() would spin forever
+    }
+
+    float preciseStep = (float)STEPS / (float)AMOUNTFLAPS;
+    int roundedStep = (int)preciseStep;
+    missedSteps = missedSteps + ((float)preciseStep - (float)roundedStep);
+    if (missedSteps > 1) {
+      roundedStep = roundedStep + 1;
+      missedSteps--;
+    }
+    stepper.step(ROTATIONDIRECTION * roundedStep);
+  }
+}
+
 //rotate to letter
 void rotateToLetter(int toLetter) {
   if (lastRotation == 0 || (millis() - lastRotation > OVERHEATINGTIMEOUT * 1000)) {
@@ -249,19 +281,7 @@ void rotateToLetter(int toLetter) {
         //go directly to next letter, get steps from current letter to target letter
         int diffPosition = posLetter - posCurrentLetter;
         startMotor();
-        stepper.setSpeed(stepperSpeed);
-        //doing the rotation letterwise
-        for (int i = 0; i < diffPosition; i++) {
-          currentPhaseProgress = (uint16_t)i;
-          float preciseStep = (float)STEPS / (float)AMOUNTFLAPS;
-          int roundedStep = (int)preciseStep;
-          missedSteps = missedSteps + ((float)preciseStep - (float)roundedStep);
-          if (missedSteps > 1) {
-            roundedStep = roundedStep + 1;
-            missedSteps--;
-          }
-          stepper.step(ROTATIONDIRECTION * roundedStep);
-        }
+        stepLetters(diffPosition);
       }
       else {
         //full rotation is needed, good time for a calibration
@@ -271,18 +291,7 @@ void rotateToLetter(int toLetter) {
         calibrate(false); //calibrate revolver and do not stop motor
         //startMotor();
         currentPhase = PHASE_ROTATING; //calibrate() left it at PHASE_CALIBRATING, we're rotating to the target letter now
-        stepper.setSpeed(stepperSpeed);
-        for (int i = 0; i < posLetter; i++) {
-          currentPhaseProgress = (uint16_t)i;
-          float preciseStep = (float)STEPS / (float)AMOUNTFLAPS;
-          int roundedStep = (int)preciseStep;
-          missedSteps = missedSteps + (float)preciseStep - (float)roundedStep;
-          if (missedSteps > 1) {
-            roundedStep = roundedStep + 1;
-            missedSteps--;
-          }
-          stepper.step(ROTATIONDIRECTION * roundedStep);
-        }
+        stepLetters(posLetter);
       }
       //store new position
       displayedLetter = toLetter;
@@ -299,10 +308,8 @@ void rotateToLetter(int toLetter) {
   }
 }
 
-//Every message ends with one XOR-checksum byte (mirrors i2cChecksum() in ESPMaster's
-//ServiceFlapFunctions.ino). A mismatch (likely I2C bus glitch noise) is ignored entirely - much
-//stronger than range-checking the letter alone (~1-in-6 chance of a random byte looking valid,
-//vs. ~1-in-256 of also passing this).
+//Every message ends with an XOR-checksum byte (mirrors i2cChecksum() in ESPMaster). A mismatch
+//(likely I2C bus noise) is ignored entirely.
 void receiveLetter(int numBytes) {
   int receiveArray[5]; //array for received bytes - grew from 4 to 5 for the checksum byte
   uint16_t newCalOffset = 0;

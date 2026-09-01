@@ -1,10 +1,17 @@
 //Shows a new message on the display. Non-blocking: starts a job (ServiceDisplayJobFunctions.ino)
 //and returns immediately - updateDisplayJob() does the actual work incrementally per loop() tick.
+//alignmentOverride: "" (default) uses the global default alignment; a non-empty value
+//("left"/"center"/"right") overrides it just for this message - used by Rotation items that set
+//their own alignment (see checkRotation()).
 void showText(String message) {
-  showText(message, 0);
+  showText(message, 0, "");
 }
 
 void showText(String message, int delayMillis) {
+  showText(message, delayMillis, "");
+}
+
+void showText(String message, int delayMillis, String alignmentOverride) {
   //Nothing to display to - see scanI2CBus(). Guarded here (rather than at every call site)
   //so scheduled messages, countdown, clock/date modes etc. all stay safe automatically.
   if (unitsAmount <= 0) {
@@ -14,7 +21,7 @@ void showText(String message, int delayMillis) {
   if (lastWrittenText != message || alignmentUpdated) {
     //If a job is still running, this attempt is silently skipped - lastWrittenText hasn't updated
     //yet, so the next ~1s loop() tick naturally retries once the display is free.
-    startDisplayJob(message, convertSpeed(flapSpeed), (unsigned long)delayMillis);
+    startDisplayJob(message, convertSpeed(flapSpeed), (unsigned long)delayMillis, alignmentOverride);
   }
 }
 

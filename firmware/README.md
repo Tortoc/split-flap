@@ -48,10 +48,21 @@ Boot zu Adressfehlern führen.
 
 `littlefs.bin` gebaut mit `mklittlefs -p 256 -b 8192 -s 1024000` (Werte
 passend zu `eesz=4M1M`s `spiffs_blocksize`/`spiffs_start`/`spiffs_end` in
-`boards.txt` - **nicht** mehr die alten `4096`/`131072`-Werte) aus
-[`ESPMaster/data/`](../ESPMaster/data). Adresse zum Flashen ebenfalls
-geändert: `0x300000` statt `0xDB000` (siehe `boards.txt`s
+`boards.txt` - **nicht** mehr die alten `4096`/`131072`-Werte). Adresse zum
+Flashen ebenfalls geändert: `0x300000` statt `0xDB000` (siehe `boards.txt`s
 `generic.menu.eesz.4M1M.build.spiffs_start`).
+
+**Änderung 2026-08-31 (siehe BUGFIX_LOG.md #94):** `mklittlefs` läuft nicht
+mehr direkt gegen [`ESPMaster/data/`](../ESPMaster/data), sondern gegen eine
+Kopie davon, in der `index.html` durch ein gzip-komprimiertes
+`index.html.gz` ersetzt ist (`gzip -9 -k -c ESPMaster/data/index.html >
+<kopie>/index.html.gz`, danach das unkomprimierte `index.html` aus der Kopie
+löschen) - spart ~55% Übertragungsgröße, `ESPAsyncWebSrv` liefert `.gz`-Dateien
+automatisch mit korrektem `Content-Encoding: gzip` aus. Die im Repo verfolgte
+`ESPMaster/data/index.html` selbst bleibt unverändert die normale, lesbare
+Quelldatei - nur dieser Build-Schritt komprimiert sie zusätzlich. Einzelne
+Web-Datei-Updates über `POST /api/web-file` müssen seitdem ebenfalls
+`index.html.gz` (nicht mehr `index.html`) als Zieldateiname verwenden.
 
 **Unit** (Arduino Nano / bare ATmega328P, altes Bootloader-Profil - passend
 zu den 16MHz/`hfuse=0xDA`-Fuses, siehe [`Unit/BOOTLOADER_SETUP.md`](../Unit/BOOTLOADER_SETUP.md)):

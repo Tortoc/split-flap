@@ -1,9 +1,5 @@
-// Non-blocking display-update state machine - showText() used to block loop() for up to 90s per
-// update, starving the "deferred to loop()" web request pattern. A real state machine rather
-// than more yield() points, deliberately: yield-points inside the old blocking wait let I2C reads
-// nest inside an already-running I2C wait cycle and made connection stability worse. Here at most
-// one I2C transfer is ever in flight, always from updateDisplayJob() at the top of loop().
-// showText() keeps its old signature/behavior - it just starts a job and returns immediately.
+//Non-blocking display-update state machine - showText() starts a job and returns immediately;
+//updateDisplayJob() does at most one I2C transfer per loop() tick.
 
 enum DisplayJobState {
   DISPLAY_JOB_IDLE,
@@ -18,13 +14,10 @@ enum DisplayJobState {
 struct DisplayJob {
   DisplayJobState state = DISPLAY_JOB_IDLE;
   String originalMessage;      //what showText() was actually asked to show, for lastWrittenText
-  //IMPORTANT: must stay a plain array, not `LList<String> lines` assigned from
-  //processSentenceToLines() - LinkedList's destructor unconditionally deletes every node, so
-  //assigning a temporary's LList into a longer-lived struct member leaves dangling pointers
-  //once the temporary is destroyed (live-crashed on the first multi-line message tested). Copy
-  //just the String elements into a fixed array instead - never store an LList across a scope boundary.
-  static const int MAX_DISPLAY_LINES = 50; //500-char max message (#31) / a few chars per line
-                                            //(unitsAmount) comfortably fits well under this
+  //Must stay a plain array, not LList<String> - LinkedList's destructor deletes every node, so
+  //assigning a temporary LList into a longer-lived struct leaves dangling pointers once the
+  //temporary is destroyed. Copy just the String elements instead.
+  static const int MAX_DISPLAY_LINES = 50; //500-char max message comfortably fits under this
   String lines[MAX_DISPLAY_LINES];
   int lineCount = 0;
   bool isMultiLine = false;    //split lines are only used when there's more than one; a single
@@ -33,6 +26,7 @@ struct DisplayJob {
   int flapSpeedValue = 0;
   unsigned long finalPauseMs = 0;
   unsigned long pauseUntil = 0;
+  String alignmentOverride = ""; //"" = use the global default alignment, see showText()
 
   //Sub-state for the "wait for all units ready" phase - one unit at a time, 90s max-wait / 15s
   //stuck-timeout, spread non-blockingly across loop() ticks (see pollDisplayJobWaitAllUnitsReady() below).
@@ -66,7 +60,7 @@ void resetDisplayJobWaitSubstate() {
 //Starts a new display job. Returns false (does nothing) if one is already running - callers that
 //need strict ordering against other jobs (see updateUnitsResetSequence()) check isDisplayJobBusy()
 //themselves rather than relying on this to queue anything.
-bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPauseMs) {
+bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPauseMs, String alignmentOverride) {
   if (displayJob.state != DISPLAY_JOB_IDLE) {
     return false;
   }
@@ -93,6 +87,7 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   displayJob.currentLineIndex = 0;
   displayJob.flapSpeedValue = flapSpeedValue;
   displayJob.finalPauseMs = finalPauseMs;
+  displayJob.alignmentOverride = alignmentOverride;
 
   SerialPrintln(displayJob.isMultiLine ? "Showing a split down message" : ("Showing a simple message: " + message));
 
@@ -107,13 +102,11 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   return true;
 }
 
-//Advances the "wait for all units ready" sub-state by at most one I2C read (one unit at a time,
-//one poll per ~1s). Returns true once every unit has been waited on (ready, or given up on via
-//forceUnitRecoveryReset() - one unit's failure doesn't stop the whole sequence).
+//Advances the "wait for all units ready" sub-state by at most one I2C read per call. Returns true
+//once every unit has been waited on (ready, or given up on via forceUnitRecoveryReset()).
 //
-//Only fetches the heavy 6-byte read (status+offset+phase+progress) every Nth poll, light 3-byte
-//otherwise - the ATmega328p's TWI fires one interrupt PER BYTE, and 6 ISR firings landing
-//mid-calibration is a plausible contributor to the still-open "unit spins very slowly" issue.
+//Only fetches the heavy 6-byte read every Nth poll, light 3-byte otherwise - reduces I2C interrupt
+//load on the ATmega328p during calibration.
 const int PHASE_READ_EVERY_N_POLLS = 3; //heavy 6-byte read roughly every 3s instead of every 1s
 
 bool pollDisplayJobWaitAllUnitsReady() {
@@ -219,12 +212,16 @@ void updateDisplayJob() {
         SerialPrintln(line);
       }
 
+      //"" (no override, the common case) falls back to the global default alignment - see
+      //showText()/startDisplayJob(). Only Rotation items ever set a non-empty override.
+      String effectiveAlignment = displayJob.alignmentOverride != "" ? displayJob.alignmentOverride : alignment;
+
       String aligned = line;
-      if (alignment == ALIGNMENT_MODE_LEFT) {
+      if (effectiveAlignment == ALIGNMENT_MODE_LEFT) {
         aligned = leftString(aligned);
-      } else if (alignment == ALIGNMENT_MODE_RIGHT) {
+      } else if (effectiveAlignment == ALIGNMENT_MODE_RIGHT) {
         aligned = rightString(aligned);
-      } else if (alignment == ALIGNMENT_MODE_CENTER) {
+      } else if (effectiveAlignment == ALIGNMENT_MODE_CENTER) {
         aligned = centerString(aligned);
       }
 
@@ -306,7 +303,7 @@ void updateUnitsResetSequence() {
     case UNITS_RESET_SEQ_IDLE:
       //Only actually logs/transitions once the display is free - if busy, silently retries next
       //tick instead of spamming this line every loop() iteration.
-      if (startDisplayJob(createRepeatingString('-'), convertSpeed(flapSpeed), 0)) {
+      if (startDisplayJob(createRepeatingString('-'), convertSpeed(flapSpeed), 0, "")) {
         SerialPrintln("Reseting Units now...");
         unitsResetSequenceState = UNITS_RESET_SEQ_BLANK1;
       }
@@ -321,7 +318,7 @@ void updateUnitsResetSequence() {
 
     case UNITS_RESET_SEQ_PAUSE:
       if (millis() >= unitsResetSequencePauseUntil) {
-        if (startDisplayJob(createRepeatingString('.'), convertSpeed(flapSpeed), 0)) {
+        if (startDisplayJob(createRepeatingString('.'), convertSpeed(flapSpeed), 0, "")) {
           unitsResetSequenceState = UNITS_RESET_SEQ_BLANK2;
         }
       }

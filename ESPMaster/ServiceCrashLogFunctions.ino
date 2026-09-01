@@ -1,15 +1,14 @@
-// On-device crash reporter - makes crash diagnosis independent of a live serial connection.
-// custom_crash_callback() (called by the ESP8266 core itself, right before its automatic reset)
-// captures the exception + stack into RTC memory, which survives any reset short of power loss.
-// checkAndPersistCrashLog() (setup(), every boot) copies a fresh capture into a rotating LittleFS
-// log, so it survives a full power cycle too; GET /crash-log serves that to any browser, no serial needed.
+//On-device crash reporter - makes crash diagnosis independent of a live serial connection.
+//custom_crash_callback() (called by the ESP8266 core right before its automatic reset) captures
+//the exception + stack into RTC memory, which survives a reset. checkAndPersistCrashLog() (setup(),
+//every boot) copies a fresh capture into a rotating LittleFS log so it survives a power cycle too;
+//GET /crash-log serves that to any browser.
 
-// custom_crash_callback() itself lives in ServiceCrashLogFunctions.cpp, not here - Arduino's
-// .ino auto-prototyping conflicts with the extern "C" linkage this weak-symbol override needs.
+//custom_crash_callback() itself lives in ServiceCrashLogFunctions.cpp - see that file.
 #include "CrashLog.h"
 
-// Human-readable struct rst_info.reason values. 0-6 are the ESP8266 SDK's own; 253/254 are
-// core_esp8266_postmortem.cpp's software-only values for abort()/panic()/assert().
+//Human-readable struct rst_info.reason values. 0-6 are the SDK's own; 253/254 are
+//core_esp8266_postmortem.cpp's software-only values for abort()/panic()/assert().
 const char* crashResetReasonText(uint32_t reason) {
   switch (reason) {
     case 0:   return "power-on";
@@ -25,9 +24,8 @@ const char* crashResetReasonText(uint32_t reason) {
   }
 }
 
-// Only the handful of Xtensa exception causes most common in practice - falls back to an empty
-// string otherwise. Only meaningful when reason==2; for every other reason (including 254),
-// exccause is left at its memset-to-0 default and doesn't actually mean "IllegalInstruction".
+//Only meaningful when reason==2 - for every other reason (including 254), exccause is left at 0
+//and doesn't mean "IllegalInstruction".
 const char* crashExceptionCauseText(uint32_t reason, uint32_t exccause) {
   if (reason != 2) return "";
   switch (exccause) {
@@ -40,8 +38,8 @@ const char* crashExceptionCauseText(uint32_t reason, uint32_t exccause) {
   }
 }
 
-// Checks RTC memory for a crash captured just before the last reset. If found: appends it to the
-// rotating LittleFS log and clears the RTC magic. Must run after LittleFS is mounted.
+//Checks RTC memory for a crash captured just before the last reset. If found: appends it to the
+//rotating LittleFS log and clears the RTC magic. Must run after LittleFS is mounted.
 void checkAndPersistCrashLog() {
   CrashDump dump;
   memset(&dump, 0, sizeof(dump));
@@ -49,7 +47,7 @@ void checkAndPersistCrashLog() {
     return;
   }
   if (dump.magic != CRASH_LOG_MAGIC) {
-    return; // Nothing captured since the last check - a normal boot/reset.
+    return; //nothing captured since the last check
   }
 
   SerialPrintln("=== Crash detected from previous run - saving to " CRASH_LOG_PATH " ===");
@@ -72,7 +70,7 @@ void checkAndPersistCrashLog() {
   String entryLine;
   serializeJson(entryDoc, entryLine);
 
-  // Rotate: keep at most CRASH_LOG_MAX_ENTRIES lines (drop the oldest once full).
+  //Rotate: keep at most CRASH_LOG_MAX_ENTRIES lines.
   std::vector<String> lines;
   File existing = LittleFS.open(CRASH_LOG_PATH, "r");
   if (existing) {
@@ -97,7 +95,7 @@ void checkAndPersistCrashLog() {
     SerialPrintln("- Failed to write crash log to LittleFS");
   }
 
-  // Clear the RTC magic so a later, unrelated reboot doesn't re-report this same crash.
+  //Clear the RTC magic so a later, unrelated reboot doesn't re-report this same crash.
   memset(&dump, 0, sizeof(dump));
   ESP.rtcUserMemoryWrite(0, reinterpret_cast<uint32_t*>(&dump), sizeof(dump));
 }

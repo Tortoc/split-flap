@@ -53,10 +53,8 @@ bool removeScheduledMessage(long scheduledDateTimeUnix) {
   return false;
 }
 
-//Check if scheduled message is due to be shown
-void checkScheduledMessages() {   
-  //Iterate over the current bunch of scheduled messages. If we find one where the current time exceeds when we should show
-  //the message, then we need to show that message immediately
+//Show and remove any scheduled message whose time has passed
+void checkScheduledMessages() {
   unsigned long currentTimeUnix = timezone.now();
   for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
     ScheduledMessage scheduledMessage = scheduledMessages[scheduledMessageIndex];

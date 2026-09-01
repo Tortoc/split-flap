@@ -1,24 +1,20 @@
-// Function to add message to serial log buffer (declared in ESPMaster.ino)
 extern void addToSerialLog(const String &message);
 extern String currentSerialLine;
 
-//Offers option to call these methods to do serial output and not have to do 
-//definition checks with every call
+//Wrappers around Serial.print/println/printf that also mirror output into the web log buffer,
+//and no-op the physical Serial calls when SERIAL_ENABLE is off.
 template <typename T>
 void SerialPrint(T value) {
 #if SERIAL_ENABLE == true
     Serial.print(value);
 #endif
-    // Always log to web interface buffer (build line)
     currentSerialLine += String(value);
 }
 
-// Explicit overload for IPAddress
 void SerialPrint(IPAddress value) {
 #if SERIAL_ENABLE == true
     Serial.print(value);
 #endif
-    // Always log to web interface buffer (build line)
     currentSerialLine += value.toString();
 }
 
@@ -27,7 +23,6 @@ void SerialPrintf(const char* message, T value) {
 #if SERIAL_ENABLE == true
     Serial.printf(message, value);
 #endif
-    // Always log to web interface buffer
     char buffer[256];
     snprintf(buffer, sizeof(buffer), message, value);
     addToSerialLog(String(buffer));
@@ -38,19 +33,16 @@ void SerialPrintln(T value) {
 #if SERIAL_ENABLE == true
     Serial.println(value);
 #endif
-    // Always log to web interface buffer (complete line)
     currentSerialLine += String(value);
     addToSerialLog(currentSerialLine);
-    currentSerialLine = ""; // Clear for next line
+    currentSerialLine = "";
 }
 
-// Explicit overload for IPAddress
 void SerialPrintln(IPAddress value) {
 #if SERIAL_ENABLE == true
     Serial.println(value);
 #endif
-    // Always log to web interface buffer (complete line)
     currentSerialLine += value.toString();
     addToSerialLog(currentSerialLine);
-    currentSerialLine = ""; // Clear for next line
+    currentSerialLine = "";
 }

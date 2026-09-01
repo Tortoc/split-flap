@@ -1,9 +1,6 @@
-// I2C bus recovery for the "writes work, reads hang" pattern - a slave stuck holding SDA low.
-// Per the I2C spec (NXP AN10216): the master can free it by clocking SCL up to 9 times then
-// forcing a STOP; the ESP8266 core's Wire.begin() doesn't do this itself. Not a Wire replacement -
-// a helper called both proactively and when a read fails (readUnitInfo()). If recovery alone
-// isn't enough, the stronger escalation is requestUnitEnterBootloader() (write path stays
-// reliable even when reads hang) - see waitForUnitReady().
+//I2C bus recovery for a slave stuck holding SDA low. Per the I2C spec (NXP AN10216), the master can
+//free it by clocking SCL up to 9 times then forcing a STOP - the ESP8266 core doesn't do this
+//itself. Called both proactively and when a read fails.
 
 // Un-sticks a hung bus: clocks SCL to release a slave holding SDA low, then generates a STOP.
 // Cheap, no-op if already idle. Uses pin *mode* switching, not digitalWrite() - I2C is open-drain,
@@ -64,10 +61,9 @@ bool recoverI2CBus() {
 }
 
 #if UNIT_BOOTLOADER_ENABLE == true
-// Escalation when a unit stops responding even after bus recovery - forces a reboot via
-// requestUnitEnterBootloader() (write path stays reliable even when reads fail; Unit.ino stops
-// the motor before resetting, safe mid-rotation). Fire-and-forget: twiboot auto-returns to the
-// app after ~1s idle, so the next normal attempt should find it responsive again.
+//Escalation when a unit stops responding even after bus recovery - forces a reboot via
+//requestUnitEnterBootloader() (the write path stays reliable even when reads fail). Fire-and-forget:
+//twiboot returns to the app after ~1s idle.
 void forceUnitRecoveryReset(int unitIndex) {
   SerialPrintln("I2C recovery: unit " + String(unitIndex) + " still not responding after bus recovery - forcing it to reboot");
   requestUnitEnterBootloader(unitIndex);

@@ -1,7 +1,6 @@
-// Must live in a real .cpp, not a .ino: the sketch preprocessor auto-generates a C++-linkage
-// forward declaration for every top-level .ino function, but the ESP8266 core declares this one
-// `extern "C"` - a .ino definition either fails to compile, or silently compiles under a mangled
-// symbol nothing references (linker keeps the core's no-op stub, /crash-log stays empty forever).
+//Must live in a real .cpp, not a .ino: the ESP8266 core declares this `extern "C"`, but the sketch
+//preprocessor would give a .ino definition normal C++ linkage - the core's no-op stub would run
+//instead, and /crash-log would stay empty.
 #include <Arduino.h>
 #include <user_interface.h>
 #include "CrashLog.h"
