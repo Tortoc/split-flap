@@ -690,6 +690,8 @@ void setup() {
         itemObject["value"] = item.Value;
         itemObject["format"] = item.Format;
         itemObject["targetDateTimeUnix"] = item.TargetDateTimeUnix;
+        itemObject["prefix"] = item.Prefix;
+        itemObject["suffix"] = item.Suffix;
         itemObject["durationSeconds"] = item.DurationSeconds;
         itemObject["alignment"] = item.Alignment;
       }
@@ -1504,16 +1506,19 @@ void setup() {
           SerialPrintln("Flap Speed Updated: " + flapSpeed);
         }
 
-        //Only if countdown date has changed
-        if (newCountdownToDateUnixValue != "" && countdownToDateUnix != newCountdownToDateUnixValue) {
+        //Only if countdown date has changed - gated to the countdown tab's own submission (its
+        //hidden field is only ever recomputed by that tab's onsubmit case; submitting from a
+        //different tab would otherwise resubmit that field's stale/default "0" and wipe the
+        //stored date, since the field is a form-wide value regardless of which tab is visible).
+        if (newDeviceModeValue == DEVICE_MODE_COUNTDOWN && newCountdownToDateUnixValue != "" && countdownToDateUnix != newCountdownToDateUnixValue) {
           countdownToDateUnix = newCountdownToDateUnixValue;
 
           writeFile(LittleFS, countdownPath, countdownToDateUnix.c_str());
           SerialPrintln("Countdown Date Time Unix Updated: " + countdownToDateUnix);
         }
 
-        //Only if countup date has changed
-        if (newCountupSinceDateUnixValue != "" && countupSinceDateUnix != newCountupSinceDateUnixValue) {
+        //Only if countup date has changed - same tab-gating reasoning as Countdown above.
+        if (newDeviceModeValue == DEVICE_MODE_COUNTUP && newCountupSinceDateUnixValue != "" && countupSinceDateUnix != newCountupSinceDateUnixValue) {
           countupSinceDateUnix = newCountupSinceDateUnixValue;
 
           writeFile(LittleFS, countupPath, countupSinceDateUnix.c_str());

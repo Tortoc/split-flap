@@ -1,19 +1,7 @@
-//Builds "<prefix> <days> <suffix>", any empty part omitted. Same logic as buildCountdownText(),
-//kept as its own function since Countup has its own prefix/suffix settings.
+//Standalone Countup mode's prefix/suffix - see buildDayCountText() (ServiceCountdownFunctions.ino)
+//for the shared logic.
 String buildCountupText(long days) {
-  String daysText = String(days);
-  if (countupPrefix != "") {
-    daysText = countupPrefix + " " + daysText;
-  }
-  if (countupSuffix != "") {
-    daysText = daysText + " " + countupSuffix;
-  }
-
-  if ((int)daysText.length() > unitsAmount) {
-    SerialPrintln("Countup text was too long, cutting down to just the number...");
-    daysText = String(days);
-  }
-  return daysText;
+  return buildDayCountText(days, countupPrefix, countupSuffix);
 }
 
 //Check if countup is active and how many full days have elapsed since the configured date

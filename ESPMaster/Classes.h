@@ -11,7 +11,9 @@ struct RotationItem {
   String Type;
   String Value;                //text: the literal text to show
   String Format;                //clock/date: user format string, translated in convertUserDateFormatToEzTime()
-  long TargetDateTimeUnix = 0;  //countdown: target unix timestamp
+  long TargetDateTimeUnix = 0;  //countdown: target date; countup: since-date (same field, meaning depends on Type)
+  String Prefix = "";           //countdown/countup: per-item prefix, independent of the standalone mode's setting
+  String Suffix = "";           //countdown/countup: per-item suffix, independent of the standalone mode's setting
   int DurationSeconds = 5;      //how long to display this item
   String Alignment = "";        //per-item override; "" inherits the default alignment
 };

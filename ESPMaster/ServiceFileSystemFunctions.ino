@@ -49,6 +49,8 @@ void loadValuesFromFileSystem() {
         item.Value = String((const char*)(value["value"] | ""));
         item.Format = String((const char*)(value["format"] | ""));
         item.TargetDateTimeUnix = value["targetDateTimeUnix"] | 0;
+        item.Prefix = String((const char*)(value["prefix"] | ""));
+        item.Suffix = String((const char*)(value["suffix"] | ""));
         item.DurationSeconds = value["durationSeconds"] | 5;
         item.Alignment = String((const char*)(value["alignment"] | ""));
         rotationItemCount++;

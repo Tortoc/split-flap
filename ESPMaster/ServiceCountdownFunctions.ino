@@ -1,21 +1,28 @@
-//Builds "<prefix> <days> <suffix>", any empty part omitted. Shared by standalone Countdown mode and
-//Rotation's countdown items. Falls back to the bare number if the full text doesn't fit.
-String buildCountdownText(long days) {
+//Builds "<prefix> <days> <suffix>", any empty part omitted. Falls back to the bare number if the
+//full text doesn't fit. Shared by standalone Countdown/Countup mode (via buildCountdownText()/
+//buildCountupText() below) and Rotation's countdown/countup items (called directly with the
+//item's own Prefix/Suffix).
+String buildDayCountText(long days, String prefix, String suffix) {
   String daysText = String(days);
-  if (countdownPrefix != "") {
-    daysText = countdownPrefix + " " + daysText;
+  if (prefix != "") {
+    daysText = prefix + " " + daysText;
   }
-  if (countdownSuffix != "") {
-    daysText = daysText + " " + countdownSuffix;
+  if (suffix != "") {
+    daysText = daysText + " " + suffix;
   }
 
   if ((int)daysText.length() > unitsAmount) {
-    SerialPrintln("Countdown text was too long, cutting down to just the number...");
+    SerialPrintln("Day count text was too long, cutting down to just the number...");
     //Must be String(days), not `"" + days` - "" is a const char*, so `+ days` would do pointer
     //arithmetic instead of concatenation (undefined behavior, readily a crash).
     daysText = String(days);
   }
   return daysText;
+}
+
+//Standalone Countdown mode's prefix/suffix - see buildDayCountText() for the shared logic.
+String buildCountdownText(long days) {
+  return buildDayCountText(days, countdownPrefix, countdownSuffix);
 }
 
 //Check if countdown is required and check how long left
@@ -29,12 +36,12 @@ void checkCountdown() {
     long differenceSeconds = countdownInSeconds - currentTimeSeconds;
     long hours = differenceSeconds / 60 / 60;
 
-    //If there is any remainder, we want to actually still display the full day remaining 
+    //If there is any remainder, we want to actually still display the full day remaining
     long days = ceil(hours / 24.0);
 
     //Make sure we don't go negative
     days = days > 0 ? days : 0;
-    
+
     String daysText = buildCountdownText(days);
 
     if (inputText != daysText) {

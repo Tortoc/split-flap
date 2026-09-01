@@ -38,8 +38,14 @@ void checkRotation() {
     long differenceSeconds = currentItem.TargetDateTimeUnix - (long)nowSeconds;
     long days = differenceSeconds > 0 ? (long)ceil(differenceSeconds / 60.0 / 60.0 / 24.0) : 0;
 
-    //Shared with standalone Countdown mode - see buildCountdownText() (ServiceCountdownFunctions.ino).
-    inputText = buildCountdownText(days);
+    //Per-item prefix/suffix, independent of the standalone Countdown mode's own setting - see
+    //buildDayCountText() (ServiceCountdownFunctions.ino).
+    inputText = buildDayCountText(days, currentItem.Prefix, currentItem.Suffix);
+  } else if (currentItem.Type == DEVICE_MODE_COUNTUP) {
+    long differenceSeconds = (long)nowSeconds - currentItem.TargetDateTimeUnix;
+    long days = differenceSeconds > 0 ? (long)floor(differenceSeconds / 60.0 / 60.0 / 24.0) : 0;
+
+    inputText = buildDayCountText(days, currentItem.Prefix, currentItem.Suffix);
   } else { //DEVICE_MODE_TEXT
     inputText = currentItem.Value;
   }
@@ -66,6 +72,8 @@ void replaceRotationItemsFromJson(String rotationItemsJson) {
         item.Value = String((const char*)(value["value"] | ""));
         item.Format = String((const char*)(value["format"] | ""));
         item.TargetDateTimeUnix = value["targetDateTimeUnix"] | 0;
+        item.Prefix = String((const char*)(value["prefix"] | ""));
+        item.Suffix = String((const char*)(value["suffix"] | ""));
         item.DurationSeconds = value["durationSeconds"] | 5;
         item.Alignment = String((const char*)(value["alignment"] | ""));
         rotationItemCount++;
@@ -95,6 +103,8 @@ void writeRotationItemsToFile() {
     itemObject["value"] = item.Value;
     itemObject["format"] = item.Format;
     itemObject["targetDateTimeUnix"] = item.TargetDateTimeUnix;
+    itemObject["prefix"] = item.Prefix;
+    itemObject["suffix"] = item.Suffix;
     itemObject["durationSeconds"] = item.DurationSeconds;
     itemObject["alignment"] = item.Alignment;
   }

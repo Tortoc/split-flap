@@ -687,6 +687,18 @@
 			box-sizing: border-box;
 		}
 
+		/* Countdown/countup items: prefix + date + suffix side by side within .ls-rotation-item-content. */
+		.ls-rotation-item-countfields {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 6px;
+			flex: 1;
+		}
+		.ls-rotation-item-countfields input[type="text"] {
+			flex: 1;
+			min-width: 70px;
+		}
+
 		.ls-rotation-item-duration {
 			display: flex;
 			align-items: center;
@@ -1722,6 +1734,12 @@
 								document.getElementById('inputCountdownSuffix').value = responseObject.countdownSuffix || "";
 								document.getElementById('inputCountupPrefix').value = responseObject.countupPrefix || "";
 								document.getElementById('inputCountupSuffix').value = responseObject.countupSuffix || "";
+								//Hidden unix fields are form-wide (submitted regardless of which tab is active), but
+								//only that tab's onsubmit case ever recomputes them - keep them in sync with the
+								//server on every load so submitting from a different tab can't resubmit a stale/
+								//default "0" and wipe the stored date (see the matching backend gate in ESPMaster.ino).
+								document.getElementById('inputHiddenCountdownDateTimeUnix').value = responseObject.countdownToDateUnix || 0;
+								document.getElementById('inputHiddenCountupDateTimeUnix').value = responseObject.countupSinceDateUnix || 0;
 								//Rotation items aren't part of this response - load them now too if rotation is
 								//the saved mode, so the list isn't empty until the user re-clicks the tab.
 								if (responseObject.deviceMode === "rotation") {
@@ -1981,12 +1999,12 @@
 			return `${year}-${month}-${day}T${hours}:${minutes}`;
 		}
 
-		//--- Rotation mode: an ordered list of Text/Uhrzeit/Datum/Countdown steps, each with its
+		//--- Rotation mode: an ordered list of Text/Uhrzeit/Datum/Countdown/Countup steps, each with its
 		//own display duration - the server cycles through them and loops back to the start.
 		var rotationItemsData = [];
 
 		function addRotationItem() {
-			rotationItemsData.push({ type: "text", value: "", format: "", targetDateTimeUnix: 0, durationSeconds: 5, alignment: "" });
+			rotationItemsData.push({ type: "text", value: "", format: "", targetDateTimeUnix: 0, prefix: "", suffix: "", durationSeconds: 5, alignment: "" });
 			renderRotationItems();
 		}
 
@@ -2002,6 +2020,8 @@
 				rotationItemsData[index].format = "HH:mm:ss";
 			} else if (newType === "date" && !rotationItemsData[index].format) {
 				rotationItemsData[index].format = "dd.MM.yyyy";
+			} else if ((newType === "countdown" || newType === "countup") && !rotationItemsData[index].suffix) {
+				rotationItemsData[index].suffix = "Tage";
 			}
 			renderRotationItems();
 		}
@@ -2041,7 +2061,7 @@
 				row.className = "ls-rotation-item";
 
 				var typeSelect = document.createElement("select");
-				[["text", "Text"], ["clock", "Uhrzeit"], ["date", "Datum"], ["countdown", "Countdown"]].forEach(function (optionPair) {
+				[["text", "Text"], ["clock", "Uhrzeit"], ["date", "Datum"], ["countdown", "Countdown"], ["countup", "Countup"]].forEach(function (optionPair) {
 					var optionElement = document.createElement("option");
 					optionElement.value = optionPair[0];
 					optionElement.innerText = optionPair[1];
@@ -2062,14 +2082,35 @@
 					formatInput.value = item.format;
 					formatInput.oninput = (function (i) { return function () { updateRotationItemField(i, "format", this.value); }; })(index);
 					contentWrapper.appendChild(formatInput);
-				} else if (item.type === "countdown") {
+				} else if (item.type === "countdown" || item.type === "countup") {
+					var countFieldsWrapper = document.createElement("div");
+					countFieldsWrapper.className = "ls-rotation-item-countfields";
+
+					var prefixInput = document.createElement("input");
+					prefixInput.type = "text";
+					prefixInput.placeholder = "Präfix";
+					prefixInput.maxLength = 40;
+					prefixInput.value = item.prefix;
+					prefixInput.oninput = (function (i) { return function () { updateRotationItemField(i, "prefix", this.value); }; })(index);
+					countFieldsWrapper.appendChild(prefixInput);
+
 					var dateTimeInput = document.createElement("input");
 					dateTimeInput.type = "datetime-local";
 					if (item.targetDateTimeUnix > 0) {
 						dateTimeInput.value = convertDateToString(new Date(item.targetDateTimeUnix * 1000));
 					}
 					dateTimeInput.onchange = (function (i) { return function () { updateRotationItemDateTimeLocal(i, this.value); }; })(index);
-					contentWrapper.appendChild(dateTimeInput);
+					countFieldsWrapper.appendChild(dateTimeInput);
+
+					var suffixInput = document.createElement("input");
+					suffixInput.type = "text";
+					suffixInput.placeholder = "Suffix";
+					suffixInput.maxLength = 40;
+					suffixInput.value = item.suffix;
+					suffixInput.oninput = (function (i) { return function () { updateRotationItemField(i, "suffix", this.value); }; })(index);
+					countFieldsWrapper.appendChild(suffixInput);
+
+					contentWrapper.appendChild(countFieldsWrapper);
 				} else { //"text" - single line only, hence limited to the number of physical units
 					var textInput = document.createElement("input");
 					textInput.type = "text";
@@ -2131,6 +2172,8 @@
 					value: item.value || "",
 					format: item.format || "",
 					targetDateTimeUnix: item.targetDateTimeUnix || 0,
+					prefix: item.prefix || "",
+					suffix: item.suffix || "",
 					durationSeconds: item.durationSeconds || 5,
 					alignment: item.alignment || ""
 				};
