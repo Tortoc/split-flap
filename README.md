@@ -248,9 +248,6 @@ There are several helper `define` variables to help during debugging/running:
 
 - **SERIAL_ENABLE**
   - Use this to enable Serial output lines for tracking executing code
-- **OTA_ENABLE**
-  - Use this to enable OTA updates from the Arduino IDE
-  - Subsequently, you can set a password for OTA via the `otaPassword` variable
 - **WEB_FIRMWARE_UPDATE_ENABLE**
   - Enabled by default. Adds a browser-based firmware upload to the Admin page (`/admin.html`) - no Arduino IDE or USB cable required
   - To use it: in the Arduino IDE, `Sketch > Export compiled Binary` to produce a `.bin` file for `ESPMaster.ino`, then upload that file via the "Firmware Update" card on the Admin page

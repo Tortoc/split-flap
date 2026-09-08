@@ -48,7 +48,7 @@ other endpoint below has no auth check at all, including `GET /api/ota-password`
 | GET | [`/api/settings`](#get-apisettings) | Current device settings |
 | POST | [`/api/settings`](#post-apisettings) | Update alignment/mode/text/speed/schedule/countdown |
 | POST | [`/api/text`](#post-apitext) | Lightweight text push (automations/webhooks) |
-| GET | [`/api/diag?type=`](#get-apidiag) | Diagnostics: `health`\|`heap`\|`tcp`\|`test`\|`log` |
+| GET | [`/api/diag?type=`](#get-apidiag) | Diagnostics: `health`\|`heap`\|`tcp`\|`test` |
 | GET | [`/api/crash-log`](#get-apicrash-log) | Persisted on-device crash log |
 | DELETE | [`/api/crash-log`](#delete-apicrash-log) | Clear the crash log |
 | GET | [`/api/i2c-scan`](#get-apii2c-scan) | Raw I2C bus scan (legacy diagnostic) |
@@ -63,7 +63,6 @@ other endpoint below has no auth check at all, including `GET /api/ota-password`
 | POST | [`/api/debug-mode`](#post-apidebug-mode) | Enable/disable debug mode |
 | POST | [`/api/reboot`](#post-apireboot) | Reboot the device |
 | DELETE | [`/api/scheduled-messages`](#delete-apischeduled-messages) | Remove a scheduled message |
-| POST | [`/api/ota-mode`](#post-apiota-mode) | Start Arduino-IDE OTA mode |
 | POST | [`/api/wifi?action=`](#post-apiwifi) | WiFi actions: `reset`\|`scan`\|`connect` |
 | GET | [`/api/wifi?type=`](#get-apiwifi) | WiFi queries: `scan-result`\|`connect-status` |
 | GET | [`/api/ota-password`](#get-apiota-password) | Read the current OTA password |
@@ -113,7 +112,6 @@ speed, mode, WiFi status, etc.
     { "scheduledDateTimeUnix": 1755331200, "message": "Hello", "showIndefinitely": false }
   ],
   "wifiSettingsResettable": true,
-  "otaEnabled": false,
   "otaPassword": "splitflap",
   "timezone": "Europe/Berlin"
 }
@@ -121,9 +119,7 @@ speed, mode, WiFi status, etc.
 `otaPassword`/`timezone` duplicate `GET /api/ota-password`/`GET /api/timezone` (same values, same
 unauthenticated-by-design reasoning) - folded in here so the Administration view can populate its
 displays from this one already-fetched response instead of two more separate requests.
-`otaEnabled` reflects the `OTA_ENABLE` compile flag (currently `false` in this build - see
-[`POST /api/ota-mode`](#post-apiota-mode)). `wifiSettingsResettable` reflects `WIFI_USE_DIRECT`
-being off (AP-config mode).
+`wifiSettingsResettable` reflects `WIFI_USE_DIRECT` being off (AP-config mode).
 
 ```bash
 curl http://192.168.1.50/api/settings
@@ -204,13 +200,12 @@ curl -X POST http://192.168.1.50/api/text --data "text=BRB&duration=10"
 
 ### `GET /api/diag`
 
-Five pure-diagnostic checks sharing one registered route, picked via `?type=` - each
+Four pure-diagnostic checks sharing one registered route, picked via `?type=` - each
 `webServer.on()` registration costs a small permanent heap allocation that's never freed, and this
 device has very little room to spare, so these were consolidated rather than left as separate
-endpoints (formerly `/api/health`, `/api/heap`, `/api/tcp-status`, `/api/test`, and - folded in
-later - `/api/log`).
+endpoints (formerly `/api/health`, `/api/heap`, `/api/tcp-status`, `/api/test`).
 
-**Query param** `type` (required): `health` | `heap` | `tcp` | `test` | `log`.
+**Query param** `type` (required): `health` | `heap` | `tcp` | `test`.
 
 **`type=health`** - trivial liveness check.
 **Response** `200 text/plain`: `Healthy`
@@ -237,37 +232,13 @@ list.
 **Response** `200 application/json`: `{ "status": "ok", "time": 123456 }` - `time` is `millis()`
 (milliseconds since boot), not a wall-clock timestamp.
 
-**`type=log`** (formerly the standalone `GET /api/log`) - last up to 50 entries from the in-memory
-serial log ring buffer.
-**Response** `200 application/json`:
-```json
-{
-  "count": 214,
-  "logs": [
-    { "message": "DEBUG: Status = WiFi Connected", "timestamp": 4821 }
-  ]
-}
-```
-`count` is the *total* number of log lines ever recorded this boot (not just how many are
-returned); `timestamp` is milliseconds since boot. Returns `503 text/plain` instead ("Too little
-free heap right now to safely build the log response - try again shortly") if free heap is below
-4000 bytes at request time, rather than risking an allocation failure.
-
-⚠️ **Known bug, not yet fixed** (found 2026-09-08, reproduced identically against the pre-merge
-standalone handler too - not a regression from folding it in here): once the log holds enough
-entries to push the JSON response past ~1460 bytes (one Ethernet TCP MSS), the response cuts off
-hard mid-content instead of continuing - `curl` reports "Received HTTP/0.9 when not allowed". Root
-cause not found; suspected to be in how `beginResponseStream()` + `serializeJson()` interact for a
-response exceeding a single TCP segment. See BUGFIX_LOG #123.
-
-`400 text/plain` if `type` is missing or not one of the five values above.
+`400 text/plain` if `type` is missing or not one of the four values above.
 
 ```bash
 curl "http://192.168.1.50/api/diag?type=health"
 curl "http://192.168.1.50/api/diag?type=heap"
 curl "http://192.168.1.50/api/diag?type=tcp"
 curl "http://192.168.1.50/api/diag?type=test"
-curl "http://192.168.1.50/api/diag?type=log"
 ```
 
 ---
@@ -683,25 +654,6 @@ Example: `DELETE /api/scheduled-messages?id=1755331200`
 
 ```bash
 curl -X DELETE "http://192.168.1.50/api/scheduled-messages?id=1755331200"
-```
-
----
-
-### `POST /api/ota-mode`
-
-Starts `ArduinoOTA` mode, letting the Arduino IDE flash this device over WiFi (select the new
-network port in the IDE's Tools menu, upload as normal). The device reboots automatically once
-the IDE upload finishes.
-
-**Response** `200 text/html` - an explanatory page (meant for real navigation).
-
-Only present if `OTA_ENABLE` is compiled in - **currently `false` in this build**, so this
-endpoint does not exist right now despite the Administration view's "OTA Update" button still
-being wired to call it (a pre-existing inconsistency, not introduced by the Punkt 74 rename -
-worth a look in a future session).
-
-```bash
-curl -X POST http://192.168.1.50/api/ota-mode
 ```
 
 ---

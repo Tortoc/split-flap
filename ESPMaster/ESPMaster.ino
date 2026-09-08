@@ -8,7 +8,6 @@
 //--- Feature flags ---
 #define SERIAL_ENABLE       true   //enable serial debug messages
 #define UNIT_CALLS_DISABLE  false  //disable I2C calls to units (debug the ESP alone)
-#define OTA_ENABLE          true   //Arduino IDE OTA (same WiFi network + IDE required)
 #define WEB_FIRMWARE_UPDATE_ENABLE true //browser-based firmware upload from the Admin page
 #define UNIT_BOOTLOADER_ENABLE true //push Unit.ino updates over I2C via twiboot - needs every
                                     //unit pre-flashed with twiboot, see Unit/BOOTLOADER_SETUP.md
@@ -60,10 +59,6 @@
 //https://github.com/me-no-dev/ESPAsyncWebServer/issues/418#issuecomment-667976368
 #define WEBSERVER_H
 #include <WiFiManager.h>
-#endif
-
-#if OTA_ENABLE == true
-#include <ArduinoOTA.h>
 #endif
 
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
@@ -282,11 +277,6 @@ unsigned long wifiConnectPhaseChangedAt = 0;
 const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
 #endif
 
-//Used to denote that the system has gone into OTA mode
-#if OTA_ENABLE == true
-bool isInOtaMode = false;
-#endif
-
 //Used to reject a browser firmware upload part-way through if the password didn't match
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
 bool firmwareUpdateAuthFailed = false;
@@ -319,32 +309,6 @@ bool unitFirmwareUploadAuthFailed = false;
 bool webFileUploadAuthFailed = false;
 
 String debugStatus = "";
-
-//Circular serial log buffer for the web UI - fixed-size char array, not String, to avoid heap
-//fragmentation. Keep this small - a much larger version once left too little free heap after boot.
-#define SERIAL_LOG_SIZE 40
-#define SERIAL_LOG_MESSAGE_MAX 120
-struct SerialLogEntry {
-  char message[SERIAL_LOG_MESSAGE_MAX];
-  unsigned long timestamp;
-};
-SerialLogEntry serialLog[SERIAL_LOG_SIZE];
-int serialLogIndex = 0;
-int serialLogCount = 0;
-String currentSerialLine = ""; //buffer for building complete lines
-
-void addToSerialLog(const String &message) {
-  if (message.length() == 0) return;
-
-  strncpy(serialLog[serialLogIndex].message, message.c_str(), SERIAL_LOG_MESSAGE_MAX - 1);
-  serialLog[serialLogIndex].message[SERIAL_LOG_MESSAGE_MAX - 1] = '\0';
-  serialLog[serialLogIndex].timestamp = millis();
-
-  serialLogIndex = (serialLogIndex + 1) % SERIAL_LOG_SIZE;
-  if (serialLogCount < SERIAL_LOG_SIZE) {
-    serialLogCount++;
-  }
-}
 
 void ledOn() {
 #if LED_ENABLE == true
@@ -492,10 +456,6 @@ void setup() {
     SerialPrintln("DEBUG: Debug mode: " + String(showDebugPage ? "enabled" : "disabled") + " (controls startup page, error status, page load log, LED blink codes, and serial log)");
 #endif
 
-#if OTA_ENABLE == true
-    SerialPrintln("OTA is enabled! Yay!");
-#endif
-
     //Web Server Endpoint configuration
     debugStatus = "Web Server Setup";
     SerialPrintln("DEBUG: Status = " + debugStatus);
@@ -635,11 +595,6 @@ void setup() {
       minimalDoc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
       minimalDoc["scheduledMessages"] = JsonArray();
       minimalDoc["wifiSettingsResettable"] = true;
-#if OTA_ENABLE == true
-      minimalDoc["otaEnabled"] = true;
-#else
-      minimalDoc["otaEnabled"] = false;
-#endif
       //otaPassword/timezone included so Administration can populate from this one fetch, given
       //this device's hard 5-connection TCP limit.
       minimalDoc["otaPassword"] = otaPassword;
@@ -1098,48 +1053,7 @@ void setup() {
         return;
       }
 
-      //Former standalone /api/log, folded in here 2026-09-08 (same reasoning as the other four
-      //types, see BUGFIX_LOG #123) - recent in-memory serial log, not the persisted crash log
-      //(that's /api/crash-log). While testing this merge, found that responses truncate hard at
-      //exactly 1460 bytes (one Ethernet TCP MSS) whenever the log holds enough entries to exceed
-      //it - reproduced identically against the untouched, pre-merge standalone handler too, so
-      //this is a pre-existing bug in the beginResponseStream()+serializeJson() streaming itself,
-      //not something this merge caused. Left unfixed/unchanged here (out of scope for a
-      //registration-count merge) - see BUGFIX_LOG #123 for the open item.
-      if (type == "log") {
-        // Heap-backed JsonDocument, not a StaticJsonDocument local - a large static buffer here
-        // would sit on this callback's stack, which has far less headroom than loop().
-        JsonDocument document;
-        document["count"] = serialLogCount;
-
-        int startIndex = serialLogCount < SERIAL_LOG_SIZE ? 0 : serialLogIndex;
-        int entriesToReturn = serialLogCount < SERIAL_LOG_SIZE ? serialLogCount : SERIAL_LOG_SIZE;
-
-        // Limit to last 50 entries to prevent JSON buffer overflow
-        int maxEntries = entriesToReturn > 50 ? 50 : entriesToReturn;
-        int actualStart = entriesToReturn > 50 ? (startIndex + entriesToReturn - 50) % SERIAL_LOG_SIZE : startIndex;
-
-        for (int i = 0; i < maxEntries; i++) {
-          int idx = (actualStart + i) % SERIAL_LOG_SIZE;
-          // serialLog[idx].message is already a bounded, null-terminated char buffer
-          // (SERIAL_LOG_MESSAGE_MAX) - no further truncation/String copy needed here.
-          document["logs"][i]["message"] = serialLog[idx].message;
-          document["logs"][i]["timestamp"] = serialLog[idx].timestamp;
-        }
-
-        //Check free heap before allocating - operator new aborts on failure here.
-        if (ESP.getFreeHeap() < 4000) {
-          SerialPrintln("WARNING: /api/diag?type=log skipped building response - free heap too low (" + String(ESP.getFreeHeap()) + " bytes)");
-          request->send(503, "text/plain", "Too little free heap right now to safely build the log response - try again shortly");
-          return;
-        }
-        AsyncResponseStream *response = request->beginResponseStream("application/json");
-        serializeJson(document, *response);
-        request->send(response);
-        return;
-      }
-
-      request->send(400, "text/plain", "Unknown 'type' - use health, heap, tcp, test, or log");
+      request->send(400, "text/plain", "Unknown 'type' - use health, heap, tcp, or test");
     });
 
     // On-device crash log (see ServiceCrashLogFunctions.ino) - survives even without a live
@@ -1708,86 +1622,6 @@ void setup() {
       request->send(200, "text/plain", "OK");
     });
 
-#if OTA_ENABLE == true
-    webServer.on("/api/ota-mode", HTTP_POST, [](AsyncWebServerRequest * request) {
-      SerialPrintln("Request to start OTA mode received");
-      
-      //Create HTML page to explain OTA
-      IPAddress ip = WiFi.localIP();
-      
-      String html = "<div style='text-align:center'>";
-      html += "<font face='arial'><h1>Split Flap - OTA Update Mode</h1>";
-      html += "<p>OTA mode has been started. You can now update your module via WiFI. Open your Arduino IDE and select the new port in \"Tools\" menu and upload the your sketch as normal!<p>";
-      html += "<p>Open your Arduino IDE and select the new port in \"Tools\" menu and upload the your sketch as normal!</p>";
-      html += "<p>After you have carried out your update, the system will automatically be rebooted. You can go to the main home page after this time by clicking the button below or going to '/'.</p>";
-      html += "<p>You can take the system out of this mode by clicking the button to reboot below.</p>";
-      html += "<p><a href=\"http://" + ip.toString() + "\">Home</a></p>";
-      html += "<form action=\"/api/reboot\" method=\"post\" style=\"display:inline\"><button type=\"submit\">Reboot</button></form>";
-      html += "</font>";
-      html += "</div>";
-
-      request->send(200, "text/html", html);
-  
-      if (!isInOtaMode) {
-        SerialPrintln("Setting OTA Hostname");
-        ArduinoOTA.setHostname("Split-Flap-OTA");
-
-        //If there is a password set, disabled by default for ease
-        if (otaPassword != "") {
-          ArduinoOTA.setPassword(otaPassword.c_str());
-        }
-        
-        SerialPrintln("Starting OTA Mode");
-        ArduinoOTA.begin();
-        delay(100);
-      
-        ArduinoOTA.onStart([]() {
-          LittleFS.end();
-          if (ArduinoOTA.getCommand() == U_FLASH) {
-            SerialPrintln("Start updating sketch");
-          } 
-          else {
-            SerialPrintln("Start updating filesystem");
-          }  
-        });
-        
-        ArduinoOTA.onEnd([]() {
-          SerialPrintln("Finished OTA Update - Rebooting");
-          isPendingReboot = true;
-        });
-        
-        ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-          SerialPrintf("OTA Progress: %u%%\r", (progress / (total / 100)));
-        });
-        
-        ArduinoOTA.onError([](ota_error_t error) {
-          SerialPrintf("Error[%u]: ", error);
-
-          if (error == OTA_AUTH_ERROR) {
-            SerialPrintln("Finished OTA Update - Rebooting");
-          }
-          else if (error == OTA_BEGIN_ERROR) {
-            SerialPrintln("OTA Begin Failed");
-          }
-          else if (error == OTA_CONNECT_ERROR) {
-            SerialPrintln("OTA Connect Failed");
-          }
-          else if (error == OTA_RECEIVE_ERROR) {
-            SerialPrintln("OTA Receive Failed");
-          }
-          else if (error == OTA_END_ERROR) {
-            SerialPrintln("OTA End Failed");
-          }
-        });
-        
-        //Put in OTA Mode
-        isInOtaMode = true;
-      }
-      else {
-        SerialPrintln("Already in OTA Mode");
-      }
-    });
-#endif
 
 #if WIFI_USE_DIRECT == false
     //Consolidates all five former WiFi endpoints (/api/wifi/reset, /api/wifi/scan,
@@ -2449,14 +2283,6 @@ void loop() {
     isPendingUnitsReset = false; //nothing to reset, don't leave this stuck pending
   }
   
-#if OTA_ENABLE == true
-  //If System is in OTA, try handle!
-  if(isInOtaMode) {
-    ArduinoOTA.handle();
-    delay(1);
-  }
-#endif
-
   //ezTime library sync
   events(); 
   
@@ -2622,120 +2448,3 @@ int scanI2CBus() {
   return unitsAmount;
 }
 
-//Gets all the currently stored calues from memory in a JSON object
-String getCurrentSettingValues() {
-  unsigned long funcStart = millis();
-  const unsigned long MAX_FUNCTION_TIME = 5000; // 5 second max for this function (reduced from 10s)
-  SerialPrintln("DEBUG: getCurrentSettingValues() - Starting");
-  
-  // Yield immediately to allow web server to process
-  yield();
-  
-  JsonDocument document;
-  unsigned long afterDoc = millis();
-  SerialPrintln("DEBUG: getCurrentSettingValues() - JsonDocument created (" + String(afterDoc - funcStart) + "ms)");
-
-  document["timezoneOffset"] = timezone.getOffset();
-  document["unitCount"] = unitsAmount;
-  document["alignment"] = alignment;
-  document["flapSpeed"] = flapSpeed;
-  document["deviceMode"] = deviceMode;
-  document["version"] = espVersion;
-  document["lastTimeReceivedMessageDateTime"] = lastReceivedMessageDateTime;
-  document["lastWrittenText"] = lastWrittenText;
-  document["countdownToDateUnix"] = atol(countdownToDateUnix.c_str());
-  
-  // WiFi status information - read RSSI quickly (reduced readings for faster response)
-  if (WiFi.status() == WL_CONNECTED) {
-    document["wifiStatus"] = "Connected";
-    // Read RSSI 2 times for faster response (was 5, but adds delay)
-    long rssiSum = 0;
-    int rssiReadings = 2;
-    for (int i = 0; i < rssiReadings; i++) {
-      rssiSum += WiFi.RSSI();
-      if (i < rssiReadings - 1) {
-        delay(5); // Reduced from 10ms
-        yield();
-      }
-    }
-    document["wifiRssi"] = rssiSum / rssiReadings;
-    document["wifiIp"] = WiFi.localIP().toString();
-  } else {
-    document["wifiStatus"] = "Disconnected";
-    document["wifiRssi"] = 0;
-    document["wifiIp"] = "";
-  }
-  unsigned long afterBasicFields = millis();
-  SerialPrintln("DEBUG: getCurrentSettingValues() - Basic fields set (" + String(afterBasicFields - afterDoc) + "ms)");
-
-  int scheduledCount = scheduledMessages.size();
-  SerialPrintln("DEBUG: getCurrentSettingValues() - Processing " + String(scheduledCount) + " scheduled messages");
-  unsigned long beforeScheduled = millis();
-  
-  // Process scheduled messages with yields every few items to keep web server responsive
-  // Also check for timeout to prevent hanging
-  for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
-    // Check for timeout - if we're taking too long, skip remaining messages
-    if (millis() - funcStart > MAX_FUNCTION_TIME) {
-      SerialPrintln("DEBUG: WARNING - getCurrentSettingValues() timeout, skipping remaining scheduled messages");
-      break;
-    }
-    
-    ScheduledMessage scheduledMessage = scheduledMessages[scheduledMessageIndex];
-    
-    document["scheduledMessages"][scheduledMessageIndex]["scheduledDateTimeUnix"] = scheduledMessage.ScheduledDateTimeUnix;
-    document["scheduledMessages"][scheduledMessageIndex]["message"] = scheduledMessage.Message;
-    document["scheduledMessages"][scheduledMessageIndex]["showIndefinitely"] = scheduledMessage.ShowIndefinitely;
-    
-    // Yield every 5 messages to keep web server responsive, or on every message if < 10 total
-    if (scheduledMessageIndex % 5 == 0 || scheduledCount < 10) {
-      yield(); // Allow web server to process requests during loop
-    }
-  }
-  unsigned long afterScheduled = millis();
-  SerialPrintln("DEBUG: getCurrentSettingValues() - Scheduled messages processed (" + String(afterScheduled - beforeScheduled) + "ms)");
-
-#if OTA_ENABLE == true
-  document["otaEnabled"] = true;
-  document["isInOtaMode"] = isInOtaMode;
-#else
-  document["otaEnabled"] = false;
-#endif
-
-#if WIFI_USE_DIRECT == false
-  document["wifiSettingsResettable"] = true;
-#else
-  document["wifiSettingsResettable"] = false;
-#endif
-  
-  unsigned long beforeSerialize = millis();
-  
-  // Check timeout before serialization
-  if (millis() - funcStart > MAX_FUNCTION_TIME) {
-    SerialPrintln("DEBUG: WARNING - getCurrentSettingValues() timeout before serialization, returning minimal response");
-    JsonDocument minimalDoc;
-    minimalDoc["timezoneOffset"] = timezone.getOffset();
-    minimalDoc["unitCount"] = unitsAmount;
-    minimalDoc["alignment"] = alignment;
-    minimalDoc["flapSpeed"] = flapSpeed;
-    minimalDoc["deviceMode"] = deviceMode;
-    minimalDoc["version"] = espVersion;
-    minimalDoc["wifiStatus"] = WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected";
-    minimalDoc["wifiRssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
-    minimalDoc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
-    minimalDoc["scheduledMessages"] = JsonArray(); // Empty array
-    String minimalJson;
-    serializeJson(minimalDoc, minimalJson);
-    return minimalJson;
-  }
-  
-  yield(); // Yield before potentially long serialization
-  String jsonString;
-  serializeJson(document, jsonString);
-  yield(); // Yield after serialization to allow web server to process
-  unsigned long afterSerialize = millis();
-  SerialPrintln("DEBUG: getCurrentSettingValues() - JSON serialized (" + String(afterSerialize - beforeSerialize) + "ms, " + String(jsonString.length()) + " bytes)");
-  SerialPrintln("DEBUG: getCurrentSettingValues() - Total time: " + String(afterSerialize - funcStart) + "ms");
-
-  return jsonString;
-}
