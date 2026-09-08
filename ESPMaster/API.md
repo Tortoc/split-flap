@@ -45,6 +45,7 @@ other endpoint below has no auth check at all, including `GET /api/ota-password`
 | GET | [`/`](#get-) | Main web UI page |
 | GET | [`/api/settings`](#get-apisettings) | Current device settings |
 | POST | [`/api/settings`](#post-apisettings) | Update alignment/mode/text/speed/schedule/countdown |
+| POST | [`/api/text`](#post-apitext) | Lightweight text push (automations/webhooks) |
 | GET | [`/api/health`](#get-apihealth) | Liveness check |
 | GET | [`/api/heap`](#get-apiheap) | Free heap / fragmentation |
 | GET | [`/api/tcp-status`](#get-apitcp-status) | Live TCP connection-pool usage |
@@ -154,6 +155,33 @@ live display immediately - remove one later via
 - `400 text/plain` with a human-readable error on validation failure (e.g. an invalid
   `alignment`/`deviceMode` value, `flapSpeed` out of `1`-`100`, `inputText` over 500 chars, or a
   non-numeric date field).
+
+---
+
+### `POST /api/text`
+
+Lightweight alternative to `POST /api/settings` for automations (webhooks, Home Assistant, phone
+shortcuts, ...) that just want to show a message - one required param, one optional param, instead
+of the full settings form. Same unauthenticated design as `/api/settings` above.
+
+**Body params:**
+
+| Param | Values | Notes |
+| --- | --- | --- |
+| `text` | up to 500 chars | Required. |
+| `duration` | `0`-`3600` (seconds) | Optional, default `0`. |
+
+- `duration` omitted or `0`: **permanent** - switches the display into Text mode and persists that
+  mode change, same net effect as `POST /api/settings` with `deviceMode=text&inputText=<text>`.
+- `duration` > `0`: **temporary** - shows the message immediately for that many seconds, then
+  automatically reverts to whatever the display was already showing (current `deviceMode` is left
+  untouched entirely) - the same "hold, then let the normal per-second mode loop take back over"
+  behavior a non-indefinite scheduled message already uses.
+
+**Response:**
+- `200 text/plain` `"OK"` on success.
+- `400 text/plain` if `text` is missing/over 500 chars, or `duration` is missing a number, negative,
+  or over `3600`.
 
 ---
 

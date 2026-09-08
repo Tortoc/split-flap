@@ -183,6 +183,8 @@ const char* PARAM_COUNTUP_PREFIX = "countupPrefix";
 const char* PARAM_COUNTUP_SUFFIX = "countupSuffix";
 const char* PARAM_ID = "id";
 const char* PARAM_UNIT_OFFSET = "offset";
+const char* PARAM_TEXT_PUSH_TEXT = "text";
+const char* PARAM_TEXT_PUSH_DURATION = "duration";
 
 //Device Modes
 const char* DEVICE_MODE_TEXT = "text";
@@ -1599,6 +1601,62 @@ void setup() {
 
         request->send(200, "text/plain", "OK");
       }
+    });
+
+    //Lightweight text-push endpoint for automations (webhooks, Home Assistant, shortcuts, etc.) -
+    //just a message and an optional hold time, instead of the full /api/settings form. Same
+    //unauthenticated design as /api/settings (this device has no separate login system).
+    webServer.on("/api/text", HTTP_POST, [](AsyncWebServerRequest * request) {
+      String newText = "";
+      bool hasText = false;
+      long durationSeconds = 0;
+
+      int params = request->params();
+      for (int paramIndex = 0; paramIndex < params; paramIndex++) {
+        AsyncWebParameter* p = request->getParam(paramIndex);
+        if (p->isPost()) {
+          if (p->name() == PARAM_TEXT_PUSH_TEXT) {
+            if (p->value().length() > 500) {
+              request->send(400, "text/plain", "text too long (max 500 chars)");
+              return;
+            }
+            newText = p->value();
+            hasText = true;
+          }
+          if (p->name() == PARAM_TEXT_PUSH_DURATION) {
+            String rawDuration = p->value();
+            if (!isNumber(rawDuration) || rawDuration.toInt() < 0 || rawDuration.toInt() > 3600) {
+              request->send(400, "text/plain", "duration must be a number 0-3600 (seconds)");
+              return;
+            }
+            durationSeconds = rawDuration.toInt();
+          }
+        }
+      }
+
+      if (!hasText) {
+        request->send(400, "text/plain", "Missing required 'text' parameter");
+        return;
+      }
+
+      if (durationSeconds > 0) {
+        //Temporary: deviceMode/inputText are deliberately left untouched, same pattern
+        //checkScheduledMessages() already uses for a non-indefinite scheduled message - once the
+        //hold time elapses, the next 1s tick's normal mode loop redisplays whatever deviceMode
+        //currently is on its own, no extra "revert" logic needed here.
+        showText(newText, (int)(durationSeconds * 1000));
+      } else {
+        //Permanent: switches the display into Text mode, same net effect as submitting the main
+        //form with deviceMode=text&inputText=<text>.
+        if (deviceMode != DEVICE_MODE_TEXT) {
+          deviceMode = DEVICE_MODE_TEXT;
+          writeFile(LittleFS, deviceModePath, deviceMode.c_str());
+        }
+        inputText = newText;
+        showText(newText);
+      }
+
+      request->send(200, "text/plain", "OK");
     });
 
 #if OTA_ENABLE == true
