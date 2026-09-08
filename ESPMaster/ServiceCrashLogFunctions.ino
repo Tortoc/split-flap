@@ -50,7 +50,7 @@ void checkAndPersistCrashLog() {
     return; //nothing captured since the last check
   }
 
-  SerialPrintln("=== Crash detected from previous run - saving to " CRASH_LOG_PATH " ===");
+  SerialPrintln(F("=== Crash detected from previous run - saving to " CRASH_LOG_PATH " ==="));
 
   JsonDocument entryDoc;
   entryDoc["reason"] = dump.reason;
@@ -92,7 +92,7 @@ void checkAndPersistCrashLog() {
     }
     out.close();
   } else {
-    SerialPrintln("- Failed to write crash log to LittleFS");
+    SerialPrintln(F("- Failed to write crash log to LittleFS"));
   }
 
   //Clear the RTC magic so a later, unrelated reboot doesn't re-report this same crash.

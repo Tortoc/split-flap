@@ -76,7 +76,7 @@ int convertSpeed(String flapSpeed) {
 }
 
 LList<String> processSentenceToLines(String sentence) {    
-  SerialPrintln("Processing Sentence to lines");
+  SerialPrintln(F("Processing Sentence to lines"));
   
   //Remove trailing and preceding whitespace
   sentence.trim();

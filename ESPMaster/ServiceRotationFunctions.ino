@@ -63,7 +63,7 @@ void replaceRotationItemsFromJson(String rotationItemsJson) {
     if (!deserialisationError && jsonDocument.is<JsonArray>()) {
       for (JsonVariant value : jsonDocument.as<JsonArray>()) {
         if (rotationItemCount >= ROTATION_ITEMS_MAX) {
-          SerialPrintln("Rotation items JSON has more than ROTATION_ITEMS_MAX entries - dropping the rest");
+          SerialPrintln(F("Rotation items JSON has more than ROTATION_ITEMS_MAX entries - dropping the rest"));
           break;
         }
 
@@ -79,7 +79,7 @@ void replaceRotationItemsFromJson(String rotationItemsJson) {
         rotationItemCount++;
       }
     } else {
-      SerialPrintln("Invalid rotation items JSON - keeping the list empty");
+      SerialPrintln(F("Invalid rotation items JSON - keeping the list empty"));
     }
   }
 

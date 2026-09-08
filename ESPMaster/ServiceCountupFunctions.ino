@@ -23,7 +23,7 @@ void checkCountup() {
     String daysText = buildCountupText(days);
 
     if (inputText != daysText) {
-      SerialPrintln("Setting Countup Text to: " + daysText);
+      SerialPrintln(F("Setting Countup Text to: ") + daysText);
       inputText = daysText;
     }
   }

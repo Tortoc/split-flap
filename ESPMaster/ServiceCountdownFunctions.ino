@@ -12,7 +12,7 @@ String buildDayCountText(long days, String prefix, String suffix) {
   }
 
   if ((int)daysText.length() > unitsAmount) {
-    SerialPrintln("Day count text was too long, cutting down to just the number...");
+    SerialPrintln(F("Day count text was too long, cutting down to just the number..."));
     //Must be String(days), not `"" + days` - "" is a const char*, so `+ days` would do pointer
     //arithmetic instead of concatenation (undefined behavior, readily a crash).
     daysText = String(days);
@@ -45,7 +45,7 @@ void checkCountdown() {
     String daysText = buildCountdownText(days);
 
     if (inputText != daysText) {
-      SerialPrintln("Setting Countdown Text to: " + daysText);
+      SerialPrintln(F("Setting Countdown Text to: ") + daysText);
       inputText = daysText;
     }
   }

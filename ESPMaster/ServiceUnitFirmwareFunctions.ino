@@ -153,7 +153,7 @@ bool twibootStartApplication(int bootAddress) {
   Wire.write(TWIBOOT_CMD_SWITCH_APP);
   Wire.write(TWIBOOT_BOOTTYPE_APPLICATION);
   uint8_t result = Wire.endTransmission();
-  SerialPrintln("DEBUG: twibootStartApplication() Wire.endTransmission() = " + String(result));
+  SerialPrintln(F("DEBUG: twibootStartApplication() Wire.endTransmission() = ") + String(result));
   //A NACK on the data byte (3) is twiboot's documented, expected behavior for this specific
   //command - treat it as success. Anything else (address NACK, timeout, etc.) is a real failure.
   return result == 0 || result == 3;
@@ -172,7 +172,7 @@ bool writeAndVerifyPage(int bootAddress, uint16_t flashAddress, uint8_t* writeBu
   const int maxAttempts = 3;
   for (int attempt = 0; attempt < maxAttempts; attempt++) {
     if (attempt > 0) {
-      SerialPrintln("Retrying page write+verify at flash address " + String(flashAddress) + " (attempt " + String(attempt + 1) + ")");
+      SerialPrintln(F("Retrying page write+verify at flash address ") + String(flashAddress) + F(" (attempt ") + String(attempt + 1) + F(")"));
       recoverI2CBus();
       delay(20);
     }
@@ -199,8 +199,8 @@ bool writeAndVerifyPage(int bootAddress, uint16_t flashAddress, uint8_t* writeBu
             if (firstDiffIndex == -1) firstDiffIndex = i;
           }
         }
-        SerialPrintln("Mismatch detail: " + String(diffCount) + " of " + String(pageSize) +
-          " bytes differ, first difference at offset " + String(firstDiffIndex));
+        SerialPrintln(F("Mismatch detail: ") + String(diffCount) + F(" of ") + String(pageSize) +
+          F(" bytes differ, first difference at offset ") + String(firstDiffIndex));
         String writeHex = "";
         String verifyHex = "";
         for (int i = 0; i < pageSize; i++) {
@@ -209,8 +209,8 @@ bool writeAndVerifyPage(int bootAddress, uint16_t flashAddress, uint8_t* writeBu
           if (verifyBuffer[i] < 0x10) verifyHex += "0";
           verifyHex += String(verifyBuffer[i], HEX) + " ";
         }
-        SerialPrintln("Intended (write) bytes: " + writeHex);
-        SerialPrintln("Actual (read-back) bytes: " + verifyHex);
+        SerialPrintln(F("Intended (write) bytes: ") + writeHex);
+        SerialPrintln(F("Actual (read-back) bytes: ") + verifyHex);
       }
       continue;
     }
@@ -240,7 +240,7 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
     return false;
   }
 
-  SerialPrintln("Requesting Unit " + String(unitIndex) + " to enter bootloader mode...");
+  SerialPrintln(F("Requesting Unit ") + String(unitIndex) + F(" to enter bootloader mode..."));
   requestUnitEnterBootloader(unitIndex);
 
   //Give the watchdog reset + twiboot startup time to happen, then retry a few times in case
@@ -270,15 +270,15 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
     return false;
   }
 
-  SerialPrintln("Unit " + String(unitIndex) + " found in bootloader mode at I2C address 0x" + String(bootAddress, HEX));
+  SerialPrintln(F("Unit ") + String(unitIndex) + F(" found in bootloader mode at I2C address 0x") + String(bootAddress, HEX));
   result["bootAddress"] = "0x" + String(bootAddress, HEX);
   twibootHeartbeat(bootAddress);
 
   uint8_t pageSize = chipInfo.pageSize;
   uint16_t maxFlashAddress = chipInfo.bootloaderStart;
 
-  SerialPrintln("Unit " + String(unitIndex) + " bootloader responded. Page size: " + String(pageSize) +
-    ", max flash address: " + String(maxFlashAddress));
+  SerialPrintln(F("Unit ") + String(unitIndex) + F(" bootloader responded. Page size: ") + String(pageSize) +
+    F(", max flash address: ") + String(maxFlashAddress));
 
   //pageSize is a uint8_t (max 255), always comfortably within UNIT_BOOTLOADER_MAX_PAGE_SIZE (256)
   //by construction - no separate upper-bound check needed there.
@@ -360,11 +360,11 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
       ? "Firmware written and verified. Unit is starting the new application now."
       : "Firmware written and verified, but the unit didn't confirm the start-application request. "
         "It will boot into the new firmware automatically within about a second regardless.";
-    SerialPrintln("Unit " + String(unitIndex) + " firmware update successful (" + String(pagesWritten) + " pages).");
+    SerialPrintln(F("Unit ") + String(unitIndex) + F(" firmware update successful (") + String(pagesWritten) + F(" pages)."));
   } else {
     result["success"] = false;
     result["error"] = failureReason;
-    SerialPrintln("Unit " + String(unitIndex) + " firmware update FAILED: " + failureReason);
+    SerialPrintln(F("Unit ") + String(unitIndex) + F(" firmware update FAILED: ") + failureReason);
   }
 
   serializeJson(result, resultJsonOut);

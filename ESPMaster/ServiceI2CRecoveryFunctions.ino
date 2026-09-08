@@ -13,7 +13,7 @@ bool recoverI2CBus() {
   if (digitalRead(I2C_SCL_PIN) == LOW) {
     // Only the master normally drives SCL - if a slave is holding it low, toggling it from our
     // side can't force anything; needs a slave-side reset instead.
-    SerialPrintln("I2C bus recovery: SCL held low by a slave, cannot recover from the master side alone");
+    SerialPrintln(F("I2C bus recovery: SCL held low by a slave, cannot recover from the master side alone"));
     return false;
   }
 
@@ -21,7 +21,7 @@ bool recoverI2CBus() {
     return true; // Already idle.
   }
 
-  SerialPrintln("I2C bus recovery: SDA stuck low, clocking SCL up to 9 times to release it");
+  SerialPrintln(F("I2C bus recovery: SDA stuck low, clocking SCL up to 9 times to release it"));
 
   for (int i = 0; i < 9 && digitalRead(I2C_SDA_PIN) == LOW; i++) {
     pinMode(I2C_SCL_PIN, OUTPUT);
@@ -48,8 +48,8 @@ bool recoverI2CBus() {
 
   bool recovered = (digitalRead(I2C_SDA_PIN) == HIGH) && (digitalRead(I2C_SCL_PIN) == HIGH);
   SerialPrintln(recovered
-    ? "I2C bus recovery: SDA released, bus looks idle again"
-    : "I2C bus recovery: FAILED - SDA still stuck low, needs a slave-side reset (see requestUnitEnterBootloader())");
+    ? F("I2C bus recovery: SDA released, bus looks idle again")
+    : F("I2C bus recovery: FAILED - SDA still stuck low, needs a slave-side reset (see requestUnitEnterBootloader())"));
 
   // We drove the pins directly, outside Wire's control - re-init it before the next real transaction.
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
@@ -65,7 +65,7 @@ bool recoverI2CBus() {
 //requestUnitEnterBootloader() (the write path stays reliable even when reads fail). Fire-and-forget:
 //twiboot returns to the app after ~1s idle.
 void forceUnitRecoveryReset(int unitIndex) {
-  SerialPrintln("I2C recovery: unit " + String(unitIndex) + " still not responding after bus recovery - forcing it to reboot");
+  SerialPrintln(F("I2C recovery: unit ") + String(unitIndex) + F(" still not responding after bus recovery - forcing it to reboot"));
   requestUnitEnterBootloader(unitIndex);
 }
 #else
