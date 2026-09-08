@@ -55,6 +55,13 @@ bool removeScheduledMessage(long scheduledDateTimeUnix) {
 
 //Show and remove any scheduled message whose time has passed
 void checkScheduledMessages() {
+  //Defer rather than silently consume a due message while parked for the night - showText()
+  //would blank it anyway, but removing it from the queue here would lose it for good instead of
+  //it firing for real once Quiet Hours end.
+  if (isQuietHoursActive()) {
+    return;
+  }
+
   unsigned long currentTimeUnix = timezone.now();
   for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
     ScheduledMessage scheduledMessage = scheduledMessages[scheduledMessageIndex];

@@ -18,6 +18,13 @@ void showText(String message, int delayMillis, String alignmentOverride) {
     return;
   }
 
+  //Quiet Hours override whatever was actually requested - checked here, not at each call site, so
+  //every path (mode dispatch, Rotation, scheduled messages, the /api/text push endpoint, ...)
+  //parks the display uniformly without needing its own check.
+  if (isQuietHoursActive()) {
+    message = "";
+  }
+
   if (lastWrittenText != message || alignmentUpdated) {
     //If a job is still running, this attempt is silently skipped - lastWrittenText hasn't updated
     //yet, so the next ~1s loop() tick naturally retries once the display is free.

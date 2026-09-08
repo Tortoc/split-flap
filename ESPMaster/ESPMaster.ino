@@ -101,6 +101,16 @@ const char* otaPasswordPath = "/otapassword.txt";
 String timezoneSetting = "";
 const char* timezonePath = "/timezone.txt";
 
+//Quiet Hours - parks the display (blank, no motor movement) during a daily time window, see
+//isQuietHoursActive() (ServiceQuietHoursFunctions.ino). Start/end are "HH:mm" 24h local time;
+//the window may span midnight (e.g. 22:00-07:00).
+bool quietHoursEnabled = false;
+String quietHoursStart = "22:00";
+String quietHoursEnd = "07:00";
+const char* quietHoursEnabledPath = "/quiethoursenabled.txt";
+const char* quietHoursStartPath = "/quiethoursstart.txt";
+const char* quietHoursEndPath = "/quiethoursend.txt";
+
 //User-facing date/clock format (e.g. "dd.MM.yyyy"), translated to ezTime's syntax at render time
 //by convertUserDateFormatToEzTime().
 String dateFormat = "dd.MM.yyyy";
@@ -640,6 +650,9 @@ void setup() {
       minimalDoc["countdownSuffix"] = countdownSuffix;
       minimalDoc["countupPrefix"] = countupPrefix;
       minimalDoc["countupSuffix"] = countupSuffix;
+      minimalDoc["quietHoursEnabled"] = quietHoursEnabled;
+      minimalDoc["quietHoursStart"] = quietHoursStart;
+      minimalDoc["quietHoursEnd"] = quietHoursEnd;
 
       // Try to get scheduled messages quickly (with timeout)
       unsigned long beforeScheduled = millis();
@@ -660,8 +673,7 @@ void setup() {
       minimalDoc["rotationItemCount"] = rotationItemCount;
 
       //beginResponseStream() avoids building the JSON into one contiguous String first.
-      unsigned long totalTime = millis() - settingsStart;
-      SerialPrintln("DEBUG: Settings response ready in " + String(totalTime) + "ms, JSON size: " + String(measureJson(minimalDoc)) + " bytes");
+      SerialPrintln("DEBUG: Settings response ready in " + String(millis() - settingsStart) + "ms");
 
       AsyncResponseStream *response = request->beginResponseStream("application/json");
       serializeJson(minimalDoc, *response);
@@ -1938,6 +1950,38 @@ void setup() {
       writeFile(LittleFS, timezonePath, timezoneSetting.c_str());
       SerialPrintln("Timezone changed to: " + timezoneSetting);
       request->send(200, "text/plain", "Timezone changed");
+    });
+
+    //No dedicated GET here - quietHoursEnabled/Start/End are already folded into GET /api/settings
+    //(see minimalDoc above). Adding a second registered route on top of that one reproducibly
+    //broke /api/settings' own response handling on this heap-constrained device - every registered
+    //handler costs a small permanent heap allocation that's never freed, and there's very little
+    //room to spare.
+    webServer.on("/api/quiet-hours", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (!request->hasParam("enabled", true) || !request->hasParam("start", true) || !request->hasParam("end", true)) {
+        request->send(400, "text/plain", "'enabled', 'start', and 'end' are all required");
+        return;
+      }
+
+      String newStartValue = request->getParam("start", true)->value();
+      String newEndValue = request->getParam("end", true)->value();
+      if (parseTimeOfDayToMinutes(newStartValue) < 0 || parseTimeOfDayToMinutes(newEndValue) < 0) {
+        request->send(400, "text/plain", "'start'/'end' must be 24h time in HH:mm format, e.g. 22:00");
+        return;
+      }
+
+      bool newEnabledValue = request->getParam("enabled", true)->value() == "true";
+
+      quietHoursEnabled = newEnabledValue;
+      quietHoursStart = newStartValue;
+      quietHoursEnd = newEndValue;
+      recomputeQuietHoursMinutes();
+      writeFile(LittleFS, quietHoursEnabledPath, quietHoursEnabled ? "true" : "false");
+      writeFile(LittleFS, quietHoursStartPath, quietHoursStart.c_str());
+      writeFile(LittleFS, quietHoursEndPath, quietHoursEnd.c_str());
+      SerialPrintln("Quiet Hours updated: enabled=" + String(quietHoursEnabled ? "true" : "false") +
+        " start=" + quietHoursStart + " end=" + quietHoursEnd);
+      request->send(200, "text/plain", "Quiet Hours updated");
     });
 
     //Without this, ESPAsyncWebSrv's catch-all handler returns 500 instead of 404 for unknown routes.

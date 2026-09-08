@@ -246,8 +246,30 @@ bool isNumber(String str) {
   char* endPtr;
 
   //10 specifies base 10 (decimal)
-  strtol(str.c_str(), &endPtr, 10);  
+  strtol(str.c_str(), &endPtr, 10);
 
   //Check if the conversion reached the end of the string
   return (*endPtr == '\0');
+}
+
+//Parses a fixed "HH:mm" time-of-day string into minutes-since-midnight (0-1439). Returns -1 for
+//anything malformed - used for Quiet Hours' start/end times.
+int parseTimeOfDayToMinutes(String value) {
+  if (value.length() != 5 || value.charAt(2) != ':') {
+    return -1;
+  }
+
+  String hourPart = value.substring(0, 2);
+  String minutePart = value.substring(3, 5);
+  if (!isNumber(hourPart) || !isNumber(minutePart)) {
+    return -1;
+  }
+
+  int hour = hourPart.toInt();
+  int minute = minutePart.toInt();
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return -1;
+  }
+
+  return hour * 60 + minute;
 }

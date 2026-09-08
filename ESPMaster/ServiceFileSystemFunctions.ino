@@ -25,6 +25,10 @@ void loadValuesFromFileSystem() {
   countdownSuffix = readFile(LittleFS, countdownSuffixPath, countdownSuffix);
   countupPrefix = readFile(LittleFS, countupPrefixPath, countupPrefix);
   countupSuffix = readFile(LittleFS, countupSuffixPath, countupSuffix);
+  quietHoursEnabled = readFile(LittleFS, quietHoursEnabledPath, quietHoursEnabled ? "true" : "false") == "true";
+  quietHoursStart = readFile(LittleFS, quietHoursStartPath, quietHoursStart);
+  quietHoursEnd = readFile(LittleFS, quietHoursEndPath, quietHoursEnd);
+  recomputeQuietHoursMinutes();
 
   String scheduledMessagesJson = readFile(LittleFS, scheduledMessagesPath, "");
   if (scheduledMessagesJson != "") {

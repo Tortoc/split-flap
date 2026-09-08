@@ -1261,6 +1261,7 @@
 				<div class="modal-tab-bar">
 					<button type="button" id="systemTabBtnWifi" class="modal-tab-btn active" onclick="setSystemModalTab('wifi')">WLAN</button>
 					<button type="button" id="systemTabBtnTimezone" class="modal-tab-btn" onclick="setSystemModalTab('timezone')">Zeitzone</button>
+					<button type="button" id="systemTabBtnQuietHours" class="modal-tab-btn" onclick="setSystemModalTab('quietHours')">Ruhezeiten</button>
 				</div>
 
 				<div id="systemTabWifi">
@@ -1328,6 +1329,32 @@
 							<a href="https://en.wikipedia.org/wiki/List_of_tz_database_time_zones" target="_blank" rel="noopener">Liste der TZ-Datenbank-Zeitzonen</a>
 						</p>
 						<p id="timezoneChangeStatus"></p>
+					</div>
+				</div>
+
+				<div id="systemTabQuietHours" class="hidden">
+					<div style="text-align: left;">
+						<p>
+							<label for="quietHoursEnabled" class="ls-checkbox-label">
+								<input type="checkbox" id="quietHoursEnabled" />
+								Ruhezeiten aktivieren
+							</label>
+						</p>
+						<p class="note">
+							Während der Ruhezeiten bleibt das Display leer (keine Motorbewegung), egal welcher
+							Modus eingestellt ist - danach läuft alles automatisch normal weiter.
+						</p>
+						<p>
+							<label for="quietHoursStart">Von</label>
+							<br>
+							<input type="time" id="quietHoursStart" style="width: 120px;" />
+							<label for="quietHoursEnd" style="margin-left: 1em;">Bis</label>
+							<input type="time" id="quietHoursEnd" style="width: 120px;" />
+						</p>
+						<p>
+							<button class="btn-primary" onclick="saveQuietHours()">Speichern</button>
+						</p>
+						<p id="quietHoursStatus"></p>
 					</div>
 				</div>
 			</div>
@@ -2388,8 +2415,10 @@
 		function setSystemModalTab(tab) {
 			document.getElementById("systemTabWifi").classList.toggle("hidden", tab !== "wifi");
 			document.getElementById("systemTabTimezone").classList.toggle("hidden", tab !== "timezone");
+			document.getElementById("systemTabQuietHours").classList.toggle("hidden", tab !== "quietHours");
 			document.getElementById("systemTabBtnWifi").classList.toggle("active", tab === "wifi");
 			document.getElementById("systemTabBtnTimezone").classList.toggle("active", tab === "timezone");
+			document.getElementById("systemTabBtnQuietHours").classList.toggle("active", tab === "quietHours");
 		}
 
 		function closeAdminModal(name) {
@@ -2437,6 +2466,9 @@
 
 						document.getElementById("currentOtaPasswordDisplay").innerText = responseObject.otaPassword || "(leer)";
 						document.getElementById("currentTimezoneDisplay").innerText = responseObject.timezone || "(leer)";
+						document.getElementById("quietHoursEnabled").checked = !!responseObject.quietHoursEnabled;
+						document.getElementById("quietHoursStart").value = responseObject.quietHoursStart || "22:00";
+						document.getElementById("quietHoursEnd").value = responseObject.quietHoursEnd || "07:00";
 					} catch (e) {
 						// Non-critical - worst case buttons stay visible/displays stay on "wird geladen..." even if not applicable.
 					}
@@ -2837,6 +2869,74 @@
 			xhrRequest.open("POST", "/api/timezone", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 			xhrRequest.send("timezone=" + encodeURIComponent(newTimezone));
+		}
+
+		//Used only to refresh after a save - reuses /api/settings (same fields loadAdminSettings()
+		//already populates on open) rather than a dedicated GET here, since this heap-constrained
+		//device's registered-handler budget is tight enough that one more permanent route
+		//measurably affected /api/settings' own response handling - see the firmware's comment on
+		//POST /api/quiet-hours.
+		function loadCurrentQuietHours() {
+			if (localDevelopment) {
+				return;
+			}
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4 && this.status == 200) {
+					try {
+						var responseObject = JSON.parse(this.responseText);
+						document.getElementById("quietHoursEnabled").checked = !!responseObject.quietHoursEnabled;
+						document.getElementById("quietHoursStart").value = responseObject.quietHoursStart || "22:00";
+						document.getElementById("quietHoursEnd").value = responseObject.quietHoursEnd || "07:00";
+					} catch (e) {
+						// Non-critical - fields just keep showing what was already there.
+					}
+				}
+			};
+			xhrRequest.open("GET", "/api/settings", true);
+			xhrRequest.send();
+		}
+
+		//Saves Quiet Hours - while active, the display stays blank regardless of mode (see
+		//showText()/isQuietHoursActive() in the firmware).
+		function saveQuietHours() {
+			var enabled = document.getElementById("quietHoursEnabled").checked;
+			var start = document.getElementById("quietHoursStart").value;
+			var end = document.getElementById("quietHoursEnd").value;
+			var statusEl = document.getElementById("quietHoursStatus");
+
+			if (!start || !end) {
+				alert("Bitte Start- und Endzeit angeben.");
+				return;
+			}
+
+			if (localDevelopment) {
+				statusEl.innerHTML = '<span class="status-online-ready">Ruhezeiten gespeichert (simuliert).</span>';
+				return;
+			}
+
+			statusEl.innerHTML = "";
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						statusEl.innerHTML = '<span class="status-online-ready">Ruhezeiten gespeichert.</span>';
+						loadCurrentQuietHours();
+					} else {
+						statusEl.innerHTML = '<span class="status-offline">Fehlgeschlagen: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
+					}
+				}
+			};
+
+			xhrRequest.onerror = function () {
+				statusEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
+			};
+
+			xhrRequest.open("POST", "/api/quiet-hours", true);
+			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.send("enabled=" + (enabled ? "true" : "false") + "&start=" + encodeURIComponent(start) + "&end=" + encodeURIComponent(end));
 		}
 
 		//Re-runs the I2C scan on the ESP to pick up units connected/fixed after boot, no reboot needed
