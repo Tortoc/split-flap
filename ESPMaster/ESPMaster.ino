@@ -249,6 +249,17 @@ unsigned long rotationItemStartedAtSeconds = 0; //0 = not started yet (real time
 String rotationCurrentAlignment = "";
 Timezone timezone;
 
+//Bug (found while fixing #117): despite the name/parameter, neither timezone.now() nor
+//timezone.tzTime(TIME_NOW, UTC_TIME) actually return UTC - both return local time (verified
+//empirically via a temporary /api/diag?type=timetest probe: both were identical to each other and
+//exactly getOffset() minutes ahead of a known-correct external UTC clock). Reversing the offset
+//by hand is the only way found to get real UTC seconds out of this library - needed everywhere
+//this compares against a client-supplied Unix timestamp (scheduled messages, countdown/countup,
+//rotation items), since the client always sends real UTC seconds (e.g. JS Date.now()/1000).
+long getRealUtcNow() {
+  return timezone.now() + (long)timezone.getOffset() * 60;
+}
+
 AsyncWebServer webServer(80);
 
 #if WIFI_USE_DIRECT == false
@@ -593,7 +604,6 @@ void setup() {
       minimalDoc["wifiStatus"] = WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected";
       minimalDoc["wifiRssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
       minimalDoc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
-      minimalDoc["scheduledMessages"] = JsonArray();
       minimalDoc["wifiSettingsResettable"] = true;
       //otaPassword/timezone included so Administration can populate from this one fetch, given
       //this device's hard 5-connection TCP limit.
@@ -609,18 +619,21 @@ void setup() {
       minimalDoc["quietHoursStart"] = quietHoursStart;
       minimalDoc["quietHoursEnd"] = quietHoursEnd;
 
-      // Try to get scheduled messages quickly (with timeout)
-      unsigned long beforeScheduled = millis();
-      int scheduledCount = scheduledMessages.size();
-      if (scheduledCount > 0 && (millis() - settingsStart) < 2000) { // Only if we have time
-        for(int i = 0; i < scheduledCount && (millis() - beforeScheduled) < 1000; i++) {
-          ScheduledMessage msg = scheduledMessages[i];
-          minimalDoc["scheduledMessages"][i]["scheduledDateTimeUnix"] = msg.ScheduledDateTimeUnix;
-          minimalDoc["scheduledMessages"][i]["message"] = msg.Message;
-          minimalDoc["scheduledMessages"][i]["showIndefinitely"] = msg.ShowIndefinitely;
-          yield();
-        }
-      }
+      //Bug #117: scheduled messages used to be serialized right here, and this handler would
+      //hang/crash the whole device (reason 254/abort, stack trace through umm_free_core - heap
+      //corruption) whenever a message actually sat in the queue. Two things were changed to fix
+      //it, following the exact same pattern already proven safe below for rotationItemCount/
+      //GET /api/rotation-items: (1) an isolated minimal repro (a standalone JsonDocument outside
+      //this handler) showed assigning an unbound JsonArray() to a field and then writing into it
+      //via nested [i][field] indexing corrupts the heap on this ArduinoJson version; switching to
+      //the documented-safe .to<JsonArray>()+.add<JsonObject>() pattern alone did NOT fix the crash
+      //here, though - (2) the yield() this loop used (for a >1s time budget across many messages)
+      //turned out to be the same known trap noted below for rotation items: yield() from inside
+      //this handler, combined with JSON-document operations, overflows the AsyncWebServer
+      //callback's small stack. Moved the whole thing to its own handler (GET /api/scheduled-
+      //messages) that mirrors rotation-items exactly: no yield() in the loop, just the item count
+      //here so the client knows there's something to fetch.
+      minimalDoc["scheduledMessageCount"] = scheduledMessages.size();
 
       //Rotation items themselves aren't built here - looping over them in this handler caused a
       //stack-overflow panic. Just the count (cheap); the client fetches the full list from
@@ -1535,6 +1548,29 @@ void setup() {
       
       request->send(200, "text/html", html);
       isPendingReboot = true;
+    });
+
+    //See BUGFIX_LOG #117 - moved out of GET /api/settings, mirrors GET /api/rotation-items exactly
+    //(own small JsonDocument, .to<JsonArray>()+.add<JsonObject>(), deliberately no yield() in the
+    //loop - a yield() here previously overflowed the AsyncWebServer callback's small stack).
+    //Deliberately a separate registration, not merged with DELETE below - not worth stacking any
+    //more risk onto this fix given the other GET/POST routing quirk found this session.
+    webServer.on("/api/scheduled-messages", HTTP_GET, [](AsyncWebServerRequest * request) {
+      JsonDocument scheduledDoc;
+      JsonArray scheduledArray = scheduledDoc.to<JsonArray>();
+      unsigned long scheduledRequestStart = millis();
+
+      for (int i = 0; i < scheduledMessages.size() && (millis() - scheduledRequestStart) < 1000; i++) {
+        ScheduledMessage msg = scheduledMessages.get(i);
+        JsonObject entry = scheduledArray.add<JsonObject>();
+        entry["scheduledDateTimeUnix"] = msg.ScheduledDateTimeUnix;
+        entry["message"] = msg.Message;
+        entry["showIndefinitely"] = msg.ShowIndefinitely;
+      }
+
+      AsyncResponseStream *response = request->beginResponseStream("application/json");
+      serializeJson(scheduledDoc, *response);
+      request->send(response);
     });
 
     webServer.on("/api/scheduled-messages", HTTP_DELETE, [](AsyncWebServerRequest * request) {

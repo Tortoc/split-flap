@@ -32,7 +32,11 @@ void checkCountdown() {
     long countdownInSeconds = atol(countdownToDateUnix.c_str());
 
     //Work out how long left
-    long currentTimeSeconds = timezone.now();
+    //Bug (found while fixing #117): timezone.now() doesn't return real UTC (see getRealUtcNow()'s
+    //comment), but countdownToDateUnix is real UTC seconds from the client - comparing them
+    //directly shifted the hours/days computation below by the timezone offset, occasionally
+    //flipping which day a near-midnight countdown rounds to.
+    long currentTimeSeconds = getRealUtcNow();
     long differenceSeconds = countdownInSeconds - currentTimeSeconds;
     long hours = differenceSeconds / 60 / 60;
 

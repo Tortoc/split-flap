@@ -1750,8 +1750,11 @@
 									loadRotationItems();
 								}
 
-								if (responseObject.scheduledMessages) {
-									showScheduledMessages(responseObject.scheduledMessages);
+								//Scheduled messages aren't part of this response either (see BUGFIX_LOG #117 -
+								//moved to its own endpoint, same reasoning as rotation items above) - load them
+								//separately, but only if there's actually something to fetch.
+								if (responseObject.scheduledMessageCount > 0) {
+									loadScheduledMessages();
 								}
 
 								showContent();
@@ -1912,6 +1915,27 @@
 				}
 			};
 			xhrRequest.open("GET", "/api/rotation-items", true);
+			xhrRequest.send();
+		}
+
+		//See BUGFIX_LOG #117 - scheduled messages used to be part of the /settings response, moved
+		//to their own endpoint, same reasoning/pattern as loadRotationItems() above.
+		function loadScheduledMessages() {
+			if (localDevelopment) {
+				return;
+			}
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4 && this.status == 200) {
+					try {
+						showScheduledMessages(JSON.parse(this.responseText));
+					} catch (e) {
+						// Non-critical - the scheduled-messages list just stays empty/whatever it last showed.
+					}
+				}
+			};
+			xhrRequest.open("GET", "/api/scheduled-messages", true);
 			xhrRequest.send();
 		}
 

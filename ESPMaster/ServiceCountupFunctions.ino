@@ -9,7 +9,9 @@ void checkCountup() {
   if (deviceMode == DEVICE_MODE_COUNTUP) {
     long countupInSeconds = atol(countupSinceDateUnix.c_str());
 
-    long currentTimeSeconds = timezone.now();
+    //Bug (found while fixing #117): timezone.now() doesn't return real UTC (see getRealUtcNow()'s
+    //comment) - see the matching comment in checkCountdown() (ServiceCountdownFunctions.ino).
+    long currentTimeSeconds = getRealUtcNow();
     long differenceSeconds = currentTimeSeconds - countupInSeconds;
     long hours = differenceSeconds / 60 / 60;
 

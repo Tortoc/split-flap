@@ -62,6 +62,7 @@ other endpoint below has no auth check at all, including `GET /api/ota-password`
 | POST | [`/api/firmware-finish`](#post-apifirmware-finish) | Finalize the update, reboot on success |
 | POST | [`/api/debug-mode`](#post-apidebug-mode) | Enable/disable debug mode |
 | POST | [`/api/reboot`](#post-apireboot) | Reboot the device |
+| GET | [`/api/scheduled-messages`](#get-apischeduled-messages) | List all scheduled messages |
 | DELETE | [`/api/scheduled-messages`](#delete-apischeduled-messages) | Remove a scheduled message |
 | POST | [`/api/wifi?action=`](#post-apiwifi) | WiFi actions: `reset`\|`scan`\|`connect` |
 | GET | [`/api/wifi?type=`](#get-apiwifi) | WiFi queries: `scan-result`\|`connect-status` |
@@ -108,9 +109,8 @@ speed, mode, WiFi status, etc.
   "wifiStatus": "Connected",
   "wifiRssi": -69,
   "wifiIp": "192.168.1.51",
-  "scheduledMessages": [
-    { "scheduledDateTimeUnix": 1755331200, "message": "Hello", "showIndefinitely": false }
-  ],
+  "scheduledMessageCount": 1,
+  "rotationItemCount": 0,
   "wifiSettingsResettable": true,
   "otaPassword": "splitflap",
   "timezone": "Europe/Berlin"
@@ -120,6 +120,13 @@ speed, mode, WiFi status, etc.
 unauthenticated-by-design reasoning) - folded in here so the Administration view can populate its
 displays from this one already-fetched response instead of two more separate requests.
 `wifiSettingsResettable` reflects `WIFI_USE_DIRECT` being off (AP-config mode).
+
+`scheduledMessageCount` is just the count (cheap) - same reasoning as `rotationItemCount`: the
+client fetches the full list from [`GET /api/scheduled-messages`](#get-apischeduled-messages) only
+when there's actually something to show. This used to be a full `scheduledMessages` array embedded
+right here; moved out after a real, reproducible device crash (heap corruption - an ArduinoJson
+pattern issue combined with a stack-overflow-prone `yield()` inside this handler's loop) whenever a
+message actually sat in the queue - see BUGFIX_LOG #133 for the full story.
 
 ```bash
 curl http://192.168.1.50/api/settings
@@ -636,6 +643,28 @@ curl -X POST http://192.168.1.50/api/reboot
 
 ---
 
+### `GET /api/scheduled-messages`
+
+All currently scheduled messages. Own small registration (see BUGFIX_LOG #133) - mirrors
+[`GET /api/rotation-items`](#get-apirotation-items) exactly, including deliberately **not** using
+`yield()` inside its build loop (that overflowed the small AsyncWebServer callback stack in an
+earlier version of this handler, when it lived inside `GET /api/settings`).
+
+**Response** `200 application/json`:
+```json
+[
+  { "scheduledDateTimeUnix": 1755331200, "message": "Hello", "showIndefinitely": false }
+]
+```
+Empty array if nothing is scheduled. `GET /api/settings`'s `scheduledMessageCount` tells you
+whether it's worth calling this at all.
+
+```bash
+curl http://192.168.1.50/api/scheduled-messages
+```
+
+---
+
 ### `DELETE /api/scheduled-messages`
 
 Removes one scheduled message.
@@ -644,7 +673,7 @@ Removes one scheduled message.
 
 | Param | Type |
 | --- | --- |
-| `id` | The message's `scheduledDateTimeUnix`, as returned in `GET /api/settings`'s `scheduledMessages[]` |
+| `id` | The message's `scheduledDateTimeUnix`, as returned by [`GET /api/scheduled-messages`](#get-apischeduled-messages) |
 
 Example: `DELETE /api/scheduled-messages?id=1755331200`
 

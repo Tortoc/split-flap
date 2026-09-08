@@ -14,8 +14,12 @@ void addScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool 
   SerialPrintln(showIndefinitely ? F("Yes") : F("No"));
 
   //Find the existing scheduled message and update it if one exists
+  //.get() (not operator[]) - the library's operator[] dereferences a NULL node with no bounds
+  //check on a stale/invalid index; .get() returns a default-constructed value instead. See
+  //BUGFIX_LOG #117 - this loop itself never yields mid-iteration so isn't the reproduced hang,
+  //but kept consistent with the other scheduledMessages accessors as a precaution.
   for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
-    ScheduledMessage scheduledMessage = scheduledMessages[scheduledMessageIndex];
+    ScheduledMessage scheduledMessage = scheduledMessages.get(scheduledMessageIndex);
 
     if (scheduledDateTimeUnix == scheduledMessage.ScheduledDateTimeUnix) {
       SerialPrintln(F("Removing Existing Scheduled Message due to be shown, it will be replaced"));
@@ -25,7 +29,12 @@ void addScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool 
   }
 
   //Add the new scheduled message with the new value
-  if (scheduledDateTimeUnix > timezone.now()) {
+  //Bug (found while fixing #117): timezone.now() doesn't return real UTC despite its name/params
+  //(verified empirically - see getRealUtcNow()'s comment in ESPMaster.ino), but scheduledDateTimeUnix
+  //arrives from the client as real UTC seconds - comparing them directly was off by the timezone
+  //offset (2h for Europe/Berlin in summer), rejecting messages scheduled less than that far ahead
+  //as "already in the past".
+  if (scheduledDateTimeUnix > getRealUtcNow()) {
     SerialPrintln(F("Adding new Scheduled Message"));
     scheduledMessages.add({scheduledText, scheduledDateTimeUnix, showIndefinitely});
   }
@@ -38,7 +47,7 @@ void addScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool 
 bool removeScheduledMessage(long scheduledDateTimeUnix) {
   //Find the existing scheduled message and delete it
   for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
-    ScheduledMessage scheduledMessage = scheduledMessages[scheduledMessageIndex];
+    ScheduledMessage scheduledMessage = scheduledMessages.get(scheduledMessageIndex);
 
     if (scheduledDateTimeUnix == scheduledMessage.ScheduledDateTimeUnix) {
       SerialPrintln(F("Deleting Scheduled Message due to be shown: ") + scheduledMessage.Message);
@@ -62,9 +71,12 @@ void checkScheduledMessages() {
     return;
   }
 
-  unsigned long currentTimeUnix = timezone.now();
+  //See the matching comment in addScheduledMessage() above - must compare against real UTC, not
+  //timezone.now()'s (misleadingly-named) local time, to match the UTC seconds the client
+  //scheduled against.
+  unsigned long currentTimeUnix = getRealUtcNow();
   for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
-    ScheduledMessage scheduledMessage = scheduledMessages[scheduledMessageIndex];
+    ScheduledMessage scheduledMessage = scheduledMessages.get(scheduledMessageIndex);
 
     if (currentTimeUnix > scheduledMessage.ScheduledDateTimeUnix) {
       SerialPrintln(F("Scheduled Message due to be shown: ") + scheduledMessage.Message);
@@ -129,8 +141,8 @@ void writeScheduledMessagesToFile() {
   if (scheduledMessages.size()) {
     JsonDocument scheduledMessagesDocument;
     for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
-      ScheduledMessage scheduledMessage = scheduledMessages[scheduledMessageIndex];
-      
+      ScheduledMessage scheduledMessage = scheduledMessages.get(scheduledMessageIndex);
+
       scheduledMessagesDocument[scheduledMessageIndex]["scheduledDateTimeUnix"] = scheduledMessage.ScheduledDateTimeUnix;
       scheduledMessagesDocument[scheduledMessageIndex]["message"] = scheduledMessage.Message;
       scheduledMessagesDocument[scheduledMessageIndex]["showIndefinitely"] = scheduledMessage.ShowIndefinitely;

@@ -10,7 +10,13 @@ void checkRotation() {
     rotationCurrentIndex = 0; //list shrank since the last advance - fall back to the start
   }
 
-  unsigned long nowSeconds = timezone.now();
+  //Bug (found while fixing #117): timezone.now() doesn't return real UTC (see getRealUtcNow()'s
+  //comment), but Countdown/Countup rotation items' TargetDateTimeUnix is real UTC seconds from the
+  //client - see the matching comment in checkCountdown() (ServiceCountdownFunctions.ino). Safe for
+  //the item-switch timing below too: rotationItemStartedAtSeconds is itself always set from
+  //nowSeconds, so that comparison stays internally consistent regardless of which time base
+  //nowSeconds uses.
+  unsigned long nowSeconds = getRealUtcNow();
   if (rotationItemStartedAtSeconds == 0) {
     rotationItemStartedAtSeconds = nowSeconds; //first tick after switching into rotation mode
   }
