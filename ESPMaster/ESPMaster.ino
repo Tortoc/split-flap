@@ -381,16 +381,16 @@ void setup() {
 
   // First I2C scan is deferred to loop() (firstUnitScanDone block there), 30s after boot to give
   // Units time to finish their own homing - WiFi/web server start immediately regardless.
-  SerialPrintln("");
-  SerialPrintln("#######################################################");
-  SerialPrintln("..............Split Flap Display Starting..............");
-  SerialPrintln("#######################################################");
+  SerialPrintln(F(""));
+  SerialPrintln(F("#######################################################"));
+  SerialPrintln(F("..............Split Flap Display Starting.............."));
+  SerialPrintln(F("#######################################################"));
   debugStatus = "Starting";
-  SerialPrintln("DEBUG: Status = " + debugStatus);
+  SerialPrintln(F("DEBUG: Status = ") + debugStatus);
 
   //Load and read all the things
   debugStatus = "WiFi Init";
-  SerialPrintln("DEBUG: Status = " + debugStatus);
+  SerialPrintln(F("DEBUG: Status = ") + debugStatus);
   blinkLed(1, 200, 100); // 1 blink = WiFi connecting
   initWiFi();
   
@@ -400,11 +400,11 @@ void setup() {
   if (isWifiConfigured && !isPendingReboot) {
     blinkLed(2, 200, 100); // 2 blinks = WiFi connected
     debugStatus = "WiFi Connected";
-    SerialPrintln("DEBUG: Status = " + debugStatus);
+    SerialPrintln(F("DEBUG: Status = ") + debugStatus);
     
     //ezTime initialization - NON-BLOCKING with timeout
     debugStatus = "NTP Sync Starting";
-    SerialPrintln("DEBUG: Status = " + debugStatus);
+    SerialPrintln(F("DEBUG: Status = ") + debugStatus);
     blinkLed(3, 200, 100); // 3 blinks = NTP syncing
     
     setInterval(21600); //sync every 6h - a wall clock doesn't need minute-level freshness
@@ -417,7 +417,7 @@ void setup() {
     unsigned long ntpStartTime = millis();
     unsigned long ntpTimeout = 30000; // 30 second timeout
     
-    SerialPrintln("DEBUG: Starting NTP sync (non-blocking, 30s timeout)");
+    SerialPrintln(F("DEBUG: Starting NTP sync (non-blocking, 30s timeout)"));
     
     // Wait for sync with timeout and yield
     while (timeStatus() == timeNotSet && (millis() - ntpStartTime) < ntpTimeout) {
@@ -429,18 +429,18 @@ void setup() {
     if (timeStatus() == timeSet) {
       blinkLed(4, 200, 100); // 4 blinks = NTP sync success
       debugStatus = "NTP Sync Success";
-      SerialPrintln("DEBUG: Status = " + debugStatus);
-      SerialPrintln("DEBUG: NTP sync successful!");
+      SerialPrintln(F("DEBUG: Status = ") + debugStatus);
+      SerialPrintln(F("DEBUG: NTP sync successful!"));
     } else {
       blinkLed(5, 200, 100); // 5 blinks = NTP sync failed
       debugStatus = "NTP Sync Failed";
-      SerialPrintln("DEBUG: Status = " + debugStatus);
-      SerialPrintln("DEBUG: WARNING - NTP sync failed or timed out, continuing anyway");
+      SerialPrintln(F("DEBUG: Status = ") + debugStatus);
+      SerialPrintln(F("DEBUG: WARNING - NTP sync failed or timed out, continuing anyway"));
     }
     
     //Load various variables
     debugStatus = "File System Init";
-    SerialPrintln("DEBUG: Status = " + debugStatus);
+    SerialPrintln(F("DEBUG: Status = ") + debugStatus);
     blinkLed(6, 200, 100); // 6 blinks = File system init
     initialiseFileSystem();
     loadValuesFromFileSystem();
@@ -448,17 +448,17 @@ void setup() {
 
     // Must come after loadValuesFromFileSystem() - needs timezoneSetting, populated from there.
     timezone.setLocation(timezoneSetting);
-    SerialPrintln("DEBUG: Timezone set to: " + timezoneSetting);
+    SerialPrintln(F("DEBUG: Timezone set to: ") + timezoneSetting);
     
     // Debug mode was already loaded at the very top of setup(), before the earlier blinkLed()
     // calls - just log the already-known value here.
 #if DEBUG_ENABLE == true
-    SerialPrintln("DEBUG: Debug mode: " + String(showDebugPage ? "enabled" : "disabled") + " (controls startup page, error status, page load log, LED blink codes, and serial log)");
+    SerialPrintln(F("DEBUG: Debug mode: ") + String(showDebugPage ? F("enabled") : F("disabled")) + F(" (controls startup page, error status, page load log, LED blink codes, and serial log)"));
 #endif
 
     //Web Server Endpoint configuration
     debugStatus = "Web Server Setup";
-    SerialPrintln("DEBUG: Status = " + debugStatus);
+    SerialPrintln(F("DEBUG: Status = ") + debugStatus);
     blinkLed(7, 200, 100); // 7 blinks = Web server starting
     
     //No .setCacheControl() - drove heap fragmentation up fast on repeated requests when tried.
@@ -468,7 +468,7 @@ void setup() {
     //All API routes below live under a single "/api/" prefix - full endpoint reference in API.md.
     webServer.on("/", HTTP_GET, [](AsyncWebServerRequest * request) {
       unsigned long pageRequestStart = millis();
-      SerialPrintln("DEBUG: Request Home Page Received");
+      SerialPrintln(F("DEBUG: Request Home Page Received"));
       
 #if DEBUG_ENABLE == true
       // If debug mode is enabled and we're still in debug mode, show debug page
@@ -566,14 +566,14 @@ void setup() {
       //Actually stored gzip-compressed as "/index.html.gz" - AsyncFileResponse falls back to that
       //automatically and adds Content-Encoding: gzip itself.
       unsigned long beforeSend = millis();
-      SerialPrintln("DEBUG: Serving index.html (took " + String(beforeSend - pageRequestStart) + "ms to get here)");
+      SerialPrintln(F("DEBUG: Serving index.html (took ") + String(beforeSend - pageRequestStart) + F("ms to get here)"));
       request->send(LittleFS, "/index.html", "text/html");
-      SerialPrintln("DEBUG: index.html sent (total: " + String(millis() - pageRequestStart) + "ms)");
+      SerialPrintln(F("DEBUG: index.html sent (total: ") + String(millis() - pageRequestStart) + F("ms)"));
     });
 
     webServer.on("/api/settings", HTTP_GET, [](AsyncWebServerRequest * request) {
       unsigned long settingsStart = millis();
-      SerialPrintln("DEBUG: Request for Settings Received at " + String(settingsStart) + "ms");
+      SerialPrintln(F("DEBUG: Request for Settings Received at ") + String(settingsStart) + F("ms"));
       
       // Set flag to prevent display updates during web request
       webRequestActive = true;
@@ -628,13 +628,13 @@ void setup() {
       minimalDoc["rotationItemCount"] = rotationItemCount;
 
       //beginResponseStream() avoids building the JSON into one contiguous String first.
-      SerialPrintln("DEBUG: Settings response ready in " + String(millis() - settingsStart) + "ms");
+      SerialPrintln(F("DEBUG: Settings response ready in ") + String(millis() - settingsStart) + F("ms"));
 
       AsyncResponseStream *response = request->beginResponseStream("application/json");
       serializeJson(minimalDoc, *response);
       request->send(response);
 
-      SerialPrintln("DEBUG: Settings response sent (total: " + String(millis() - settingsStart) + "ms)");
+      SerialPrintln(F("DEBUG: Settings response sent (total: ") + String(millis() - settingsStart) + F("ms)"));
 
       // Clear flag after request completes
       webRequestActive = false;
@@ -647,7 +647,7 @@ void setup() {
     //is far larger than every other successfully-merged pair - likely relevant, but unconfirmed);
     //reverted to two separate registrations, verified working again. See BUGFIX_LOG #121.
     webServer.on("/api/settings", HTTP_POST, [](AsyncWebServerRequest * request) {
-      SerialPrintln("DEBUG: Request Post of Form Received");
+      SerialPrintln(F("DEBUG: Request Post of Form Received"));
 
       bool submissionError = false;
 
@@ -684,7 +684,7 @@ void setup() {
               newAlignmentValue = receivedValue;
             }
             else {
-              SerialPrintln("Alignment provided was not valid. Value: " + receivedValue);
+              SerialPrintln(F("Alignment provided was not valid. Value: ") + receivedValue);
               submissionError = true;
             }
           }
@@ -696,7 +696,7 @@ void setup() {
               newDeviceModeValue = receivedValue;
             }
             else {
-              SerialPrintln("Device Mode provided was not valid. Invalid Value: " + receivedValue);
+              SerialPrintln(F("Device Mode provided was not valid. Invalid Value: ") + receivedValue);
               submissionError = true;
             }
           }
@@ -707,7 +707,7 @@ void setup() {
             //and a garbage speed reaching the unit is a real motor safety concern.
             String rawFlapSpeed = p->value();
             if (!isNumber(rawFlapSpeed) || rawFlapSpeed.toInt() < 1 || rawFlapSpeed.toInt() > 100) {
-              SerialPrintln("flapSpeed provided was invalid (must be a number 1-100): " + rawFlapSpeed);
+              SerialPrintln(F("flapSpeed provided was invalid (must be a number 1-100): ") + rawFlapSpeed);
               submissionError = true;
             } else {
               newFlapSpeedValue = rawFlapSpeed.c_str();
@@ -718,7 +718,7 @@ void setup() {
           if (p->name() == PARAM_INPUT_TEXT) {
             //Enforce a max length server-side too - an unbounded String is needless heap pressure.
             if (p->value().length() > 500) {
-              SerialPrintln("inputText provided was too long (" + String(p->value().length()) + " chars, max 500)");
+              SerialPrintln(F("inputText provided was too long (") + String(p->value().length()) + F(" chars, max 500)"));
               submissionError = true;
             } else {
               newInputTextValue = p->value().c_str();
@@ -749,7 +749,7 @@ void setup() {
               newMessageScheduleDateTimeUnixValue = atol(receivedValue.c_str());
             }
             else {
-              SerialPrintln("Schedule date time provided was not valid. Invalid Value: " + receivedValue);
+              SerialPrintln(F("Schedule date time provided was not valid. Invalid Value: ") + receivedValue);
               submissionError = true;
             }
           }
@@ -761,7 +761,7 @@ void setup() {
               newCountdownToDateUnixValue = receivedValue;
             }
             else {
-              SerialPrintln("Countdown date provided was not valid. Invalid Value: " + receivedValue);
+              SerialPrintln(F("Countdown date provided was not valid. Invalid Value: ") + receivedValue);
               submissionError = true;
             }
           }
@@ -773,7 +773,7 @@ void setup() {
               newCountupSinceDateUnixValue = receivedValue;
             }
             else {
-              SerialPrintln("Countup date provided was not valid. Invalid Value: " + receivedValue);
+              SerialPrintln(F("Countup date provided was not valid. Invalid Value: ") + receivedValue);
               submissionError = true;
             }
           }
@@ -781,7 +781,7 @@ void setup() {
           //Clock/date format, e.g. "HH:mm:ss" - see convertUserDateFormatToEzTime().
           if (p->name() == PARAM_CLOCK_FORMAT) {
             if (p->value().length() > 40) {
-              SerialPrintln("clockFormat provided was too long (max 40 chars)");
+              SerialPrintln(F("clockFormat provided was too long (max 40 chars)"));
               submissionError = true;
             } else {
               newClockFormatValue = p->value();
@@ -789,7 +789,7 @@ void setup() {
           }
           if (p->name() == PARAM_DATE_FORMAT) {
             if (p->value().length() > 40) {
-              SerialPrintln("dateFormat provided was too long (max 40 chars)");
+              SerialPrintln(F("dateFormat provided was too long (max 40 chars)"));
               submissionError = true;
             } else {
               newDateFormatValue = p->value();
@@ -800,7 +800,7 @@ void setup() {
           //count), so tracked via hasNew*/empty-allowed rather than the newX != "" pattern above.
           if (p->name() == PARAM_COUNTDOWN_PREFIX) {
             if (p->value().length() > 40) {
-              SerialPrintln("countdownPrefix provided was too long (max 40 chars)");
+              SerialPrintln(F("countdownPrefix provided was too long (max 40 chars)"));
               submissionError = true;
             } else {
               newCountdownPrefixValue = p->value();
@@ -809,7 +809,7 @@ void setup() {
           }
           if (p->name() == PARAM_COUNTDOWN_SUFFIX) {
             if (p->value().length() > 40) {
-              SerialPrintln("countdownSuffix provided was too long (max 40 chars)");
+              SerialPrintln(F("countdownSuffix provided was too long (max 40 chars)"));
               submissionError = true;
             } else {
               newCountdownSuffixValue = p->value();
@@ -820,7 +820,7 @@ void setup() {
           //HTTP POST Countup prefix/suffix - same "" is deliberate reasoning as Countdown above.
           if (p->name() == PARAM_COUNTUP_PREFIX) {
             if (p->value().length() > 40) {
-              SerialPrintln("countupPrefix provided was too long (max 40 chars)");
+              SerialPrintln(F("countupPrefix provided was too long (max 40 chars)"));
               submissionError = true;
             } else {
               newCountupPrefixValue = p->value();
@@ -829,7 +829,7 @@ void setup() {
           }
           if (p->name() == PARAM_COUNTUP_SUFFIX) {
             if (p->value().length() > 40) {
-              SerialPrintln("countupSuffix provided was too long (max 40 chars)");
+              SerialPrintln(F("countupSuffix provided was too long (max 40 chars)"));
               submissionError = true;
             } else {
               newCountupSuffixValue = p->value();
@@ -841,7 +841,7 @@ void setup() {
           //bounded well above any realistic sequence, still a needless-heap-pressure safeguard.
           if (p->name() == PARAM_ROTATION_ITEMS) {
             if (p->value().length() > 8000) {
-              SerialPrintln("rotationItems provided was too long (max 8000 chars)");
+              SerialPrintln(F("rotationItems provided was too long (max 8000 chars)"));
               submissionError = true;
             } else {
               newRotationItemsJson = p->value();
@@ -853,11 +853,11 @@ void setup() {
 
       //If there was an error, report back to check what has been input
       if (submissionError) {
-        SerialPrintln("Finished Processing Request with Error");
+        SerialPrintln(F("Finished Processing Request with Error"));
         request->send(400, "text/plain", "Invalid submission - check the values you entered (e.g. schedule/countdown dates must be in the future).");
       }
       else {
-        SerialPrintln("Finished Processing Request Successfully");
+        SerialPrintln(F("Finished Processing Request Successfully"));
 
         lastReceivedMessageDateTime = timezone.dateTime("d M y H:i:s");
 
@@ -867,7 +867,7 @@ void setup() {
           alignmentUpdated = true;
 
           writeFile(LittleFS, alignmentPath, alignment.c_str());
-          SerialPrintln("Alignment Updated: " + alignment);
+          SerialPrintln(F("Alignment Updated: ") + alignment);
         }
 
         //Only if a new flap speed value
@@ -875,7 +875,7 @@ void setup() {
           flapSpeed = newFlapSpeedValue;
 
           writeFile(LittleFS, flapSpeedPath, flapSpeed.c_str());
-          SerialPrintln("Flap Speed Updated: " + flapSpeed);
+          SerialPrintln(F("Flap Speed Updated: ") + flapSpeed);
         }
 
         //Only if countdown date has changed - gated to the countdown tab's own submission (its
@@ -886,7 +886,7 @@ void setup() {
           countdownToDateUnix = newCountdownToDateUnixValue;
 
           writeFile(LittleFS, countdownPath, countdownToDateUnix.c_str());
-          SerialPrintln("Countdown Date Time Unix Updated: " + countdownToDateUnix);
+          SerialPrintln(F("Countdown Date Time Unix Updated: ") + countdownToDateUnix);
         }
 
         //Only if countup date has changed - same tab-gating reasoning as Countdown above.
@@ -894,7 +894,7 @@ void setup() {
           countupSinceDateUnix = newCountupSinceDateUnixValue;
 
           writeFile(LittleFS, countupPath, countupSinceDateUnix.c_str());
-          SerialPrintln("Countup Since Date Unix Updated: " + countupSinceDateUnix);
+          SerialPrintln(F("Countup Since Date Unix Updated: ") + countupSinceDateUnix);
         }
 
         //Only if the clock/date format has changed
@@ -902,51 +902,51 @@ void setup() {
           clockFormat = newClockFormatValue;
 
           writeFile(LittleFS, clockFormatPath, clockFormat.c_str());
-          SerialPrintln("Clock Format Updated: " + clockFormat);
+          SerialPrintln(F("Clock Format Updated: ") + clockFormat);
         }
         if (newDateFormatValue != "" && dateFormat != newDateFormatValue) {
           dateFormat = newDateFormatValue;
 
           writeFile(LittleFS, dateFormatPath, dateFormat.c_str());
-          SerialPrintln("Date Format Updated: " + dateFormat);
+          SerialPrintln(F("Date Format Updated: ") + dateFormat);
         }
         if (hasNewCountdownPrefixValue && countdownPrefix != newCountdownPrefixValue) {
           countdownPrefix = newCountdownPrefixValue;
 
           writeFile(LittleFS, countdownPrefixPath, countdownPrefix.c_str());
-          SerialPrintln("Countdown Prefix Updated: " + countdownPrefix);
+          SerialPrintln(F("Countdown Prefix Updated: ") + countdownPrefix);
         }
         if (hasNewCountdownSuffixValue && countdownSuffix != newCountdownSuffixValue) {
           countdownSuffix = newCountdownSuffixValue;
 
           writeFile(LittleFS, countdownSuffixPath, countdownSuffix.c_str());
-          SerialPrintln("Countdown Suffix Updated: " + countdownSuffix);
+          SerialPrintln(F("Countdown Suffix Updated: ") + countdownSuffix);
         }
         if (hasNewCountupPrefixValue && countupPrefix != newCountupPrefixValue) {
           countupPrefix = newCountupPrefixValue;
 
           writeFile(LittleFS, countupPrefixPath, countupPrefix.c_str());
-          SerialPrintln("Countup Prefix Updated: " + countupPrefix);
+          SerialPrintln(F("Countup Prefix Updated: ") + countupPrefix);
         }
         if (hasNewCountupSuffixValue && countupSuffix != newCountupSuffixValue) {
           countupSuffix = newCountupSuffixValue;
 
           writeFile(LittleFS, countupSuffixPath, countupSuffix.c_str());
-          SerialPrintln("Countup Suffix Updated: " + countupSuffix);
+          SerialPrintln(F("Countup Suffix Updated: ") + countupSuffix);
         }
 
         //Rotation items are always submitted as the complete list (see index.html) - a full
         //replace, not an incremental add.
         if (hasNewRotationItems) {
           replaceRotationItemsFromJson(newRotationItemsJson);
-          SerialPrintln("Rotation Items Updated, count: " + String(rotationItemCount));
+          SerialPrintln(F("Rotation Items Updated, count: ") + String(rotationItemCount));
         }
 
         //If its a new scheduled message, add it to the backlog and proceed, don't want to change device mode
         //Else, we do want to change the device mode and clear out the input text
         if (newMessageScheduleEnabledValue) {
           addAndPersistScheduledMessage(newInputTextValue, newMessageScheduleDateTimeUnixValue, newMessageScheduleShowIndefinitely);
-          SerialPrintln("New Scheduled Message added");
+          SerialPrintln(F("New Scheduled Message added"));
         }
         else {
           //Only if device mode has changed
@@ -960,7 +960,7 @@ void setup() {
             }
 
             writeFile(LittleFS, deviceModePath, deviceMode.c_str());
-            SerialPrintln("Device Mode Set: " + deviceMode);
+            SerialPrintln(F("Device Mode Set: ") + deviceMode);
           }
 
           //Only if we are showing text
@@ -1079,7 +1079,7 @@ void setup() {
 
     // I2C bus scanner endpoint for diagnostics
     webServer.on("/api/i2c-scan", HTTP_GET, [](AsyncWebServerRequest * request) {
-      SerialPrintln("DEBUG: I2C scan requested");
+      SerialPrintln(F("DEBUG: I2C scan requested"));
       //Deferred to loop().
       if (pendingLegacyI2CScanRequest != nullptr) {
         request->send(503, "text/plain", "Another I2C scan is already in progress, try again shortly");
@@ -1121,16 +1121,16 @@ void setup() {
           if (String(otaPassword) != "") {
             String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
             if (providedPassword != String(otaPassword)) {
-              SerialPrintln("Unit firmware upload rejected: invalid password");
+              SerialPrintln(F("Unit firmware upload rejected: invalid password"));
               unitFirmwareUploadAuthFailed = true;
               return;
             }
           }
 
-          SerialPrintln("DEBUG: Unit firmware upload starting: " + filename);
+          SerialPrintln(F("DEBUG: Unit firmware upload starting: ") + filename);
           unitFirmwareFile = LittleFS.open(unitFirmwarePath, "w");
           if (!unitFirmwareFile) {
-            SerialPrintln("Unit firmware upload: failed to open " + String(unitFirmwarePath) + " for writing");
+            SerialPrintln(F("Unit firmware upload: failed to open ") + String(unitFirmwarePath) + F(" for writing"));
           }
         }
 
@@ -1146,7 +1146,7 @@ void setup() {
           if (unitFirmwareFile) {
             unitFirmwareFile.close();
           }
-          SerialPrintln("DEBUG: Unit firmware upload finished. Total bytes: " + String(index + len));
+          SerialPrintln(F("DEBUG: Unit firmware upload finished. Total bytes: ") + String(index + len));
         }
       }
     );
@@ -1184,7 +1184,7 @@ void setup() {
         if (String(otaPassword) != "") {
           String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
           if (providedPassword != String(otaPassword)) {
-            SerialPrintln("Unit firmware push rejected: invalid password");
+            SerialPrintln(F("Unit firmware push rejected: invalid password"));
             request->send(401, "text/plain", "Invalid password");
             return;
           }
@@ -1240,7 +1240,7 @@ void setup() {
     // in #121), so the same size-related risk doesn't apply here.
     webServer.on("/api/units", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
       if (request->method() == HTTP_GET) {
-        SerialPrintln("DEBUG: Admin units request received");
+        SerialPrintln(F("DEBUG: Admin units request received"));
         if (pendingUnitsInfoRequest != nullptr) {
           request->send(503, "text/plain", "Another units request is already in progress, try again shortly");
           return;
@@ -1260,7 +1260,7 @@ void setup() {
       String action = request->hasParam("action") ? request->getParam("action")->value() : "";
 
       if (action == "rescan") {
-        SerialPrintln("DEBUG: Admin rescan-units request received");
+        SerialPrintln(F("DEBUG: Admin rescan-units request received"));
         if (pendingRescanRequest != nullptr) {
           request->send(503, "text/plain", "Another rescan is already in progress, try again shortly");
           return;
@@ -1276,7 +1276,7 @@ void setup() {
 
       if (action == "offset") {
         if (!request->hasParam(PARAM_ID, true) || !request->hasParam(PARAM_UNIT_OFFSET, true)) {
-          SerialPrintln("Admin unit-offset request missing parameters");
+          SerialPrintln(F("Admin unit-offset request missing parameters"));
           request->send(400, "text/plain", "Both 'id' and 'offset' are required");
           return;
         }
@@ -1285,7 +1285,7 @@ void setup() {
         String offsetValue = request->getParam(PARAM_UNIT_OFFSET, true)->value();
 
         if (!isNumber(idValue) || !isNumber(offsetValue)) {
-          SerialPrintln("Admin unit-offset request had non-numeric values");
+          SerialPrintln(F("Admin unit-offset request had non-numeric values"));
           request->send(400, "text/plain", "'id' and 'offset' must be numbers");
           return;
         }
@@ -1294,18 +1294,18 @@ void setup() {
         long offset = atol(offsetValue.c_str());
 
         if (unitId < 0 || unitId >= unitsAmount) {
-          SerialPrintln("Admin unit-offset request had out of range unit id: " + idValue);
+          SerialPrintln(F("Admin unit-offset request had out of range unit id: ") + idValue);
           request->send(400, "text/plain", "Unit id out of range. Valid range: 0 to " + String(unitsAmount - 1));
           return;
         }
 
         if (offset < 0 || offset >= UNIT_STEPS) {
-          SerialPrintln("Admin unit-offset request had out of range offset: " + offsetValue);
+          SerialPrintln(F("Admin unit-offset request had out of range offset: ") + offsetValue);
           request->send(400, "text/plain", "Offset out of range. Valid range: 0 to " + String(UNIT_STEPS - 1));
           return;
         }
 
-        SerialPrintln("Setting Unit " + String(unitId) + " offset to " + String(offset));
+        SerialPrintln(F("Setting Unit ") + String(unitId) + F(" offset to ") + String(offset));
         writeOffsetToUnit(unitId, (uint16_t)offset);
 
         request->send(202, "text/plain", "Offset sent. Unit is recalibrating now, this can take a few seconds.");
@@ -1313,7 +1313,7 @@ void setup() {
       }
 
       if (action == "reset") {
-        SerialPrintln("Request to Reset Units Received");
+        SerialPrintln(F("Request to Reset Units Received"));
         isPendingUnitsReset = true; //picked up in loop()
         request->send(200, "text/plain", "Units are resetting/recalibrating now.");
         return;
@@ -1342,7 +1342,7 @@ void setup() {
           if (String(otaPassword) != "") {
             String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
             if (providedPassword != String(otaPassword)) {
-              SerialPrintln("Web file upload rejected: invalid password");
+              SerialPrintln(F("Web file upload rejected: invalid password"));
               webFileUploadAuthFailed = true;
               return;
             }
@@ -1352,7 +1352,7 @@ void setup() {
           //served automatically with Content-Encoding: gzip.
           webUploadFilenameValid = (filename == "index.html.gz");
           if (!webUploadFilenameValid) {
-            SerialPrintln("Web file upload rejected: filename not in allowlist: " + filename);
+            SerialPrintln(F("Web file upload rejected: filename not in allowlist: ") + filename);
             request->send(400, "text/plain", "Filename must be one of the known static assets");
             return;
           }
@@ -1362,10 +1362,10 @@ void setup() {
             LittleFS.remove("/index.html");
           }
 
-          SerialPrintln("DEBUG: Web file upload starting: " + filename);
+          SerialPrintln(F("DEBUG: Web file upload starting: ") + filename);
           webUploadFile = LittleFS.open("/" + filename, "w");
           if (!webUploadFile) {
-            SerialPrintln("Web file upload: failed to open /" + filename + " for writing");
+            SerialPrintln(F("Web file upload: failed to open /") + filename + F(" for writing"));
           }
         }
 
@@ -1381,7 +1381,7 @@ void setup() {
           if (webUploadFile) {
             webUploadFile.close();
           }
-          SerialPrintln("DEBUG: Web file upload finished: " + filename + ", total bytes: " + String(index + len));
+          SerialPrintln(F("DEBUG: Web file upload finished: ") + filename + F(", total bytes: ") + String(index + len));
         }
       }
     );
@@ -1417,7 +1417,7 @@ void setup() {
         return;
       }
 
-      SerialPrintln("DEBUG: Firmware upload starting, size=" + String(size));
+      SerialPrintln(F("DEBUG: Firmware upload starting, size=") + String(size));
       otaBeginSize = size;
       otaLastActivityAt = millis();
       otaResultReady = false;
@@ -1507,10 +1507,10 @@ void setup() {
       writeFile(LittleFS, debugModePath, enabled ? "true" : "false");
 
       if (enabled) {
-        SerialPrintln("DEBUG: Request to enable debug mode received");
+        SerialPrintln(F("DEBUG: Request to enable debug mode received"));
         request->send(200, "text/plain", "OK - Debug mode enabled. This enables: startup debug page, error status panel, page load debug log, and serial debug log. Refresh page to see changes.");
       } else {
-        SerialPrintln("DEBUG: Request to exit debug mode received");
+        SerialPrintln(F("DEBUG: Request to exit debug mode received"));
         request->send(200, "text/plain", "OK - Debug mode disabled. Startup debug page, error status, and debug logs will be hidden.");
       }
     });
@@ -1519,7 +1519,7 @@ void setup() {
     //This and reset-units/ota/reset-wifi below are POST, not GET - a GET link is triggerable
     //cross-site (e.g. an <img> tag on any page) without user interaction (CSRF-via-GET).
     webServer.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest * request) {
-      SerialPrintln("Request to Reboot Received");
+      SerialPrintln(F("Request to Reboot Received"));
       
       //Create HTML page to explain the system is rebooting
       IPAddress ip = WiFi.localIP();
@@ -1538,7 +1538,7 @@ void setup() {
     });
 
     webServer.on("/api/scheduled-messages", HTTP_DELETE, [](AsyncWebServerRequest * request) {
-      SerialPrintln("Request to Remove Scheduled Message Received");
+      SerialPrintln(F("Request to Remove Scheduled Message Received"));
       
       if (request->hasParam(PARAM_ID)) {
         bool removedScheduledMessage = false;
@@ -1556,12 +1556,12 @@ void setup() {
           }
         }
         else {
-          SerialPrintln("Invalid Delete Scheduled Message ID Received");
+          SerialPrintln(F("Invalid Delete Scheduled Message ID Received"));
           request->send(400, "text/plain", "Invalid ID value");
         }
       } 
       else {
-          SerialPrintln("Delete Scheduled Message Received with no ID");
+          SerialPrintln(F("Delete Scheduled Message Received with no ID"));
           request->send(400, "text/plain", "No ID specified");
       }
     });
@@ -1719,7 +1719,7 @@ void setup() {
       String action = request->hasParam("action") ? request->getParam("action")->value() : "";
 
       if (action == "reset") {
-        SerialPrintln("Request to Reset WiFi Received");
+        SerialPrintln(F("Request to Reset WiFi Received"));
 
         IPAddress ip = WiFi.localIP();
 
@@ -1744,7 +1744,7 @@ void setup() {
           request->send(409, "text/plain", "A scan is already in progress");
           return;
         }
-        SerialPrintln("WiFi scan requested");
+        SerialPrintln(F("WiFi scan requested"));
         wifiScanRequested = true;
         request->send(200, "text/plain", "Scan started");
         return;
@@ -1770,7 +1770,7 @@ void setup() {
         wifiConnectNewSsid = request->getParam("ssid", true)->value();
         wifiConnectNewPassword = request->hasParam("password", true) ? request->getParam("password", true)->value() : "";
 
-        SerialPrintln("WiFi connect requested: SSID=\"" + wifiConnectNewSsid + "\"");
+        SerialPrintln(F("WiFi connect requested: SSID=\"") + wifiConnectNewSsid + F("\""));
         wifiConnectPhase = WIFI_CONNECT_PENDING;
         request->send(200, "text/plain", "Connection attempt started");
         return;
@@ -1802,7 +1802,7 @@ void setup() {
 
       String currentPasswordValue = request->getParam("currentPassword", true)->value();
       if (currentPasswordValue != otaPassword) {
-        SerialPrintln("OTA password change rejected: current password incorrect");
+        SerialPrintln(F("OTA password change rejected: current password incorrect"));
         request->send(401, "text/plain", "Current password is incorrect");
         return;
       }
@@ -1815,7 +1815,7 @@ void setup() {
 
       otaPassword = newPasswordValue;
       writeFile(LittleFS, otaPasswordPath, otaPassword.c_str());
-      SerialPrintln("OTA password changed");
+      SerialPrintln(F("OTA password changed"));
       request->send(200, "text/plain", "OTA password changed");
     });
 
@@ -1844,14 +1844,14 @@ void setup() {
       // setLocation() does a live lookup against ezTime's timezoned service, so an invalid/
       // unknown TZ database name is rejected here instead of silently persisting garbage.
       if (!timezone.setLocation(newTimezoneValue)) {
-        SerialPrintln("Timezone change rejected: '" + newTimezoneValue + "' not recognized");
+        SerialPrintln(F("Timezone change rejected: '") + newTimezoneValue + F("' not recognized"));
         request->send(400, "text/plain", "Timezone not recognized - use a TZ database name like Europe/Berlin");
         return;
       }
 
       timezoneSetting = newTimezoneValue;
       writeFile(LittleFS, timezonePath, timezoneSetting.c_str());
-      SerialPrintln("Timezone changed to: " + timezoneSetting);
+      SerialPrintln(F("Timezone changed to: ") + timezoneSetting);
       request->send(200, "text/plain", "Timezone changed");
     });
 
@@ -1882,8 +1882,8 @@ void setup() {
       writeFile(LittleFS, quietHoursEnabledPath, quietHoursEnabled ? "true" : "false");
       writeFile(LittleFS, quietHoursStartPath, quietHoursStart.c_str());
       writeFile(LittleFS, quietHoursEndPath, quietHoursEnd.c_str());
-      SerialPrintln("Quiet Hours updated: enabled=" + String(quietHoursEnabled ? "true" : "false") +
-        " start=" + quietHoursStart + " end=" + quietHoursEnd);
+      SerialPrintln(F("Quiet Hours updated: enabled=") + String(quietHoursEnabled ? F("true") : F("false")) +
+        F(" start=") + quietHoursStart + F(" end=") + quietHoursEnd);
       request->send(200, "text/plain", "Quiet Hours updated");
     });
 
@@ -1897,19 +1897,19 @@ void setup() {
     
     blinkLed(8, 200, 100); // 8 blinks = Web server ready
     debugStatus = "Ready";
-    SerialPrintln("DEBUG: Status = " + debugStatus);
-    SerialPrintln("Split Flap Ready!");
-    SerialPrintln("#######################################################");
+    SerialPrintln(F("DEBUG: Status = ") + debugStatus);
+    SerialPrintln(F("Split Flap Ready!"));
+    SerialPrintln(F("#######################################################"));
   }
   else {
     if (isPendingReboot) {
-      SerialPrintln("Reboot is pending to be able to continue device function. Hold please...");
-      SerialPrintln("#######################################################");
+      SerialPrintln(F("Reboot is pending to be able to continue device function. Hold please..."));
+      SerialPrintln(F("#######################################################"));
     }
     else {
-      SerialPrintln("Unable to connect to WiFi... Not starting web server");
-      SerialPrintln("Please hard restart your device to try connect again");
-      SerialPrintln("#######################################################");
+      SerialPrintln(F("Unable to connect to WiFi... Not starting web server"));
+      SerialPrintln(F("Please hard restart your device to try connect again"));
+      SerialPrintln(F("#######################################################"));
       // Continuous blink to indicate error
       for (int i = 0; i < 10; i++) {
         ledOn();
@@ -1927,16 +1927,16 @@ void loop() {
   static bool firstUnitScanDone = false;
   if (!firstUnitScanDone && millis() >= 30000) {
     firstUnitScanDone = true;
-    SerialPrintln("");
-    SerialPrintln("=== I2C Bus Scan on Startup (delayed 30s) ===");
+    SerialPrintln(F(""));
+    SerialPrintln(F("=== I2C Bus Scan on Startup (delayed 30s) ==="));
     for (int scanAttempt = 0; scanAttempt < 3 && unitsAmount == 0; scanAttempt++) {
       if (scanAttempt > 0) {
-        SerialPrintln("No units found, retrying scan...");
+        SerialPrintln(F("No units found, retrying scan..."));
         delay(300);
       }
       scanI2CBus();
     }
-    SerialPrintln("");
+    SerialPrintln(F(""));
   }
 
   //Advances the display-update state machine by at most one I2C op, unconditionally and before
@@ -2071,11 +2071,11 @@ void loop() {
       otaChunkBuffer = new (std::nothrow) uint8_t[OTA_CHUNK_SIZE];
       ok = (otaChunkBuffer != nullptr);
       if (!ok) {
-        SerialPrintln("Firmware upload: could not allocate chunk buffer");
+        SerialPrintln(F("Firmware upload: could not allocate chunk buffer"));
         Update.end(false); //release Update's internal "running" lock - see the #79-era lesson below
       }
     } else {
-      SerialPrintln("Firmware upload: Update.begin() failed");
+      SerialPrintln(F("Firmware upload: Update.begin() failed"));
       Update.printError(Serial);
     }
 
@@ -2088,7 +2088,7 @@ void loop() {
   } else if (otaPendingPhase == OTA_PHASE_WRITE) {
     bool ok = !otaChunkRejected && Update.write(otaChunkBuffer, otaChunkLen) == otaChunkLen;
     if (!ok) {
-      SerialPrintln("Firmware upload: chunk write failed");
+      SerialPrintln(F("Firmware upload: chunk write failed"));
       Update.printError(Serial);
       //Must still call end() here (ignoring its result): Update.begin() refuses to start a new
       //update while the previous one is still marked "running" internally, and only end() clears
@@ -2107,7 +2107,7 @@ void loop() {
   } else if (otaPendingPhase == OTA_PHASE_FINISH) {
     bool ok = Update.end(true);
     if (!ok) {
-      SerialPrintln("Firmware upload: Update.end() failed");
+      SerialPrintln(F("Firmware upload: Update.end() failed"));
       Update.printError(Serial);
     }
     delete[] otaChunkBuffer;
@@ -2123,7 +2123,7 @@ void loop() {
   // Abandoned-upload watchdog - see the comment on otaLastActivityAt above.
   if (otaChunkBuffer != nullptr && otaPendingPhase == OTA_PHASE_NONE &&
       (millis() - otaLastActivityAt) > OTA_ABANDONED_TIMEOUT_MS) {
-    SerialPrintln("Firmware upload: no activity for " + String(OTA_ABANDONED_TIMEOUT_MS / 1000) + "s, aborting (old firmware stays active)");
+    SerialPrintln(F("Firmware upload: no activity for ") + String(OTA_ABANDONED_TIMEOUT_MS / 1000) + F("s, aborting (old firmware stays active)"));
     Update.end(false);
     delete[] otaChunkBuffer;
     otaChunkBuffer = nullptr;
@@ -2144,10 +2144,10 @@ void loop() {
 
     otaResultReady = false;
     if (otaResultSuccess && otaCompletedPhase == OTA_PHASE_FINISH) {
-      SerialPrintln("Firmware update successful, rebooting...");
+      SerialPrintln(F("Firmware update successful, rebooting..."));
       isPendingReboot = true;
     } else if (!otaResultSuccess) {
-      SerialPrintln("Firmware update failed");
+      SerialPrintln(F("Firmware update failed"));
     }
   }
 #endif
@@ -2158,7 +2158,7 @@ void loop() {
     int unitIndex = pendingFirmwarePushUnitIndex;
     pendingFirmwarePushRequestDisconnected = false;
 
-    SerialPrintln("Pushing firmware to Unit " + String(unitIndex) + "...");
+    SerialPrintln(F("Pushing firmware to Unit ") + String(unitIndex) + F("..."));
     String resultJson;
     //Always runs to completion regardless of whether the client is still listening - see the
     //comment on the onDisconnect handler for /unit-firmware-push above.
@@ -2176,7 +2176,7 @@ void loop() {
     int unitIndex = pendingBootloaderProbeUnitIndex;
     pendingBootloaderProbeRequestDisconnected = false;
 
-    SerialPrintln("Bootloader probe: requesting Unit " + String(unitIndex) + " to enter bootloader...");
+    SerialPrintln(F("Bootloader probe: requesting Unit ") + String(unitIndex) + F(" to enter bootloader..."));
     requestUnitEnterBootloader(unitIndex);
 
     //Same retry/backoff as pushFirmwareToUnit() - give the watchdog reset + twiboot startup
@@ -2237,8 +2237,8 @@ void loop() {
 
   //Reboot in here as if we restart within a request handler, no response is returned
   if (isPendingReboot) {
-    SerialPrintln("Rebooting Now... Fairwell!");
-    SerialPrintln("#######################################################");
+    SerialPrintln(F("Rebooting Now... Fairwell!"));
+    SerialPrintln(F("#######################################################"));
     delay(100);
 
     ESP.restart();
@@ -2248,7 +2248,7 @@ void loop() {
 #if WIFI_USE_DIRECT == false
   //Clear off the WiFi Manager Settings
   if (isPendingWifiReset) {
-    SerialPrintln("Removing WiFi settings");
+    SerialPrintln(F("Removing WiFi settings"));
     wifiManager.resetSettings();
     delay(100);
 
@@ -2327,9 +2327,9 @@ void loop() {
 //Scans the I2C bus and (re-)determines unitsAmount: units found sequentially from address 0,
 //stopping at the first gap. Sets the global as a side effect.
 int scanI2CBus() {
-  SerialPrintln("========================================");
-  SerialPrintln("I2C Bus Scan - Checking addresses 0-" + String(UNITS_AMOUNT_MAX - 1));
-  SerialPrintln("========================================");
+  SerialPrintln(F("========================================"));
+  SerialPrintln(F("I2C Bus Scan - Checking addresses 0-") + String(UNITS_AMOUNT_MAX - 1));
+  SerialPrintln(F("========================================"));
 
   int foundCount = 0;
   bool foundUnits[UNITS_AMOUNT_MAX] = {false}; // Track which addresses are found
@@ -2345,7 +2345,7 @@ int scanI2CBus() {
       foundUnits[address] = true;
       foundCount++;
 
-      SerialPrint("✓ Found device at address ");
+      SerialPrint(F("✓ Found device at address "));
       SerialPrint(address);
 
       Wire.requestFrom(address, 1, 1);
@@ -2353,27 +2353,27 @@ int scanI2CBus() {
         int status = Wire.read();
         unitStatus[address] = status;
 
-        SerialPrint(" - Status: ");
+        SerialPrint(F(" - Status: "));
         SerialPrint(status);
 
         if (status == 0) {
-          SerialPrintln(" (READY)");
+          SerialPrintln(F(" (READY)"));
         } else if (status == 1) {
-          SerialPrintln(" (BUSY/MOVING)");
+          SerialPrintln(F(" (BUSY/MOVING)"));
         } else if (status == -1) {
-          SerialPrintln(" (SLEEPING)");
+          SerialPrintln(F(" (SLEEPING)"));
         } else {
-          SerialPrintln(" (UNKNOWN)");
+          SerialPrintln(F(" (UNKNOWN)"));
         }
       } else {
-        SerialPrintln(" - No status response");
+        SerialPrintln(F(" - No status response"));
         unitStatus[address] = -3; // No response
       }
     } else if (error == 2) {
       // NACK on address - device not found (normal for unused addresses)
       // Don't log this to reduce noise
     } else if (error == 4) {
-      SerialPrint("⚠ Unknown I2C error at address ");
+      SerialPrint(F("⚠ Unknown I2C error at address "));
       SerialPrintln(address);
     }
 
@@ -2389,32 +2389,32 @@ int scanI2CBus() {
   unitsAmount = detectedAmount;
 
   // Summary report
-  SerialPrintln("");
-  SerialPrintln("--- Scan Summary ---");
-  SerialPrint("Total devices found: ");
+  SerialPrintln(F(""));
+  SerialPrintln(F("--- Scan Summary ---"));
+  SerialPrint(F("Total devices found: "));
   SerialPrintln(foundCount);
-  SerialPrint("Detected unitsAmount (sequential from address 0): ");
+  SerialPrint(F("Detected unitsAmount (sequential from address 0): "));
   SerialPrintln(unitsAmount);
-  SerialPrintln("");
+  SerialPrintln(F(""));
 
-  SerialPrintln("Unit Status:");
+  SerialPrintln(F("Unit Status:"));
   for (int i = 0; i < unitsAmount; i++) {
-    SerialPrint("  Unit ");
+    SerialPrint(F("  Unit "));
     SerialPrint(i);
-    SerialPrint(" (address ");
+    SerialPrint(F(" (address "));
     SerialPrint(i);
-    SerialPrint("): ✓ CONNECTED");
+    SerialPrint(F("): ✓ CONNECTED"));
 
     if (unitStatus[i] == 0) {
-      SerialPrintln(" - Ready");
+      SerialPrintln(F(" - Ready"));
     } else if (unitStatus[i] == 1) {
-      SerialPrintln(" - Busy");
+      SerialPrintln(F(" - Busy"));
     } else if (unitStatus[i] == -1) {
-      SerialPrintln(" - Sleeping");
+      SerialPrintln(F(" - Sleeping"));
     } else if (unitStatus[i] == -3) {
-      SerialPrintln(" - No status response");
+      SerialPrintln(F(" - No status response"));
     } else {
-      SerialPrint(" - Status code: ");
+      SerialPrint(F(" - Status code: "));
       SerialPrintln(unitStatus[i]);
     }
   }
@@ -2422,29 +2422,29 @@ int scanI2CBus() {
   // Anything found beyond the contiguous run is likely a gap earlier in the sequence
   // (a missing/misconfigured unit) rather than genuinely "extra" devices
   if (foundCount > unitsAmount) {
-    SerialPrintln("");
-    SerialPrintln("⚠ Devices found beyond the contiguous 0..N-1 range - check for a gap (a missing/misconfigured unit earlier in the sequence?):");
+    SerialPrintln(F(""));
+    SerialPrintln(F("⚠ Devices found beyond the contiguous 0..N-1 range - check for a gap (a missing/misconfigured unit earlier in the sequence?):"));
     for (int i = unitsAmount; i < UNITS_AMOUNT_MAX; i++) {
       if (foundUnits[i]) {
-        SerialPrint("  Address ");
+        SerialPrint(F("  Address "));
         SerialPrint(i);
-        SerialPrintln(" - responds, but out of sequence");
+        SerialPrintln(F(" - responds, but out of sequence"));
       }
     }
   }
 
-  SerialPrintln("");
+  SerialPrintln(F(""));
   if (unitsAmount == 0) {
-    SerialPrintln("⚠ WARNING: No units detected at address 0. Display functionality is unavailable until this is fixed. Check:");
-    SerialPrintln("  1. DIP switch settings (address 0 must be assigned to a unit)");
-    SerialPrintln("  2. I2C wiring (SDA/SCL connections)");
-    SerialPrintln("  3. Power connections");
-    SerialPrintln("  Use the Admin page's \"Rescan Units\" button once fixed, no reboot required.");
+    SerialPrintln(F("⚠ WARNING: No units detected at address 0. Display functionality is unavailable until this is fixed. Check:"));
+    SerialPrintln(F("  1. DIP switch settings (address 0 must be assigned to a unit)"));
+    SerialPrintln(F("  2. I2C wiring (SDA/SCL connections)"));
+    SerialPrintln(F("  3. Power connections"));
+    SerialPrintln(F("  Use the Admin page's \"Rescan Units\" button once fixed, no reboot required."));
   } else {
-    SerialPrintln("✓ " + String(unitsAmount) + " unit(s) detected and ready.");
+    SerialPrintln(F("✓ ") + String(unitsAmount) + F(" unit(s) detected and ready."));
   }
 
-  SerialPrintln("========================================");
+  SerialPrintln(F("========================================"));
   return unitsAmount;
 }
 
