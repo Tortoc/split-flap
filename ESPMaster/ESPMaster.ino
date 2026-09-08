@@ -1769,133 +1769,159 @@ void setup() {
 #endif
 
 #if WIFI_USE_DIRECT == false
-    webServer.on("/api/wifi/reset", HTTP_POST, [](AsyncWebServerRequest * request) {
-      SerialPrintln("Request to Reset WiFi Received");
-      
-      IPAddress ip = WiFi.localIP();
-      
-      String html = "<div style='text-align:center'>";
-      html += "<font face='arial'><h1>Split Flap - Resetting WiFi</h1>";
-      html += "<p>WiFi Settings have been erased. Device will now reboot...<p>";
-      html += "<p>You will now be able to connect to this device in AP mode to configure the WiFi once more<p>";
-      html += "<p>You can go to the main home page after this time by clicking the button below or going to '/'.</p>";
-      html += "<p><a href=\"http://" + ip.toString() + "\">Home</a></p>";
-      html += "</font>";
-      html += "</div>";
-      
-      request->send(200, "text/html", html);
-      isPendingWifiReset = true;
-    });
+    //Consolidates all five former WiFi endpoints (/api/wifi/reset, /api/wifi/scan,
+    ///api/wifi/scan-result, /api/wifi/connect, /api/wifi/connect-status) into a single registered
+    //route - GET dispatches by ?type=, POST by ?action=. One registration handling both methods,
+    //rather than two separate GET/POST registrations on the same path (tried that first; GET
+    //requests were reproducibly routed to the POST handler instead - not chasing that library
+    //quirk down, this single-registration form sidesteps it and saves even more).
+    webServer.on("/api/wifi", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (request->method() == HTTP_GET) {
+        String type = request->hasParam("type") ? request->getParam("type")->value() : "";
 
-    //Kicks off an async network scan - see wifiScanRequested's comment above. Just sets a flag,
-    //the actual WiFi.scanNetworksAsync() call happens in loop().
-    webServer.on("/api/wifi/scan", HTTP_POST, [](AsyncWebServerRequest * request) {
-      if (WiFi.scanComplete() == WIFI_SCAN_RUNNING || wifiScanRequested) {
-        request->send(409, "text/plain", "A scan is already in progress");
-        return;
-      }
-      SerialPrintln("WiFi scan requested");
-      wifiScanRequested = true;
-      request->send(200, "text/plain", "Scan started");
-    });
+        if (type == "scan-result") {
+          //WiFi.scanComplete() returns WIFI_SCAN_RUNNING (-1) while still scanning,
+          //WIFI_SCAN_FAILED (-2) on failure, otherwise the network count.
+          int8_t scanResult = WiFi.scanComplete();
 
-    //Polled by the client after POST /api/wifi/scan. WiFi.scanComplete() returns WIFI_SCAN_RUNNING
-    //(-1) while still scanning, WIFI_SCAN_FAILED (-2) on failure, otherwise the network count.
-    webServer.on("/api/wifi/scan-result", HTTP_GET, [](AsyncWebServerRequest * request) {
-      int8_t scanResult = WiFi.scanComplete();
+          JsonDocument doc;
+          if (scanResult == WIFI_SCAN_RUNNING || wifiScanRequested) {
+            doc["scanning"] = true;
+          } else if (scanResult == WIFI_SCAN_FAILED) {
+            doc["scanning"] = false;
+            doc["error"] = "Scan failed";
+          } else {
+            doc["scanning"] = false;
+            JsonArray networks = doc["networks"].to<JsonArray>();
 
-      JsonDocument doc;
-      if (scanResult == WIFI_SCAN_RUNNING || wifiScanRequested) {
-        doc["scanning"] = true;
-      } else if (scanResult == WIFI_SCAN_FAILED) {
-        doc["scanning"] = false;
-        doc["error"] = "Scan failed";
-      } else {
-        doc["scanning"] = false;
-        JsonArray networks = doc["networks"].to<JsonArray>();
-
-        //Dedupe by SSID (the same network can show up once per BSSID/channel/repeater) - keep only
-        //the strongest-signal entry for each name, sorted strongest-first by scan order already.
-        for (int i = 0; i < scanResult; i++) {
-          String ssid = WiFi.SSID(i);
-          if (ssid == "") {
-            continue; //hidden network - nothing to show/select by name
-          }
-
-          int32_t rssi = WiFi.RSSI(i);
-          bool secure = WiFi.encryptionType(i) != ENC_TYPE_NONE;
-
-          bool alreadyListed = false;
-          for (JsonObject existingNetwork : networks) {
-            if (existingNetwork["ssid"] == ssid) {
-              alreadyListed = true;
-              if (rssi > (int32_t)existingNetwork["rssi"]) {
-                existingNetwork["rssi"] = rssi;
+            //Dedupe by SSID (the same network can show up once per BSSID/channel/repeater) - keep
+            //only the strongest-signal entry for each name, sorted strongest-first by scan order.
+            for (int i = 0; i < scanResult; i++) {
+              String ssid = WiFi.SSID(i);
+              if (ssid == "") {
+                continue; //hidden network - nothing to show/select by name
               }
-              break;
+
+              int32_t rssi = WiFi.RSSI(i);
+              bool secure = WiFi.encryptionType(i) != ENC_TYPE_NONE;
+
+              bool alreadyListed = false;
+              for (JsonObject existingNetwork : networks) {
+                if (existingNetwork["ssid"] == ssid) {
+                  alreadyListed = true;
+                  if (rssi > (int32_t)existingNetwork["rssi"]) {
+                    existingNetwork["rssi"] = rssi;
+                  }
+                  break;
+                }
+              }
+              if (!alreadyListed) {
+                JsonObject network = networks.add<JsonObject>();
+                network["ssid"] = ssid;
+                network["rssi"] = rssi;
+                network["secure"] = secure;
+              }
             }
+            WiFi.scanDelete();
           }
-          if (!alreadyListed) {
-            JsonObject network = networks.add<JsonObject>();
-            network["ssid"] = ssid;
-            network["rssi"] = rssi;
-            network["secure"] = secure;
-          }
+
+          AsyncResponseStream *response = request->beginResponseStream("application/json");
+          serializeJson(doc, *response);
+          request->send(response);
+          return;
         }
-        WiFi.scanDelete();
-      }
 
-      AsyncResponseStream *response = request->beginResponseStream("application/json");
-      serializeJson(doc, *response);
-      request->send(response);
-    });
+        if (type == "connect-status") {
+          //Polled to find out how a connect attempt went. A terminal result is only reported
+          //once - the phase resets to "none" right after being read.
+          JsonDocument doc;
+          switch (wifiConnectPhase) {
+            case WIFI_CONNECT_NONE: doc["phase"] = "none"; break;
+            case WIFI_CONNECT_PENDING: doc["phase"] = "pending"; break;
+            case WIFI_CONNECT_TESTING: doc["phase"] = "testing"; break;
+            case WIFI_CONNECT_SUCCESS: doc["phase"] = "success"; break;
+            case WIFI_CONNECT_FAILED_REVERTED: doc["phase"] = "failed_reverted"; break;
+          }
+          doc["wifiStatus"] = WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected";
+          doc["wifiSsid"] = WiFi.SSID();
+          doc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
 
-    //Connects to a new WiFi network without rebooting - drops the current connection immediately,
-    //before the new credentials are known to work; checkWifiConnectAttempt() reverts on failure.
-    webServer.on("/api/wifi/connect", HTTP_POST, [](AsyncWebServerRequest * request) {
-      if (wifiConnectPhase != WIFI_CONNECT_NONE) {
-        request->send(409, "text/plain", "A connection attempt is already in progress");
+          if (wifiConnectPhase == WIFI_CONNECT_SUCCESS || wifiConnectPhase == WIFI_CONNECT_FAILED_REVERTED) {
+            wifiConnectPhase = WIFI_CONNECT_NONE;
+          }
+
+          AsyncResponseStream *response = request->beginResponseStream("application/json");
+          serializeJson(doc, *response);
+          request->send(response);
+          return;
+        }
+
+        request->send(400, "text/plain", "Unknown 'type' - use scan-result or connect-status");
         return;
       }
-      if (!request->hasParam("ssid", true) || request->getParam("ssid", true)->value() == "") {
-        request->send(400, "text/plain", "'ssid' is required");
+
+      // request->method() == HTTP_POST
+      String action = request->hasParam("action") ? request->getParam("action")->value() : "";
+
+      if (action == "reset") {
+        SerialPrintln("Request to Reset WiFi Received");
+
+        IPAddress ip = WiFi.localIP();
+
+        String html = "<div style='text-align:center'>";
+        html += "<font face='arial'><h1>Split Flap - Resetting WiFi</h1>";
+        html += "<p>WiFi Settings have been erased. Device will now reboot...<p>";
+        html += "<p>You will now be able to connect to this device in AP mode to configure the WiFi once more<p>";
+        html += "<p>You can go to the main home page after this time by clicking the button below or going to '/'.</p>";
+        html += "<p><a href=\"http://" + ip.toString() + "\">Home</a></p>";
+        html += "</font>";
+        html += "</div>";
+
+        request->send(200, "text/html", html);
+        isPendingWifiReset = true;
         return;
       }
 
-      //Captured now, fast/synchronous - by the time loop() actually calls WiFi.begin() with the
-      //new credentials, WiFi.SSID()/psk() would already reflect them, not the old ones anymore.
-      wifiConnectOldSsid = WiFi.SSID();
-      wifiConnectOldPassword = WiFi.psk();
-      wifiConnectNewSsid = request->getParam("ssid", true)->value();
-      wifiConnectNewPassword = request->hasParam("password", true) ? request->getParam("password", true)->value() : "";
-
-      SerialPrintln("WiFi connect requested: SSID=\"" + wifiConnectNewSsid + "\"");
-      wifiConnectPhase = WIFI_CONNECT_PENDING;
-      request->send(200, "text/plain", "Connection attempt started");
-    });
-
-    //Polled to find out how the attempt above went. A terminal result is only reported once - the
-    //phase resets to "none" right after being read.
-    webServer.on("/api/wifi/connect-status", HTTP_GET, [](AsyncWebServerRequest * request) {
-      JsonDocument doc;
-      switch (wifiConnectPhase) {
-        case WIFI_CONNECT_NONE: doc["phase"] = "none"; break;
-        case WIFI_CONNECT_PENDING: doc["phase"] = "pending"; break;
-        case WIFI_CONNECT_TESTING: doc["phase"] = "testing"; break;
-        case WIFI_CONNECT_SUCCESS: doc["phase"] = "success"; break;
-        case WIFI_CONNECT_FAILED_REVERTED: doc["phase"] = "failed_reverted"; break;
-      }
-      doc["wifiStatus"] = WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected";
-      doc["wifiSsid"] = WiFi.SSID();
-      doc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
-
-      if (wifiConnectPhase == WIFI_CONNECT_SUCCESS || wifiConnectPhase == WIFI_CONNECT_FAILED_REVERTED) {
-        wifiConnectPhase = WIFI_CONNECT_NONE;
+      if (action == "scan") {
+        //Kicks off an async network scan - see wifiScanRequested's comment above. Just sets a
+        //flag, the actual WiFi.scanNetworksAsync() call happens in loop().
+        if (WiFi.scanComplete() == WIFI_SCAN_RUNNING || wifiScanRequested) {
+          request->send(409, "text/plain", "A scan is already in progress");
+          return;
+        }
+        SerialPrintln("WiFi scan requested");
+        wifiScanRequested = true;
+        request->send(200, "text/plain", "Scan started");
+        return;
       }
 
-      AsyncResponseStream *response = request->beginResponseStream("application/json");
-      serializeJson(doc, *response);
-      request->send(response);
+      if (action == "connect") {
+        //Connects to a new WiFi network without rebooting - drops the current connection
+        //immediately, before the new credentials are known to work; checkWifiConnectAttempt()
+        //reverts on failure.
+        if (wifiConnectPhase != WIFI_CONNECT_NONE) {
+          request->send(409, "text/plain", "A connection attempt is already in progress");
+          return;
+        }
+        if (!request->hasParam("ssid", true) || request->getParam("ssid", true)->value() == "") {
+          request->send(400, "text/plain", "'ssid' is required");
+          return;
+        }
+
+        //Captured now, fast/synchronous - by the time loop() actually calls WiFi.begin() with the
+        //new credentials, WiFi.SSID()/psk() would already reflect them, not the old ones anymore.
+        wifiConnectOldSsid = WiFi.SSID();
+        wifiConnectOldPassword = WiFi.psk();
+        wifiConnectNewSsid = request->getParam("ssid", true)->value();
+        wifiConnectNewPassword = request->hasParam("password", true) ? request->getParam("password", true)->value() : "";
+
+        SerialPrintln("WiFi connect requested: SSID=\"" + wifiConnectNewSsid + "\"");
+        wifiConnectPhase = WIFI_CONNECT_PENDING;
+        request->send(200, "text/plain", "Connection attempt started");
+        return;
+      }
+
+      request->send(400, "text/plain", "Unknown 'action' - use reset, scan, or connect");
     });
 #endif
 

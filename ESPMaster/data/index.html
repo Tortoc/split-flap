@@ -2483,7 +2483,7 @@
 			if (!confirm("Are you sure you want to Reset WiFi settings?")) {
 				return;
 			}
-			postActionForBanner("/api/wifi/reset", "WiFi settings erased. The device is rebooting into AP setup mode now.");
+			postActionForBanner("/api/wifi?action=reset", "WiFi settings erased. The device is rebooting into AP setup mode now.");
 		}
 
 		//WiFi scan+connect - lets the user pick and connect to a network directly from this page.
@@ -2522,7 +2522,7 @@
 				button.disabled = false;
 				resultEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
 			};
-			xhrRequest.open("POST", "/api/wifi/scan", true);
+			xhrRequest.open("POST", "/api/wifi?action=scan", true);
 			xhrRequest.send();
 		}
 
@@ -2572,7 +2572,7 @@
 				button.disabled = false;
 				resultEl.innerHTML = '<span class="status-offline">Netzwerkfehler beim Scannen.</span>';
 			};
-			xhrRequest.open("GET", "/api/wifi/scan-result", true);
+			xhrRequest.open("GET", "/api/wifi?type=scan-result", true);
 			xhrRequest.send();
 		}
 
@@ -2640,7 +2640,7 @@
 				//already succeeded (it just sets a flag before loop() acts on it), so poll anyway.
 				pollWifiConnectStatus(0);
 			};
-			xhrRequest.open("POST", "/api/wifi/connect", true);
+			xhrRequest.open("POST", "/api/wifi?action=connect", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 			xhrRequest.send("ssid=" + encodeURIComponent(ssid) + "&password=" + encodeURIComponent(password));
 		}
@@ -2689,7 +2689,7 @@
 				//Expected while the device is mid-switch - keep retrying up to the attempt cap above.
 				setTimeout(function () { pollWifiConnectStatus(attempt + 1); }, 1500);
 			};
-			xhrRequest.open("GET", "/api/wifi/connect-status", true);
+			xhrRequest.open("GET", "/api/wifi?type=connect-status", true);
 			xhrRequest.send();
 		}
 

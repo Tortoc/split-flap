@@ -66,7 +66,8 @@ other endpoint below has no auth check at all, including `GET /api/ota-password`
 | POST | [`/api/reboot`](#post-apireboot) | Reboot the device |
 | DELETE | [`/api/scheduled-messages`](#delete-apischeduled-messages) | Remove a scheduled message |
 | POST | [`/api/ota-mode`](#post-apiota-mode) | Start Arduino-IDE OTA mode |
-| POST | [`/api/wifi/reset`](#post-apiwifireset) | Erase WiFi config, reboot into AP setup |
+| POST | [`/api/wifi?action=`](#post-apiwifi) | WiFi actions: `reset`\|`scan`\|`connect` |
+| GET | [`/api/wifi?type=`](#get-apiwifi) | WiFi queries: `scan-result`\|`connect-status` |
 | GET | [`/api/ota-password`](#get-apiota-password) | Read the current OTA password |
 | POST | [`/api/ota-password`](#post-apiota-password) | Change the OTA password |
 | GET | [`/api/timezone`](#get-apitimezone) | Read the current timezone |
@@ -710,18 +711,71 @@ curl -X POST http://192.168.1.50/api/ota-mode
 
 ---
 
-### `POST /api/wifi/reset`
+### `POST /api/wifi`
 
-Erases the stored WiFi configuration and reboots into AP setup mode (connect to the device's own
-`Split-Flap-AP` network to reconfigure).
+Three WiFi write-actions sharing one registered route, picked via `?action=` (same
+route-registration-costs-heap reasoning as `GET /api/diag` and `POST /api/units`). Only present if
+`WIFI_USE_DIRECT` is `false` (it is, by default - this device uses WiFiManager's AP-config flow
+rather than hardcoded credentials).
 
+**Query param** `action` (required): `reset` | `scan` | `connect`.
+
+**`action=reset`** - erases the stored WiFi configuration and reboots into AP setup mode (connect
+to the device's own `Split-Flap-AP` network to reconfigure).
 **Response** `200 text/html` - an explanatory page (meant for real navigation).
 
-Only present if `WIFI_USE_DIRECT` is `false` (it is, by default - this device uses WiFiManager's
-AP-config flow rather than hardcoded credentials).
+**`action=scan`** - starts an async network scan (the actual `WiFi.scanNetworksAsync()` call
+happens in `loop()`); poll [`GET /api/wifi?type=scan-result`](#get-apiwifi) for the outcome.
+**Response** `200 text/plain`: `"Scan started"`. `409 text/plain` if a scan is already running.
+
+**`action=connect`** - connects to a new network **without rebooting**. Drops the current
+connection immediately, before the new credentials are known to work; reverts automatically after
+~15s if the new network doesn't connect - poll
+[`GET /api/wifi?type=connect-status`](#get-apiwifi) to find out which happened.
+**Body params:** `ssid` (required, non-empty), `password` (optional).
+**Response:** `200 text/plain`: `"Connection attempt started"`. `400 text/plain` if `ssid` is
+missing/empty. `409 text/plain` if a connection attempt is already in progress.
+
+`400 text/plain` if `action` is missing or not one of the three values above.
 
 ```bash
-curl -X POST http://192.168.1.50/api/wifi/reset
+curl -X POST "http://192.168.1.50/api/wifi?action=reset"
+curl -X POST "http://192.168.1.50/api/wifi?action=scan"
+curl -X POST "http://192.168.1.50/api/wifi?action=connect" --data "ssid=MyNetwork&password=secret"
+```
+
+---
+
+### `GET /api/wifi`
+
+Two WiFi read-endpoints sharing one registered route, picked via `?type=`. Same
+`WIFI_USE_DIRECT == false` gating as `POST /api/wifi` above.
+
+**Query param** `type` (required): `scan-result` | `connect-status`.
+
+**`type=scan-result`** - polled after `POST /api/wifi?action=scan`.
+**Response** `200 application/json`:
+```json
+{ "scanning": false, "networks": [ { "ssid": "MyNetwork", "rssi": -52, "secure": true } ] }
+```
+`scanning: true` while still in progress (`networks` absent); `{"scanning": false, "error":
+"Scan failed"}` on failure. Networks are deduped by SSID (strongest signal wins) and hidden
+networks (empty SSID) are omitted.
+
+**`type=connect-status`** - polled after `POST /api/wifi?action=connect`.
+**Response** `200 application/json`:
+```json
+{ "phase": "none", "wifiStatus": "Connected", "wifiSsid": "MyNetwork", "wifiIp": "192.168.1.50" }
+```
+`phase`: `none` | `pending` | `testing` | `success` | `failed_reverted`. A terminal result
+(`success`/`failed_reverted`) is only reported once - the phase resets to `none` right after
+being read.
+
+`400 text/plain` if `type` is missing or not one of the two values above.
+
+```bash
+curl "http://192.168.1.50/api/wifi?type=scan-result"
+curl "http://192.168.1.50/api/wifi?type=connect-status"
 ```
 
 ---

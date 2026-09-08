@@ -1,2 +1,5 @@
 # Internal bugfix/debugging reference log - kept locally, never committed
 BUGFIX_LOG.md
+
+# arduino-cli build output (--export-binaries), not source
+ESPMaster/build/
