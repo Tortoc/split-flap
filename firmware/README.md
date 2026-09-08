@@ -18,7 +18,7 @@ vergleichen, ob der Quellcode seither weiter geändert wurde.
 firmware/
 ├── ESPMaster/
 │   ├── ESPMaster.bin   - Sketch-Binary für den ESP8266 (Master-Modul)
-│   └── littlefs.bin    - Dateisystem-Image (Web-UI: index.html, admin.html, ...)
+│   └── littlefs.bin    - Dateisystem-Image (Web-UI: index.html.gz)
 ├── Unit/
 │   ├── Unit.hex         - App-Firmware für die Units (Intel HEX, für ISP/Arduino-IDE-Upload)
 │   └── Unit.bin         - Dieselbe Firmware als rohes Binary (für den I2C-Firmware-Update-Push
