@@ -76,7 +76,7 @@ void loadValuesFromFileSystem() {
 
 //Read File from LittleFS
 String readFile(fs::FS &fs, const char * path, String defaultValue) {
-  SerialPrintf("Reading file: %s\r\n", path);
+  SerialPrintf(F("Reading file: %s\r\n"), path);
 
   File file = fs.open(path, "r");
   if (!file || file.isDirectory()) {
@@ -102,7 +102,7 @@ String readFile(fs::FS &fs, const char * path, String defaultValue) {
 
 //Write file to LittleFS
 void writeFile(fs::FS &fs, const char * path, const char * message) {
-  SerialPrintf("Writing file: %s\r\n", path);
+  SerialPrintf(F("Writing file: %s\r\n"), path);
 
   File file = fs.open(path, "w");
   if (!file) {

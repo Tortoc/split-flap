@@ -22,6 +22,15 @@ void SerialPrintf(const char* message, T value) {
 #endif
 }
 
+//Overload for F()-wrapped (flash-resident) format strings - printf_P() is the documented-safe way
+//to read a format string via PGM_P rather than plain const char*.
+template <typename T>
+void SerialPrintf(const __FlashStringHelper* message, T value) {
+#if SERIAL_ENABLE == true
+    Serial.printf_P(reinterpret_cast<PGM_P>(message), value);
+#endif
+}
+
 template <typename T>
 void SerialPrintln(T value) {
 #if SERIAL_ENABLE == true

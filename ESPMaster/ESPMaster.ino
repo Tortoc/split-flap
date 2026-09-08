@@ -601,7 +601,7 @@ void setup() {
       minimalDoc["lastWrittenText"] = lastWrittenText;
       minimalDoc["countdownToDateUnix"] = atol(countdownToDateUnix.c_str());
       minimalDoc["countupSinceDateUnix"] = atol(countupSinceDateUnix.c_str());
-      minimalDoc["wifiStatus"] = WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected";
+      minimalDoc["wifiStatus"] = WiFi.status() == WL_CONNECTED ? F("Connected") : F("Disconnected");
       minimalDoc["wifiRssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
       minimalDoc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
       minimalDoc["wifiSettingsResettable"] = true;
@@ -1034,7 +1034,7 @@ void setup() {
         char buf[220];
         //getFlashChipRealSize() = physical chip's own SPI ID (ground truth); getFlashChipSize() =
         //what the eesz board-menu choice assumes - a mismatch means the compiled layout is wrong.
-        snprintf(buf, sizeof(buf), "free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s",
+        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s")),
           ESP.getFreeHeap(), ESP.getHeapFragmentation(), ESP.getMaxFreeBlockSize(),
           ESP.getFlashChipRealSize(), ESP.getFlashChipSize(), ESP.getFlashChipId(), ESP.getChipId(),
           ESP.getSdkVersion(), ESP.getCoreVersion().c_str());
@@ -1056,7 +1056,7 @@ void setup() {
         for (struct tcp_pcb_listen *p = tcp_listen_pcbs.listen_pcbs; p != NULL; p = p->next) listenCount++;
 
         char buf[128];
-        snprintf(buf, sizeof(buf), "active=%d/5 timeWait=%d/5 bound=%d listen=%d", activeCount, timeWaitCount, boundCount, listenCount);
+        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("active=%d/5 timeWait=%d/5 bound=%d listen=%d")), activeCount, timeWaitCount, boundCount, listenCount);
         request->send(200, "text/plain", buf);
         return;
       }
@@ -1680,7 +1680,7 @@ void setup() {
             doc["scanning"] = true;
           } else if (scanResult == WIFI_SCAN_FAILED) {
             doc["scanning"] = false;
-            doc["error"] = "Scan failed";
+            doc["error"] = F("Scan failed");
           } else {
             doc["scanning"] = false;
             JsonArray networks = doc["networks"].to<JsonArray>();
@@ -1727,13 +1727,13 @@ void setup() {
           //once - the phase resets to "none" right after being read.
           JsonDocument doc;
           switch (wifiConnectPhase) {
-            case WIFI_CONNECT_NONE: doc["phase"] = "none"; break;
-            case WIFI_CONNECT_PENDING: doc["phase"] = "pending"; break;
-            case WIFI_CONNECT_TESTING: doc["phase"] = "testing"; break;
-            case WIFI_CONNECT_SUCCESS: doc["phase"] = "success"; break;
-            case WIFI_CONNECT_FAILED_REVERTED: doc["phase"] = "failed_reverted"; break;
+            case WIFI_CONNECT_NONE: doc["phase"] = F("none"); break;
+            case WIFI_CONNECT_PENDING: doc["phase"] = F("pending"); break;
+            case WIFI_CONNECT_TESTING: doc["phase"] = F("testing"); break;
+            case WIFI_CONNECT_SUCCESS: doc["phase"] = F("success"); break;
+            case WIFI_CONNECT_FAILED_REVERTED: doc["phase"] = F("failed_reverted"); break;
           }
-          doc["wifiStatus"] = WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected";
+          doc["wifiStatus"] = WiFi.status() == WL_CONNECTED ? F("Connected") : F("Disconnected");
           doc["wifiSsid"] = WiFi.SSID();
           doc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
 
@@ -2060,15 +2060,15 @@ void loop() {
           int status = Wire.read();
           doc["devices"][foundCount]["status"] = status;
           if (status == 0) {
-            doc["devices"][foundCount]["statusText"] = "ready";
+            doc["devices"][foundCount]["statusText"] = F("ready");
           } else if (status == 1) {
-            doc["devices"][foundCount]["statusText"] = "busy";
+            doc["devices"][foundCount]["statusText"] = F("busy");
           } else {
-            doc["devices"][foundCount]["statusText"] = "unknown";
+            doc["devices"][foundCount]["statusText"] = F("unknown");
           }
         } else {
           doc["devices"][foundCount]["status"] = -1;
-          doc["devices"][foundCount]["statusText"] = "no response";
+          doc["devices"][foundCount]["statusText"] = F("no response");
         }
         foundCount++;
       }
@@ -2229,17 +2229,17 @@ void loop() {
     doc["unitIndex"] = unitIndex;
     if (bootAddress == -2) {
       doc["success"] = false;
-      doc["error"] = "More than one unit answered as a bootloader right now - refusing to guess which one.";
+      doc["error"] = F("More than one unit answered as a bootloader right now - refusing to guess which one.");
     } else if (bootAddress < 0) {
       doc["success"] = false;
-      doc["error"] = "No unit responded in bootloader mode. Nothing was written.";
+      doc["error"] = F("No unit responded in bootloader mode. Nothing was written.");
     } else {
       doc["success"] = true;
       doc["bootAddress"] = bootAddress;
-      doc["bootAddressHex"] = "0x" + String(bootAddress, HEX);
+      doc["bootAddressHex"] = F("0x") + String(bootAddress, HEX);
       doc["addressOffsetFromBase"] = bootAddress - UNIT_BOOTLOADER_BASE_ADDRESS;
       char sigBuf[16];
-      snprintf(sigBuf, sizeof(sigBuf), "%02X %02X %02X", chipInfo.signature[0], chipInfo.signature[1], chipInfo.signature[2]);
+      snprintf_P(sigBuf, sizeof(sigBuf), reinterpret_cast<PGM_P>(F("%02X %02X %02X")), chipInfo.signature[0], chipInfo.signature[1], chipInfo.signature[2]);
       doc["signature"] = sigBuf;
       doc["pageSize"] = chipInfo.pageSize;
       doc["bootloaderStart"] = chipInfo.bootloaderStart;

@@ -226,7 +226,7 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   File firmwareFile = LittleFS.open(unitFirmwarePath, "r");
   if (!firmwareFile) {
     result["success"] = false;
-    result["error"] = "Could not open stored firmware file. Upload a .bin first.";
+    result["error"] = F("Could not open stored firmware file. Upload a .bin first.");
     serializeJson(result, resultJsonOut);
     return false;
   }
@@ -235,7 +235,7 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   if (firmwareSize == 0) {
     firmwareFile.close();
     result["success"] = false;
-    result["error"] = "Stored firmware file is empty.";
+    result["error"] = F("Stored firmware file is empty.");
     serializeJson(result, resultJsonOut);
     return false;
   }
@@ -256,8 +256,8 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   if (bootAddress == -2) {
     firmwareFile.close();
     result["success"] = false;
-    result["error"] = "More than one unit is answering as a bootloader right now - refusing to guess which one is the target. "
-      "Nothing was written. Make sure only this one update was triggered and no other unit was power-cycled at the same time, then retry.";
+    result["error"] = F("More than one unit is answering as a bootloader right now - refusing to guess which one is the target. "
+      "Nothing was written. Make sure only this one update was triggered and no other unit was power-cycled at the same time, then retry.");
     serializeJson(result, resultJsonOut);
     return false;
   }
@@ -265,7 +265,7 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   if (bootAddress < 0) {
     firmwareFile.close();
     result["success"] = false;
-    result["error"] = "Unit did not respond in bootloader mode. Nothing was written - old firmware should still be running normally.";
+    result["error"] = F("Unit did not respond in bootloader mode. Nothing was written - old firmware should still be running normally.");
     serializeJson(result, resultJsonOut);
     return false;
   }
