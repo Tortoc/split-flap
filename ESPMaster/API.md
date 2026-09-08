@@ -13,8 +13,8 @@ endpoint layout.
 - **Request bodies**: `POST` endpoints take `application/x-www-form-urlencoded` bodies (i.e.
   `key=value&key2=value2`, the same as an HTML form submit) unless noted as multipart file upload.
 - **Responses**: format varies per endpoint (JSON, plain text, or HTML) - called out individually.
-  Two diagnostic endpoints (`/api/heap`, `/api/tcp-status`) are deliberately plain text rather
-  than JSON to avoid any allocation on a heap-constrained device; see their entries.
+  `/api/diag`'s `heap`/`tcp` checks are deliberately plain text rather than JSON to avoid any
+  allocation on a heap-constrained device; see that entry.
 - **CORS**: not configured - calls from a page served by a different origin will be blocked by
   the browser. Fine for `curl`/scripts/same-origin use, not for a third-party web page.
 - All endpoints below are on this ESP8266 build's default flash layout (`eesz=1M128`); nothing
@@ -48,10 +48,7 @@ other endpoint below has no auth check at all, including `GET /api/ota-password`
 | GET | [`/api/settings`](#get-apisettings) | Current device settings |
 | POST | [`/api/settings`](#post-apisettings) | Update alignment/mode/text/speed/schedule/countdown |
 | POST | [`/api/text`](#post-apitext) | Lightweight text push (automations/webhooks) |
-| GET | [`/api/health`](#get-apihealth) | Liveness check |
-| GET | [`/api/heap`](#get-apiheap) | Free heap / fragmentation |
-| GET | [`/api/tcp-status`](#get-apitcp-status) | Live TCP connection-pool usage |
-| GET | [`/api/test`](#get-apitest) | Trivial JSON echo |
+| GET | [`/api/diag?type=`](#get-apidiag) | Diagnostics: `health`\|`heap`\|`tcp`\|`test` |
 | GET | [`/api/log`](#get-apilog) | Recent in-memory serial log |
 | GET | [`/api/crash-log`](#get-apicrash-log) | Persisted on-device crash log |
 | DELETE | [`/api/crash-log`](#delete-apicrash-log) | Clear the crash log |
@@ -208,73 +205,47 @@ curl -X POST http://192.168.1.50/api/text --data "text=BRB&duration=10"
 
 ---
 
-### `GET /api/health`
+### `GET /api/diag`
 
-Trivial liveness check.
+Four pure-diagnostic checks sharing one registered route, picked via `?type=` - each
+`webServer.on()` registration costs a small permanent heap allocation that's never freed, and this
+device has very little room to spare, so these were consolidated rather than left as four separate
+endpoints (formerly `/api/health`, `/api/heap`, `/api/tcp-status`, `/api/test`).
 
+**Query param** `type` (required): `health` | `heap` | `tcp` | `test`.
+
+**`type=health`** - trivial liveness check.
 **Response** `200 text/plain`: `Healthy`
 
-```bash
-curl http://192.168.1.50/api/health
-```
-
----
-
-### `GET /api/heap`
-
-Free-heap diagnostic, added while chasing a real out-of-memory crash. **Deliberately plain
-text, not JSON** - zero allocation risk of its own
-(stack-only `char` buffer), which is the entire point on a heap-constrained device; converting
-this to JSON would reintroduce exactly the allocation this endpoint exists to avoid.
-
-**Response** `200 text/plain`, e.g.:
-```
-free=16480 frag=1% maxBlock=16368
-```
+**`type=heap`** - free-heap diagnostic, added while chasing a real out-of-memory crash.
+**Deliberately plain text, not JSON** - zero allocation risk of its own (stack-only `char`
+buffer), which is the entire point on a heap-constrained device.
+**Response** `200 text/plain`, e.g.: `free=16480 frag=1% maxBlock=16368 ...`
 - `free` - bytes currently free on the heap.
 - `frag` - heap fragmentation percentage (`ESP.getHeapFragmentation()`).
 - `maxBlock` - largest single contiguous free block available (bytes).
 
-```bash
-curl http://192.168.1.50/api/heap
-```
-
----
-
-### `GET /api/tcp-status`
-
-Live TCP connection-pool diagnostic (this ESP8266's lwIP hard-caps at 5 simultaneous TCP
-connections). Same "plain text, zero allocation"
-reasoning as `/api/heap` above - walks lwIP's own internal linked lists directly.
-
-**Response** `200 text/plain`, e.g.:
-```
-active=1/5 timeWait=0/5 bound=0 listen=1
-```
+**`type=tcp`** - live TCP connection-pool diagnostic (this ESP8266's lwIP hard-caps at 5
+simultaneous TCP connections). Same "plain text, zero allocation" reasoning as `heap` above.
+**Response** `200 text/plain`, e.g.: `active=1/5 timeWait=0/5 bound=0 listen=1`
 - `active` - currently active (open, in-flight) TCP connections, out of the hard limit of 5.
 - `timeWait` - connections in TCP TIME-WAIT after closing, out of a *separate* 5-slot pool (does
   not compete with `active` for headroom).
 - `bound` - bound-but-not-yet-connected PCBs (normally 0).
 - `listen` - listening sockets (normally 1 - the web server itself).
 
-```bash
-curl http://192.168.1.50/api/tcp-status
-```
+**`type=test`** - minimal connectivity/latency check, predates most other diagnostics on this
+list.
+**Response** `200 application/json`: `{ "status": "ok", "time": 123456 }` - `time` is `millis()`
+(milliseconds since boot), not a wall-clock timestamp.
 
----
-
-### `GET /api/test`
-
-Minimal connectivity/latency check, predates most other diagnostics on this list.
-
-**Response** `200 application/json`:
-```json
-{ "status": "ok", "time": 123456 }
-```
-`time` is `millis()` (milliseconds since boot), not a wall-clock timestamp.
+`400 text/plain` if `type` is missing or not one of the four values above.
 
 ```bash
-curl http://192.168.1.50/api/test
+curl "http://192.168.1.50/api/diag?type=health"
+curl "http://192.168.1.50/api/diag?type=heap"
+curl "http://192.168.1.50/api/diag?type=tcp"
+curl "http://192.168.1.50/api/diag?type=test"
 ```
 
 ---

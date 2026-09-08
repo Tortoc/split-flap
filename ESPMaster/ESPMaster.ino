@@ -717,47 +717,55 @@ void setup() {
       webRequestActive = false;
     });
 
-    webServer.on("/api/health", HTTP_GET, [](AsyncWebServerRequest * request) {
-      SerialPrintln("DEBUG: Request for Health Check Received");
-      request->send(200, "text/plain", "Healthy");
-    });
+    //Consolidates the four pure-diagnostic endpoints (former /api/health, /api/heap,
+    ///api/tcp-status, /api/test) into one registered route, dispatched by ?type= - each
+    //registered handler costs a small permanent heap allocation that's never freed, and this
+    //device has very little room to spare.
+    webServer.on("/api/diag", HTTP_GET, [](AsyncWebServerRequest * request) {
+      String type = request->hasParam("type") ? request->getParam("type")->value() : "";
 
-    // Heap health check - permanent, read-only diagnostic (plain text, stack-only char buffer, no
-    // allocation/crash risk of its own) for spotting heap pressure before it causes a crash.
-    webServer.on("/api/heap", HTTP_GET, [](AsyncWebServerRequest * request) {
-      char buf[220];
-      //getFlashChipRealSize() = physical chip's own SPI ID (ground truth); getFlashChipSize() =
-      //what the eesz board-menu choice assumes - a mismatch means the compiled layout is wrong.
-      snprintf(buf, sizeof(buf), "free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s",
-        ESP.getFreeHeap(), ESP.getHeapFragmentation(), ESP.getMaxFreeBlockSize(),
-        ESP.getFlashChipRealSize(), ESP.getFlashChipSize(), ESP.getFlashChipId(), ESP.getChipId(),
-        ESP.getSdkVersion(), ESP.getCoreVersion().c_str());
-      request->send(200, "text/plain", buf);
-    });
+      if (type == "health") {
+        request->send(200, "text/plain", "Healthy");
+        return;
+      }
 
-    // This board's lwIP build hard-caps MEMP_NUM_TCP_PCB at 5 - only 5 simultaneously *active*
-    // TCP connections, with a separate 5-slot TIME-WAIT pool (every request opens a fresh
-    // connection, "Connection: close" on every response). Read-only, no allocation.
-    webServer.on("/api/tcp-status", HTTP_GET, [](AsyncWebServerRequest * request) {
-      int activeCount = 0;
-      for (struct tcp_pcb *p = tcp_active_pcbs; p != NULL; p = p->next) activeCount++;
-      int timeWaitCount = 0;
-      for (struct tcp_pcb *p = tcp_tw_pcbs; p != NULL; p = p->next) timeWaitCount++;
-      int boundCount = 0;
-      for (struct tcp_pcb *p = tcp_bound_pcbs; p != NULL; p = p->next) boundCount++;
-      int listenCount = 0;
-      for (struct tcp_pcb_listen *p = tcp_listen_pcbs.listen_pcbs; p != NULL; p = p->next) listenCount++;
+      if (type == "heap") {
+        char buf[220];
+        //getFlashChipRealSize() = physical chip's own SPI ID (ground truth); getFlashChipSize() =
+        //what the eesz board-menu choice assumes - a mismatch means the compiled layout is wrong.
+        snprintf(buf, sizeof(buf), "free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s",
+          ESP.getFreeHeap(), ESP.getHeapFragmentation(), ESP.getMaxFreeBlockSize(),
+          ESP.getFlashChipRealSize(), ESP.getFlashChipSize(), ESP.getFlashChipId(), ESP.getChipId(),
+          ESP.getSdkVersion(), ESP.getCoreVersion().c_str());
+        request->send(200, "text/plain", buf);
+        return;
+      }
 
-      char buf[128];
-      snprintf(buf, sizeof(buf), "active=%d/5 timeWait=%d/5 bound=%d listen=%d", activeCount, timeWaitCount, boundCount, listenCount);
-      request->send(200, "text/plain", buf);
-    });
+      if (type == "tcp") {
+        //This board's lwIP build hard-caps MEMP_NUM_TCP_PCB at 5 - only 5 simultaneously *active*
+        //TCP connections, with a separate 5-slot TIME-WAIT pool (every request opens a fresh
+        //connection, "Connection: close" on every response).
+        int activeCount = 0;
+        for (struct tcp_pcb *p = tcp_active_pcbs; p != NULL; p = p->next) activeCount++;
+        int timeWaitCount = 0;
+        for (struct tcp_pcb *p = tcp_tw_pcbs; p != NULL; p = p->next) timeWaitCount++;
+        int boundCount = 0;
+        for (struct tcp_pcb *p = tcp_bound_pcbs; p != NULL; p = p->next) boundCount++;
+        int listenCount = 0;
+        for (struct tcp_pcb_listen *p = tcp_listen_pcbs.listen_pcbs; p != NULL; p = p->next) listenCount++;
 
+        char buf[128];
+        snprintf(buf, sizeof(buf), "active=%d/5 timeWait=%d/5 bound=%d listen=%d", activeCount, timeWaitCount, boundCount, listenCount);
+        request->send(200, "text/plain", buf);
+        return;
+      }
 
-    // Simple test endpoint that responds immediately
-    webServer.on("/api/test", HTTP_GET, [](AsyncWebServerRequest * request) {
-      SerialPrintln("DEBUG: Test endpoint called");
-      request->send(200, "application/json", "{\"status\":\"ok\",\"time\":" + String(millis()) + "}");
+      if (type == "test") {
+        request->send(200, "application/json", "{\"status\":\"ok\",\"time\":" + String(millis()) + "}");
+        return;
+      }
+
+      request->send(400, "text/plain", "Unknown 'type' - use health, heap, tcp, or test");
     });
     
     webServer.on("/api/log", HTTP_GET, [](AsyncWebServerRequest * request) {
