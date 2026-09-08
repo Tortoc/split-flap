@@ -20,6 +20,8 @@ endpoint layout.
 - All endpoints below are on this ESP8266 build's default flash layout (`eesz=1M128`); nothing
   here is affected by that choice, it's just how this device happens to be built (see
   `firmware/README.md`).
+- **curl examples**: every endpoint below has one, using `192.168.1.50` as a placeholder for the
+  device's actual IP - substitute your own throughout.
 
 ## Authentication
 
@@ -87,6 +89,10 @@ If `DEBUG_ENABLE` is compiled in (it is, by default) and debug mode is currently
 page showing the live boot log, with a button that calls `POST /api/debug-mode` (`enabled=false`)
 to return to the normal page.
 
+```bash
+curl http://192.168.1.50/
+```
+
 ---
 
 ### `GET /api/settings`
@@ -125,6 +131,10 @@ displays from this one already-fetched response instead of two more separate req
 [`POST /api/ota-mode`](#post-apiota-mode)). `wifiSettingsResettable` reflects `WIFI_USE_DIRECT`
 being off (AP-config mode).
 
+```bash
+curl http://192.168.1.50/api/settings
+```
+
 ---
 
 ### `POST /api/settings`
@@ -156,6 +166,11 @@ live display immediately - remove one later via
   `alignment`/`deviceMode` value, `flapSpeed` out of `1`-`100`, `inputText` over 500 chars, or a
   non-numeric date field).
 
+```bash
+curl -X POST http://192.168.1.50/api/settings \
+  --data "deviceMode=text&inputText=HELLO&alignment=center&flapSpeed=80"
+```
+
 ---
 
 ### `POST /api/text`
@@ -183,6 +198,14 @@ of the full settings form. Same unauthenticated design as `/api/settings` above.
 - `400 text/plain` if `text` is missing/over 500 chars, or `duration` is missing a number, negative,
   or over `3600`.
 
+```bash
+# Permanent - switches into Text mode and stays
+curl -X POST http://192.168.1.50/api/text --data "text=HELLO WORLD"
+
+# Temporary - shows for 10s, then reverts to whatever was showing before
+curl -X POST http://192.168.1.50/api/text --data "text=BRB&duration=10"
+```
+
 ---
 
 ### `GET /api/health`
@@ -190,6 +213,10 @@ of the full settings form. Same unauthenticated design as `/api/settings` above.
 Trivial liveness check.
 
 **Response** `200 text/plain`: `Healthy`
+
+```bash
+curl http://192.168.1.50/api/health
+```
 
 ---
 
@@ -207,6 +234,10 @@ free=16480 frag=1% maxBlock=16368
 - `free` - bytes currently free on the heap.
 - `frag` - heap fragmentation percentage (`ESP.getHeapFragmentation()`).
 - `maxBlock` - largest single contiguous free block available (bytes).
+
+```bash
+curl http://192.168.1.50/api/heap
+```
 
 ---
 
@@ -226,6 +257,10 @@ active=1/5 timeWait=0/5 bound=0 listen=1
 - `bound` - bound-but-not-yet-connected PCBs (normally 0).
 - `listen` - listening sockets (normally 1 - the web server itself).
 
+```bash
+curl http://192.168.1.50/api/tcp-status
+```
+
 ---
 
 ### `GET /api/test`
@@ -237,6 +272,10 @@ Minimal connectivity/latency check, predates most other diagnostics on this list
 { "status": "ok", "time": 123456 }
 ```
 `time` is `millis()` (milliseconds since boot), not a wall-clock timestamp.
+
+```bash
+curl http://192.168.1.50/api/test
+```
 
 ---
 
@@ -260,6 +299,10 @@ Returns `503 text/plain` instead ("Too little free heap right now to safely buil
 response - try again shortly") if free heap is below 4000 bytes at request time, rather than
 risking an allocation failure.
 
+```bash
+curl http://192.168.1.50/api/log
+```
+
 ---
 
 ### `GET /api/crash-log`
@@ -270,6 +313,10 @@ the moment of the crash. One JSON object per line (JSON Lines format), oldest fi
 **Response** `200 application/jsonl` - raw file content, or an empty body if no crash log exists
 yet.
 
+```bash
+curl http://192.168.1.50/api/crash-log
+```
+
 ---
 
 ### `DELETE /api/crash-log`
@@ -277,6 +324,10 @@ yet.
 Clears the persisted crash log file.
 
 **Response** `200 text/plain`: `Crash log cleared`
+
+```bash
+curl -X DELETE http://192.168.1.50/api/crash-log
+```
 
 ---
 
@@ -303,6 +354,10 @@ AsyncWebServer callback itself), so it can take a moment.
 `expectedCount` is the currently-known `unitsAmount` from the last full scan (see
 [`POST /api/units/rescan`](#post-apiunitsrescan)) - a mismatch against `foundCount` suggests a
 wiring/address gap. Returns `503 text/plain` if another scan is already in progress.
+
+```bash
+curl http://192.168.1.50/api/i2c-scan
+```
 
 ---
 
@@ -340,6 +395,13 @@ Administration page itself - pass it manually (e.g. `curl`) when actively diagno
 
 Returns `503 text/plain` if another units request is already in progress.
 
+```bash
+curl http://192.168.1.50/api/units
+
+# with phase/progress included:
+curl "http://192.168.1.50/api/units?detail=1"
+```
+
 ---
 
 ### `POST /api/units/rescan`
@@ -352,6 +414,10 @@ Updates the device-wide `unitsAmount` used everywhere else. Deferred to `loop()`
 { "unitsAmount": 3 }
 ```
 Returns `503 text/plain` if another rescan is already in progress.
+
+```bash
+curl -X POST http://192.168.1.50/api/units/rescan
+```
 
 ---
 
@@ -371,6 +437,10 @@ re-home) immediately.
 - `202 text/plain`: `"Offset sent. Unit is recalibrating now, this can take a few seconds."`
 - `400 text/plain` if `id`/`offset` are missing, non-numeric, or out of range.
 
+```bash
+curl -X POST http://192.168.1.50/api/units/offset --data "id=0&offset=100"
+```
+
 ---
 
 ### `POST /api/units/reset`
@@ -379,27 +449,39 @@ Triggers a full recalibration of every known unit (picked up on the next `loop()
 
 **Response** `200 text/plain`: `"Units are resetting/recalibrating now."`
 
+```bash
+curl -X POST http://192.168.1.50/api/units/reset
+```
+
 ---
 
 ### `POST /api/web-file`
 
-Replaces `index.html` in place on the device's LittleFS, without touching any other file - lets
-the web UI be updated without a full filesystem reflash (which would wipe runtime settings).
-`index.html` is the *only* accepted filename, since the entire UI lives in one file.
+Replaces `index.html.gz` in place on the device's LittleFS, without touching any other file - lets
+the web UI be updated without a full filesystem reflash (which would wipe runtime settings). The
+whole UI is one gzip-compressed file (`ESPAsyncWebServer` serves it with `Content-Encoding: gzip`
+automatically), so `index.html.gz` is the *only* accepted filename.
 
 **Auth:** requires `X-OTA-Password` header if a password is set.
 
 **Request:** `multipart/form-data` file upload; the uploaded file's name must be exactly
-`index.html`.
+`index.html.gz`.
 
 **Response:**
 - `200 text/plain`: `"OK - file updated"`
-- `400 text/plain` if the filename isn't `index.html`.
+- `400 text/plain` if the filename isn't `index.html.gz`.
 - `401 text/plain` if the password is wrong.
 
 > ⚠️ No filesystem-space check happens before writing - a full partition can silently produce a
 > 0-byte file. Verify byte-for-byte after uploading (`GET /` and compare length/content against
 > the source).
+
+```bash
+gzip -9 -k -c index.html > index.html.gz
+curl -X POST http://192.168.1.50/api/web-file \
+  -H "X-OTA-Password: splitflap" \
+  -F "file=@index.html.gz;filename=index.html.gz;type=application/gzip"
+```
 
 ---
 
@@ -416,6 +498,12 @@ push it yet.
 **Response:**
 - `200 text/plain`: `"OK - firmware stored, ready to push to a unit"`
 - `401 text/plain` if the password is wrong.
+
+```bash
+curl -X POST http://192.168.1.50/api/units/firmware \
+  -H "X-OTA-Password: splitflap" \
+  -F "firmware=@Unit.bin"
+```
 
 ---
 
@@ -458,6 +546,12 @@ failed push leaves the old firmware fully intact. `400` if `id` is missing/inval
 or no firmware has been uploaded yet; `401` on a wrong password; `503` if another push is already
 in progress.
 
+```bash
+curl -X POST http://192.168.1.50/api/units/firmware-push \
+  -H "X-OTA-Password: splitflap" \
+  --data "id=0"
+```
+
 ---
 
 ### `POST /api/units/bootloader-probe`
@@ -491,6 +585,10 @@ or `{"unitIndex":N,"success":false,"error":"..."}` if no unit (or more than one)
 bootloader mode. `400` if `id` is missing/invalid/out of range; `503` if another probe is already
 in progress.
 
+```bash
+curl -X POST http://192.168.1.50/api/units/bootloader-probe --data "id=0"
+```
+
 ---
 
 ### `POST /api/firmware-start`
@@ -509,6 +607,13 @@ replaced a single-request upload.
 - `401 text/plain` if the password is wrong.
 - `500 text/plain`: `"Failed to start update, check the serial log for details"`
 - `503 text/plain` if another firmware upload is already in progress.
+
+```bash
+SIZE=$(stat -c%s ESPMaster.ino.bin)
+curl -X POST http://192.168.1.50/api/firmware-start \
+  -H "X-OTA-Password: splitflap" \
+  --data "size=$SIZE"
+```
 
 ---
 
@@ -536,6 +641,14 @@ uploader's chunk size in sync with this).
 An upload with no chunk/finish activity for 30s is treated as abandoned and cleaned up
 automatically (old firmware stays active).
 
+```bash
+# One chunk, previously split with e.g. `split -b 4096 ESPMaster.ino.bin chunk_`
+curl -X POST http://192.168.1.50/api/firmware-chunk \
+  -H "X-OTA-Password: splitflap" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @chunk_aa
+```
+
 ---
 
 ### `POST /api/firmware-finish`
@@ -556,6 +669,10 @@ automatically on success.
 All three endpoints above are only present if `WEB_FIRMWARE_UPDATE_ENABLE` is compiled in (it is,
 by default).
 
+```bash
+curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitflap"
+```
+
 ---
 
 ### `POST /api/debug-mode`
@@ -575,6 +692,10 @@ serial debug log at the bottom of the main page). Persisted across reboots.
 Only present if `DEBUG_ENABLE` is compiled in (it is, by default). Replaces the former
 `GET /exit-debug-mode` / `GET /enable-debug-mode` - those were a CSRF-via-GET gap, since closed.
 
+```bash
+curl -X POST http://192.168.1.50/api/debug-mode --data "enabled=true"
+```
+
 ---
 
 ### `POST /api/reboot`
@@ -585,6 +706,10 @@ later).
 **Response** `200 text/html` - a small human-readable "rebooting..." page with a link back home
 (meant for a real browser form submission, not programmatic use, though the body content doesn't
 matter if you only care about the reboot itself).
+
+```bash
+curl -X POST http://192.168.1.50/api/reboot
+```
 
 ---
 
@@ -604,6 +729,10 @@ Example: `DELETE /api/scheduled-messages?id=1755331200`
 - `202 text/plain`: `"Removed"`
 - `400 text/plain` if `id` is missing, non-numeric, or doesn't match any scheduled message.
 
+```bash
+curl -X DELETE "http://192.168.1.50/api/scheduled-messages?id=1755331200"
+```
+
 ---
 
 ### `POST /api/ota-mode`
@@ -619,6 +748,10 @@ endpoint does not exist right now despite the Administration view's "OTA Update"
 being wired to call it (a pre-existing inconsistency, not introduced by the Punkt 74 rename -
 worth a look in a future session).
 
+```bash
+curl -X POST http://192.168.1.50/api/ota-mode
+```
+
 ---
 
 ### `POST /api/wifi/reset`
@@ -631,6 +764,10 @@ Erases the stored WiFi configuration and reboots into AP setup mode (connect to 
 Only present if `WIFI_USE_DIRECT` is `false` (it is, by default - this device uses WiFiManager's
 AP-config flow rather than hardcoded credentials).
 
+```bash
+curl -X POST http://192.168.1.50/api/wifi/reset
+```
+
 ---
 
 ### `GET /api/ota-password`
@@ -642,6 +779,10 @@ per-request, so hiding it behind itself wouldn't add real protection.
 **Response** `200 application/json`:
 ```json
 { "otaPassword": "splitflap" }
+```
+
+```bash
+curl http://192.168.1.50/api/ota-password
 ```
 
 ---
@@ -662,6 +803,11 @@ Changes the OTA password. Same resource as the `GET` above.
 - `400 text/plain` if either param is missing or `newPassword` is empty.
 - `401 text/plain` if `currentPassword` doesn't match.
 
+```bash
+curl -X POST http://192.168.1.50/api/ota-password \
+  --data "currentPassword=splitflap&newPassword=newSecret123"
+```
+
 ---
 
 ### `GET /api/timezone`
@@ -671,6 +817,10 @@ Returns the currently-configured timezone (TZ database name).
 **Response** `200 application/json`:
 ```json
 { "timezone": "Europe/Berlin" }
+```
+
+```bash
+curl http://192.168.1.50/api/timezone
 ```
 
 ---
@@ -690,3 +840,7 @@ Changes the timezone. Same resource as the `GET` above.
 - `400 text/plain` if `timezone` is missing/empty, or not recognized by ezTime's timezoned lookup
   (this call needs network access - it queries ezTime's timezone service live, it doesn't just
   parse the string locally).
+
+```bash
+curl -X POST http://192.168.1.50/api/timezone --data "timezone=Europe/Berlin"
+```
