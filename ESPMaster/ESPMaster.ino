@@ -680,9 +680,342 @@ void setup() {
       request->send(response);
 
       SerialPrintln("DEBUG: Settings response sent (total: " + String(millis() - settingsStart) + "ms)");
-      
+
       // Clear flag after request completes
       webRequestActive = false;
+    });
+
+    //Attempted merging this with the GET handler above into one HTTP_GET|HTTP_POST registration
+    //(same pattern as /api/wifi etc., see BUGFIX_LOG #120) - reproducibly broken on real hardware:
+    //a genuine POST request received the GET handler's JSON response instead of "OK", and invalid
+    //POST bodies got 200 instead of 400. Root cause not chased down (this handler's combined body
+    //is far larger than every other successfully-merged pair - likely relevant, but unconfirmed);
+    //reverted to two separate registrations, verified working again. See BUGFIX_LOG #121.
+    webServer.on("/api/settings", HTTP_POST, [](AsyncWebServerRequest * request) {
+      SerialPrintln("DEBUG: Request Post of Form Received");
+
+      bool submissionError = false;
+
+      //Separate declarations - `bool a, b = false;` only initializes b, not a.
+      bool newMessageScheduleEnabledValue = false;
+      bool newMessageScheduleShowIndefinitely = false;
+      long newMessageScheduleDateTimeUnixValue = -1;
+      String newAlignmentValue, newDeviceModeValue, newFlapSpeedValue, newInputTextValue, newCountdownToDateUnixValue = "";
+      bool hasNewInputTextValue = false;
+      String newClockFormatValue = "";
+      String newDateFormatValue = "";
+      bool hasNewRotationItems = false;
+      String newRotationItemsJson = "";
+      //Distinct hasNew*/empty-allowed pattern (unlike clockFormat/dateFormat above) - "" is a
+      //meaningful, deliberate value here (show the bare day count), not "field not submitted".
+      bool hasNewCountdownPrefixValue = false;
+      String newCountdownPrefixValue = "";
+      bool hasNewCountdownSuffixValue = false;
+      String newCountdownSuffixValue = "";
+      String newCountupSinceDateUnixValue = "";
+      bool hasNewCountupPrefixValue = false;
+      String newCountupPrefixValue = "";
+      bool hasNewCountupSuffixValue = false;
+      String newCountupSuffixValue = "";
+
+      int params = request->params();
+      for (int paramIndex = 0; paramIndex < params; paramIndex++) {
+        AsyncWebParameter* p = request->getParam(paramIndex);
+        if (p->isPost()) {
+          //HTTP POST alignment value
+          if (p->name() == PARAM_ALIGNMENT) {
+            String receivedValue = p->value();
+            if (receivedValue == ALIGNMENT_MODE_LEFT || receivedValue == ALIGNMENT_MODE_CENTER || receivedValue == ALIGNMENT_MODE_RIGHT) {
+              newAlignmentValue = receivedValue;
+            }
+            else {
+              SerialPrintln("Alignment provided was not valid. Value: " + receivedValue);
+              submissionError = true;
+            }
+          }
+
+          //HTTP POST device mode value
+          if (p->name() == PARAM_DEVICEMODE) {
+            String receivedValue = p->value();
+            if (receivedValue == DEVICE_MODE_TEXT || receivedValue == DEVICE_MODE_CLOCK || receivedValue == DEVICE_MODE_DATE || receivedValue == DEVICE_MODE_COUNTDOWN || receivedValue == DEVICE_MODE_COUNTUP || receivedValue == DEVICE_MODE_ROTATION) {
+              newDeviceModeValue = receivedValue;
+            }
+            else {
+              SerialPrintln("Device Mode provided was not valid. Invalid Value: " + receivedValue);
+              submissionError = true;
+            }
+          }
+
+          //HTTP POST Flap Speed Slider value
+          if (p->name() == PARAM_FLAP_SPEED) {
+            //Client-side min/max isn't enough - convertSpeed() extrapolates out-of-range values,
+            //and a garbage speed reaching the unit is a real motor safety concern.
+            String rawFlapSpeed = p->value();
+            if (!isNumber(rawFlapSpeed) || rawFlapSpeed.toInt() < 1 || rawFlapSpeed.toInt() > 100) {
+              SerialPrintln("flapSpeed provided was invalid (must be a number 1-100): " + rawFlapSpeed);
+              submissionError = true;
+            } else {
+              newFlapSpeedValue = rawFlapSpeed.c_str();
+            }
+          }
+
+          //HTTP POST inputText value
+          if (p->name() == PARAM_INPUT_TEXT) {
+            //Enforce a max length server-side too - an unbounded String is needless heap pressure.
+            if (p->value().length() > 500) {
+              SerialPrintln("inputText provided was too long (" + String(p->value().length()) + " chars, max 500)");
+              submissionError = true;
+            } else {
+              newInputTextValue = p->value().c_str();
+              hasNewInputTextValue = true;
+            }
+          }
+
+          //HTTP POST Schedule Enabled
+          if (p->name() == PARAM_SCHEDULE_ENABLED) {
+            String newMessageScheduleEnabledString = p->value().c_str();
+            newMessageScheduleEnabledValue = newMessageScheduleEnabledString == "on" ?
+              true :
+              false;
+          }
+
+          //HTTP POST Schedule Show Indefinitely
+          if (p->name() == PARAM_SCHEDULE_SHOW_INDEFINITELY) {
+            String newMessageScheduleShowIndefinitelyString = p->value().c_str();
+            newMessageScheduleShowIndefinitely = newMessageScheduleShowIndefinitelyString == "on" ?
+              true :
+              false;
+          }
+
+          //HTTP POST Schedule Seconds
+          if (p->name() == PARAM_SCHEDULE_DATE_TIME) {
+            String receivedValue = p->value().c_str();
+            if (isNumber(receivedValue)) {
+              newMessageScheduleDateTimeUnixValue = atol(receivedValue.c_str());
+            }
+            else {
+              SerialPrintln("Schedule date time provided was not valid. Invalid Value: " + receivedValue);
+              submissionError = true;
+            }
+          }
+
+          //HTTP POST Countdown Seconds
+          if (p->name() == PARAM_COUNTDOWN_DATE) {
+            String receivedValue = p->value().c_str();
+            if (isNumber(receivedValue)) {
+              newCountdownToDateUnixValue = receivedValue;
+            }
+            else {
+              SerialPrintln("Countdown date provided was not valid. Invalid Value: " + receivedValue);
+              submissionError = true;
+            }
+          }
+
+          //HTTP POST Countup Seconds (the date to count days elapsed since)
+          if (p->name() == PARAM_COUNTUP_DATE) {
+            String receivedValue = p->value().c_str();
+            if (isNumber(receivedValue)) {
+              newCountupSinceDateUnixValue = receivedValue;
+            }
+            else {
+              SerialPrintln("Countup date provided was not valid. Invalid Value: " + receivedValue);
+              submissionError = true;
+            }
+          }
+
+          //Clock/date format, e.g. "HH:mm:ss" - see convertUserDateFormatToEzTime().
+          if (p->name() == PARAM_CLOCK_FORMAT) {
+            if (p->value().length() > 40) {
+              SerialPrintln("clockFormat provided was too long (max 40 chars)");
+              submissionError = true;
+            } else {
+              newClockFormatValue = p->value();
+            }
+          }
+          if (p->name() == PARAM_DATE_FORMAT) {
+            if (p->value().length() > 40) {
+              SerialPrintln("dateFormat provided was too long (max 40 chars)");
+              submissionError = true;
+            } else {
+              newDateFormatValue = p->value();
+            }
+          }
+
+          //HTTP POST Countdown prefix/suffix - "" is a valid, deliberate value (show the bare day
+          //count), so tracked via hasNew*/empty-allowed rather than the newX != "" pattern above.
+          if (p->name() == PARAM_COUNTDOWN_PREFIX) {
+            if (p->value().length() > 40) {
+              SerialPrintln("countdownPrefix provided was too long (max 40 chars)");
+              submissionError = true;
+            } else {
+              newCountdownPrefixValue = p->value();
+              hasNewCountdownPrefixValue = true;
+            }
+          }
+          if (p->name() == PARAM_COUNTDOWN_SUFFIX) {
+            if (p->value().length() > 40) {
+              SerialPrintln("countdownSuffix provided was too long (max 40 chars)");
+              submissionError = true;
+            } else {
+              newCountdownSuffixValue = p->value();
+              hasNewCountdownSuffixValue = true;
+            }
+          }
+
+          //HTTP POST Countup prefix/suffix - same "" is deliberate reasoning as Countdown above.
+          if (p->name() == PARAM_COUNTUP_PREFIX) {
+            if (p->value().length() > 40) {
+              SerialPrintln("countupPrefix provided was too long (max 40 chars)");
+              submissionError = true;
+            } else {
+              newCountupPrefixValue = p->value();
+              hasNewCountupPrefixValue = true;
+            }
+          }
+          if (p->name() == PARAM_COUNTUP_SUFFIX) {
+            if (p->value().length() > 40) {
+              SerialPrintln("countupSuffix provided was too long (max 40 chars)");
+              submissionError = true;
+            } else {
+              newCountupSuffixValue = p->value();
+              hasNewCountupSuffixValue = true;
+            }
+          }
+
+          //HTTP POST Rotation Items (JSON array, the client always submits the whole list) -
+          //bounded well above any realistic sequence, still a needless-heap-pressure safeguard.
+          if (p->name() == PARAM_ROTATION_ITEMS) {
+            if (p->value().length() > 8000) {
+              SerialPrintln("rotationItems provided was too long (max 8000 chars)");
+              submissionError = true;
+            } else {
+              newRotationItemsJson = p->value();
+              hasNewRotationItems = true;
+            }
+          }
+        }
+      }
+
+      //If there was an error, report back to check what has been input
+      if (submissionError) {
+        SerialPrintln("Finished Processing Request with Error");
+        request->send(400, "text/plain", "Invalid submission - check the values you entered (e.g. schedule/countdown dates must be in the future).");
+      }
+      else {
+        SerialPrintln("Finished Processing Request Successfully");
+
+        lastReceivedMessageDateTime = timezone.dateTime("d M y H:i:s");
+
+        //Only if a new alignment value
+        if (newAlignmentValue != "" && alignment != newAlignmentValue) {
+          alignment = newAlignmentValue;
+          alignmentUpdated = true;
+
+          writeFile(LittleFS, alignmentPath, alignment.c_str());
+          SerialPrintln("Alignment Updated: " + alignment);
+        }
+
+        //Only if a new flap speed value
+        if (newFlapSpeedValue != "" && flapSpeed != newFlapSpeedValue) {
+          flapSpeed = newFlapSpeedValue;
+
+          writeFile(LittleFS, flapSpeedPath, flapSpeed.c_str());
+          SerialPrintln("Flap Speed Updated: " + flapSpeed);
+        }
+
+        //Only if countdown date has changed - gated to the countdown tab's own submission (its
+        //hidden field is only ever recomputed by that tab's onsubmit case; submitting from a
+        //different tab would otherwise resubmit that field's stale/default "0" and wipe the
+        //stored date, since the field is a form-wide value regardless of which tab is visible).
+        if (newDeviceModeValue == DEVICE_MODE_COUNTDOWN && newCountdownToDateUnixValue != "" && countdownToDateUnix != newCountdownToDateUnixValue) {
+          countdownToDateUnix = newCountdownToDateUnixValue;
+
+          writeFile(LittleFS, countdownPath, countdownToDateUnix.c_str());
+          SerialPrintln("Countdown Date Time Unix Updated: " + countdownToDateUnix);
+        }
+
+        //Only if countup date has changed - same tab-gating reasoning as Countdown above.
+        if (newDeviceModeValue == DEVICE_MODE_COUNTUP && newCountupSinceDateUnixValue != "" && countupSinceDateUnix != newCountupSinceDateUnixValue) {
+          countupSinceDateUnix = newCountupSinceDateUnixValue;
+
+          writeFile(LittleFS, countupPath, countupSinceDateUnix.c_str());
+          SerialPrintln("Countup Since Date Unix Updated: " + countupSinceDateUnix);
+        }
+
+        //Only if the clock/date format has changed
+        if (newClockFormatValue != "" && clockFormat != newClockFormatValue) {
+          clockFormat = newClockFormatValue;
+
+          writeFile(LittleFS, clockFormatPath, clockFormat.c_str());
+          SerialPrintln("Clock Format Updated: " + clockFormat);
+        }
+        if (newDateFormatValue != "" && dateFormat != newDateFormatValue) {
+          dateFormat = newDateFormatValue;
+
+          writeFile(LittleFS, dateFormatPath, dateFormat.c_str());
+          SerialPrintln("Date Format Updated: " + dateFormat);
+        }
+        if (hasNewCountdownPrefixValue && countdownPrefix != newCountdownPrefixValue) {
+          countdownPrefix = newCountdownPrefixValue;
+
+          writeFile(LittleFS, countdownPrefixPath, countdownPrefix.c_str());
+          SerialPrintln("Countdown Prefix Updated: " + countdownPrefix);
+        }
+        if (hasNewCountdownSuffixValue && countdownSuffix != newCountdownSuffixValue) {
+          countdownSuffix = newCountdownSuffixValue;
+
+          writeFile(LittleFS, countdownSuffixPath, countdownSuffix.c_str());
+          SerialPrintln("Countdown Suffix Updated: " + countdownSuffix);
+        }
+        if (hasNewCountupPrefixValue && countupPrefix != newCountupPrefixValue) {
+          countupPrefix = newCountupPrefixValue;
+
+          writeFile(LittleFS, countupPrefixPath, countupPrefix.c_str());
+          SerialPrintln("Countup Prefix Updated: " + countupPrefix);
+        }
+        if (hasNewCountupSuffixValue && countupSuffix != newCountupSuffixValue) {
+          countupSuffix = newCountupSuffixValue;
+
+          writeFile(LittleFS, countupSuffixPath, countupSuffix.c_str());
+          SerialPrintln("Countup Suffix Updated: " + countupSuffix);
+        }
+
+        //Rotation items are always submitted as the complete list (see index.html) - a full
+        //replace, not an incremental add.
+        if (hasNewRotationItems) {
+          replaceRotationItemsFromJson(newRotationItemsJson);
+          SerialPrintln("Rotation Items Updated, count: " + String(rotationItemCount));
+        }
+
+        //If its a new scheduled message, add it to the backlog and proceed, don't want to change device mode
+        //Else, we do want to change the device mode and clear out the input text
+        if (newMessageScheduleEnabledValue) {
+          addAndPersistScheduledMessage(newInputTextValue, newMessageScheduleDateTimeUnixValue, newMessageScheduleShowIndefinitely);
+          SerialPrintln("New Scheduled Message added");
+        }
+        else {
+          //Only if device mode has changed
+          if (newDeviceModeValue != "" && deviceMode != newDeviceModeValue) {
+            deviceMode = newDeviceModeValue;
+
+            //Always (re-)start a sequence from the beginning when switching into Rotation mode.
+            if (deviceMode == DEVICE_MODE_ROTATION) {
+              rotationCurrentIndex = 0;
+              rotationItemStartedAtSeconds = 0;
+            }
+
+            writeFile(LittleFS, deviceModePath, deviceMode.c_str());
+            SerialPrintln("Device Mode Set: " + deviceMode);
+          }
+
+          //Only if we are showing text
+          if (hasNewInputTextValue && deviceMode == DEVICE_MODE_TEXT) {
+            inputText = newInputTextValue;
+          }
+        }
+
+        request->send(200, "text/plain", "OK");
+      }
     });
 
     //Own small handler, not sharing a stack frame with /api/settings - only fetched when the
@@ -802,16 +1135,19 @@ void setup() {
 
     // On-device crash log (see ServiceCrashLogFunctions.ino) - survives even without a live
     // serial connection at the moment of a crash. One JSON object per line, oldest first.
-    webServer.on("/api/crash-log", HTTP_GET, [](AsyncWebServerRequest * request) {
-      if (!LittleFS.exists(CRASH_LOG_PATH)) {
-        request->send(200, "application/jsonl", "");
+    // GET+DELETE merged into one registration (heap-saving pattern established for /api/wifi,
+    // see BUGFIX_LOG #120). DELETE (not GET) clears it, to avoid a CSRF-via-GET state change.
+    webServer.on("/api/crash-log", HTTP_GET | HTTP_DELETE, [](AsyncWebServerRequest * request) {
+      if (request->method() == HTTP_GET) {
+        if (!LittleFS.exists(CRASH_LOG_PATH)) {
+          request->send(200, "application/jsonl", "");
+          return;
+        }
+        request->send(LittleFS, CRASH_LOG_PATH, "application/jsonl");
         return;
       }
-      request->send(LittleFS, CRASH_LOG_PATH, "application/jsonl");
-    });
 
-    // Clears the persisted crash log. Not GET, to avoid a CSRF-via-GET state change.
-    webServer.on("/api/crash-log", HTTP_DELETE, [](AsyncWebServerRequest * request) {
+      // request->method() == HTTP_DELETE
       if (LittleFS.exists(CRASH_LOG_PATH)) {
         LittleFS.remove(CRASH_LOG_PATH);
       }
@@ -1304,333 +1640,6 @@ void setup() {
       }
     });
 
-    webServer.on("/api/settings", HTTP_POST, [](AsyncWebServerRequest * request) {
-      SerialPrintln("DEBUG: Request Post of Form Received");    
-
-      bool submissionError = false;
-      
-      //Separate declarations - `bool a, b = false;` only initializes b, not a.
-      bool newMessageScheduleEnabledValue = false;
-      bool newMessageScheduleShowIndefinitely = false;
-      long newMessageScheduleDateTimeUnixValue = -1;
-      String newAlignmentValue, newDeviceModeValue, newFlapSpeedValue, newInputTextValue, newCountdownToDateUnixValue = "";
-      bool hasNewInputTextValue = false;
-      String newClockFormatValue = "";
-      String newDateFormatValue = "";
-      bool hasNewRotationItems = false;
-      String newRotationItemsJson = "";
-      //Distinct hasNew*/empty-allowed pattern (unlike clockFormat/dateFormat above) - "" is a
-      //meaningful, deliberate value here (show the bare day count), not "field not submitted".
-      bool hasNewCountdownPrefixValue = false;
-      String newCountdownPrefixValue = "";
-      bool hasNewCountdownSuffixValue = false;
-      String newCountdownSuffixValue = "";
-      String newCountupSinceDateUnixValue = "";
-      bool hasNewCountupPrefixValue = false;
-      String newCountupPrefixValue = "";
-      bool hasNewCountupSuffixValue = false;
-      String newCountupSuffixValue = "";
-
-      int params = request->params();
-      for (int paramIndex = 0; paramIndex < params; paramIndex++) {
-        AsyncWebParameter* p = request->getParam(paramIndex);
-        if (p->isPost()) {
-          //HTTP POST alignment value
-          if (p->name() == PARAM_ALIGNMENT) {
-            String receivedValue = p->value();
-            if (receivedValue == ALIGNMENT_MODE_LEFT || receivedValue == ALIGNMENT_MODE_CENTER || receivedValue == ALIGNMENT_MODE_RIGHT) {
-              newAlignmentValue = receivedValue;
-            }
-            else {
-              SerialPrintln("Alignment provided was not valid. Value: " + receivedValue); 
-              submissionError = true;
-            }
-          }
-
-          //HTTP POST device mode value
-          if (p->name() == PARAM_DEVICEMODE) {
-            String receivedValue = p->value();
-            if (receivedValue == DEVICE_MODE_TEXT || receivedValue == DEVICE_MODE_CLOCK || receivedValue == DEVICE_MODE_DATE || receivedValue == DEVICE_MODE_COUNTDOWN || receivedValue == DEVICE_MODE_COUNTUP || receivedValue == DEVICE_MODE_ROTATION) {
-              newDeviceModeValue = receivedValue;
-            }
-            else {
-              SerialPrintln("Device Mode provided was not valid. Invalid Value: " + receivedValue); 
-              submissionError = true;
-            }
-          }
-
-          //HTTP POST Flap Speed Slider value
-          if (p->name() == PARAM_FLAP_SPEED) {
-            //Client-side min/max isn't enough - convertSpeed() extrapolates out-of-range values,
-            //and a garbage speed reaching the unit is a real motor safety concern.
-            String rawFlapSpeed = p->value();
-            if (!isNumber(rawFlapSpeed) || rawFlapSpeed.toInt() < 1 || rawFlapSpeed.toInt() > 100) {
-              SerialPrintln("flapSpeed provided was invalid (must be a number 1-100): " + rawFlapSpeed);
-              submissionError = true;
-            } else {
-              newFlapSpeedValue = rawFlapSpeed.c_str();
-            }
-          }
-
-          //HTTP POST inputText value
-          if (p->name() == PARAM_INPUT_TEXT) {
-            //Enforce a max length server-side too - an unbounded String is needless heap pressure.
-            if (p->value().length() > 500) {
-              SerialPrintln("inputText provided was too long (" + String(p->value().length()) + " chars, max 500)");
-              submissionError = true;
-            } else {
-              newInputTextValue = p->value().c_str();
-              hasNewInputTextValue = true;
-            }
-          }
-
-          //HTTP POST Schedule Enabled
-          if (p->name() == PARAM_SCHEDULE_ENABLED) {
-            String newMessageScheduleEnabledString = p->value().c_str();
-            newMessageScheduleEnabledValue = newMessageScheduleEnabledString == "on" ?
-              true : 
-              false;
-          }
-          
-          //HTTP POST Schedule Show Indefinitely
-          if (p->name() == PARAM_SCHEDULE_SHOW_INDEFINITELY) {
-            String newMessageScheduleShowIndefinitelyString = p->value().c_str();
-            newMessageScheduleShowIndefinitely = newMessageScheduleShowIndefinitelyString == "on" ?
-              true : 
-              false;
-          }
-
-          //HTTP POST Schedule Seconds
-          if (p->name() == PARAM_SCHEDULE_DATE_TIME) {
-            String receivedValue = p->value().c_str();
-            if (isNumber(receivedValue)) {
-              newMessageScheduleDateTimeUnixValue = atol(receivedValue.c_str());
-            }
-            else {
-              SerialPrintln("Schedule date time provided was not valid. Invalid Value: " + receivedValue); 
-              submissionError = true;
-            }
-          }
-
-          //HTTP POST Countdown Seconds
-          if (p->name() == PARAM_COUNTDOWN_DATE) {
-            String receivedValue = p->value().c_str();
-            if (isNumber(receivedValue)) {
-              newCountdownToDateUnixValue = receivedValue;
-            }
-            else {
-              SerialPrintln("Countdown date provided was not valid. Invalid Value: " + receivedValue);
-              submissionError = true;
-            }
-          }
-
-          //HTTP POST Countup Seconds (the date to count days elapsed since)
-          if (p->name() == PARAM_COUNTUP_DATE) {
-            String receivedValue = p->value().c_str();
-            if (isNumber(receivedValue)) {
-              newCountupSinceDateUnixValue = receivedValue;
-            }
-            else {
-              SerialPrintln("Countup date provided was not valid. Invalid Value: " + receivedValue);
-              submissionError = true;
-            }
-          }
-
-          //Clock/date format, e.g. "HH:mm:ss" - see convertUserDateFormatToEzTime().
-          if (p->name() == PARAM_CLOCK_FORMAT) {
-            if (p->value().length() > 40) {
-              SerialPrintln("clockFormat provided was too long (max 40 chars)");
-              submissionError = true;
-            } else {
-              newClockFormatValue = p->value();
-            }
-          }
-          if (p->name() == PARAM_DATE_FORMAT) {
-            if (p->value().length() > 40) {
-              SerialPrintln("dateFormat provided was too long (max 40 chars)");
-              submissionError = true;
-            } else {
-              newDateFormatValue = p->value();
-            }
-          }
-
-          //HTTP POST Countdown prefix/suffix - "" is a valid, deliberate value (show the bare day
-          //count), so tracked via hasNew*/empty-allowed rather than the newX != "" pattern above.
-          if (p->name() == PARAM_COUNTDOWN_PREFIX) {
-            if (p->value().length() > 40) {
-              SerialPrintln("countdownPrefix provided was too long (max 40 chars)");
-              submissionError = true;
-            } else {
-              newCountdownPrefixValue = p->value();
-              hasNewCountdownPrefixValue = true;
-            }
-          }
-          if (p->name() == PARAM_COUNTDOWN_SUFFIX) {
-            if (p->value().length() > 40) {
-              SerialPrintln("countdownSuffix provided was too long (max 40 chars)");
-              submissionError = true;
-            } else {
-              newCountdownSuffixValue = p->value();
-              hasNewCountdownSuffixValue = true;
-            }
-          }
-
-          //HTTP POST Countup prefix/suffix - same "" is deliberate reasoning as Countdown above.
-          if (p->name() == PARAM_COUNTUP_PREFIX) {
-            if (p->value().length() > 40) {
-              SerialPrintln("countupPrefix provided was too long (max 40 chars)");
-              submissionError = true;
-            } else {
-              newCountupPrefixValue = p->value();
-              hasNewCountupPrefixValue = true;
-            }
-          }
-          if (p->name() == PARAM_COUNTUP_SUFFIX) {
-            if (p->value().length() > 40) {
-              SerialPrintln("countupSuffix provided was too long (max 40 chars)");
-              submissionError = true;
-            } else {
-              newCountupSuffixValue = p->value();
-              hasNewCountupSuffixValue = true;
-            }
-          }
-
-          //HTTP POST Rotation Items (JSON array, the client always submits the whole list) -
-          //bounded well above any realistic sequence, still a needless-heap-pressure safeguard.
-          if (p->name() == PARAM_ROTATION_ITEMS) {
-            if (p->value().length() > 8000) {
-              SerialPrintln("rotationItems provided was too long (max 8000 chars)");
-              submissionError = true;
-            } else {
-              newRotationItemsJson = p->value();
-              hasNewRotationItems = true;
-            }
-          }
-        }
-      }
-
-      //If there was an error, report back to check what has been input
-      if (submissionError) {
-        SerialPrintln("Finished Processing Request with Error");
-        request->send(400, "text/plain", "Invalid submission - check the values you entered (e.g. schedule/countdown dates must be in the future).");
-      }
-      else {
-        SerialPrintln("Finished Processing Request Successfully");
-
-        lastReceivedMessageDateTime = timezone.dateTime("d M y H:i:s");
-
-        //Only if a new alignment value
-        if (newAlignmentValue != "" && alignment != newAlignmentValue) {
-          alignment = newAlignmentValue;
-          alignmentUpdated = true;
-
-          writeFile(LittleFS, alignmentPath, alignment.c_str());
-          SerialPrintln("Alignment Updated: " + alignment);
-        }
-
-        //Only if a new flap speed value
-        if (newFlapSpeedValue != "" && flapSpeed != newFlapSpeedValue) {
-          flapSpeed = newFlapSpeedValue;
-
-          writeFile(LittleFS, flapSpeedPath, flapSpeed.c_str());
-          SerialPrintln("Flap Speed Updated: " + flapSpeed);
-        }
-
-        //Only if countdown date has changed - gated to the countdown tab's own submission (its
-        //hidden field is only ever recomputed by that tab's onsubmit case; submitting from a
-        //different tab would otherwise resubmit that field's stale/default "0" and wipe the
-        //stored date, since the field is a form-wide value regardless of which tab is visible).
-        if (newDeviceModeValue == DEVICE_MODE_COUNTDOWN && newCountdownToDateUnixValue != "" && countdownToDateUnix != newCountdownToDateUnixValue) {
-          countdownToDateUnix = newCountdownToDateUnixValue;
-
-          writeFile(LittleFS, countdownPath, countdownToDateUnix.c_str());
-          SerialPrintln("Countdown Date Time Unix Updated: " + countdownToDateUnix);
-        }
-
-        //Only if countup date has changed - same tab-gating reasoning as Countdown above.
-        if (newDeviceModeValue == DEVICE_MODE_COUNTUP && newCountupSinceDateUnixValue != "" && countupSinceDateUnix != newCountupSinceDateUnixValue) {
-          countupSinceDateUnix = newCountupSinceDateUnixValue;
-
-          writeFile(LittleFS, countupPath, countupSinceDateUnix.c_str());
-          SerialPrintln("Countup Since Date Unix Updated: " + countupSinceDateUnix);
-        }
-
-        //Only if the clock/date format has changed
-        if (newClockFormatValue != "" && clockFormat != newClockFormatValue) {
-          clockFormat = newClockFormatValue;
-
-          writeFile(LittleFS, clockFormatPath, clockFormat.c_str());
-          SerialPrintln("Clock Format Updated: " + clockFormat);
-        }
-        if (newDateFormatValue != "" && dateFormat != newDateFormatValue) {
-          dateFormat = newDateFormatValue;
-
-          writeFile(LittleFS, dateFormatPath, dateFormat.c_str());
-          SerialPrintln("Date Format Updated: " + dateFormat);
-        }
-        if (hasNewCountdownPrefixValue && countdownPrefix != newCountdownPrefixValue) {
-          countdownPrefix = newCountdownPrefixValue;
-
-          writeFile(LittleFS, countdownPrefixPath, countdownPrefix.c_str());
-          SerialPrintln("Countdown Prefix Updated: " + countdownPrefix);
-        }
-        if (hasNewCountdownSuffixValue && countdownSuffix != newCountdownSuffixValue) {
-          countdownSuffix = newCountdownSuffixValue;
-
-          writeFile(LittleFS, countdownSuffixPath, countdownSuffix.c_str());
-          SerialPrintln("Countdown Suffix Updated: " + countdownSuffix);
-        }
-        if (hasNewCountupPrefixValue && countupPrefix != newCountupPrefixValue) {
-          countupPrefix = newCountupPrefixValue;
-
-          writeFile(LittleFS, countupPrefixPath, countupPrefix.c_str());
-          SerialPrintln("Countup Prefix Updated: " + countupPrefix);
-        }
-        if (hasNewCountupSuffixValue && countupSuffix != newCountupSuffixValue) {
-          countupSuffix = newCountupSuffixValue;
-
-          writeFile(LittleFS, countupSuffixPath, countupSuffix.c_str());
-          SerialPrintln("Countup Suffix Updated: " + countupSuffix);
-        }
-
-        //Rotation items are always submitted as the complete list (see index.html) - a full
-        //replace, not an incremental add.
-        if (hasNewRotationItems) {
-          replaceRotationItemsFromJson(newRotationItemsJson);
-          SerialPrintln("Rotation Items Updated, count: " + String(rotationItemCount));
-        }
-
-        //If its a new scheduled message, add it to the backlog and proceed, don't want to change device mode
-        //Else, we do want to change the device mode and clear out the input text
-        if (newMessageScheduleEnabledValue) {
-          addAndPersistScheduledMessage(newInputTextValue, newMessageScheduleDateTimeUnixValue, newMessageScheduleShowIndefinitely);
-          SerialPrintln("New Scheduled Message added");
-        }
-        else {
-          //Only if device mode has changed
-          if (newDeviceModeValue != "" && deviceMode != newDeviceModeValue) {
-            deviceMode = newDeviceModeValue;
-
-            //Always (re-)start a sequence from the beginning when switching into Rotation mode.
-            if (deviceMode == DEVICE_MODE_ROTATION) {
-              rotationCurrentIndex = 0;
-              rotationItemStartedAtSeconds = 0;
-            }
-
-            writeFile(LittleFS, deviceModePath, deviceMode.c_str());
-            SerialPrintln("Device Mode Set: " + deviceMode);
-          }
-
-          //Only if we are showing text
-          if (hasNewInputTextValue && deviceMode == DEVICE_MODE_TEXT) {
-            inputText = newInputTextValue;
-          }
-        }
-
-        request->send(200, "text/plain", "OK");
-      }
-    });
-
     //Lightweight text-push endpoint for automations (webhooks, Home Assistant, shortcuts, etc.) -
     //just a message and an optional hold time, instead of the full /api/settings form. Same
     //unauthenticated design as /api/settings (this device has no separate login system).
@@ -1926,16 +1935,20 @@ void setup() {
 #endif
 
     //Freely readable without auth (this device has no separate login) - changing it still
-    //requires the current password.
-    webServer.on("/api/ota-password", HTTP_GET, [](AsyncWebServerRequest * request) {
-      JsonDocument doc;
-      doc["otaPassword"] = otaPassword;
-      AsyncResponseStream *response = request->beginResponseStream("application/json");
-      serializeJson(doc, *response);
-      request->send(response);
-    });
+    //requires the current password. GET+POST merged into one registration (heap-saving pattern
+    //established for /api/wifi - also sidesteps the unresolved separate-GET/POST routing quirk
+    //found there, see BUGFIX_LOG #120).
+    webServer.on("/api/ota-password", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (request->method() == HTTP_GET) {
+        JsonDocument doc;
+        doc["otaPassword"] = otaPassword;
+        AsyncResponseStream *response = request->beginResponseStream("application/json");
+        serializeJson(doc, *response);
+        request->send(response);
+        return;
+      }
 
-    webServer.on("/api/ota-password", HTTP_POST, [](AsyncWebServerRequest * request) {
+      // request->method() == HTTP_POST
       if (!request->hasParam("currentPassword", true) || !request->hasParam("newPassword", true)) {
         request->send(400, "text/plain", "'currentPassword' and 'newPassword' are required");
         return;
@@ -1960,15 +1973,17 @@ void setup() {
       request->send(200, "text/plain", "OTA password changed");
     });
 
-    webServer.on("/api/timezone", HTTP_GET, [](AsyncWebServerRequest * request) {
-      JsonDocument doc;
-      doc["timezone"] = timezoneSetting;
-      AsyncResponseStream *response = request->beginResponseStream("application/json");
-      serializeJson(doc, *response);
-      request->send(response);
-    });
+    webServer.on("/api/timezone", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (request->method() == HTTP_GET) {
+        JsonDocument doc;
+        doc["timezone"] = timezoneSetting;
+        AsyncResponseStream *response = request->beginResponseStream("application/json");
+        serializeJson(doc, *response);
+        request->send(response);
+        return;
+      }
 
-    webServer.on("/api/timezone", HTTP_POST, [](AsyncWebServerRequest * request) {
+      // request->method() == HTTP_POST
       if (!request->hasParam("timezone", true)) {
         request->send(400, "text/plain", "'timezone' is required");
         return;
