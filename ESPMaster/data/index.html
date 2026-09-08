@@ -2697,7 +2697,7 @@
 			if (!confirm("Are you sure you want to Reset Units?")) {
 				return;
 			}
-			postActionForBanner("/api/units/reset", "Units are resetting/recalibrating now - this only takes a few seconds.");
+			postActionForBanner("/api/units?action=reset", "Units are resetting/recalibrating now - this only takes a few seconds.");
 		}
 
 		//Shared helper for the three simple fire-and-confirm admin actions above - POSTs with no body,
@@ -2968,7 +2968,7 @@
 				loadUnits();
 			};
 
-			xhrRequest.open("POST", "/api/units/rescan", true);
+			xhrRequest.open("POST", "/api/units?action=rescan", true);
 			xhrRequest.send();
 		}
 
@@ -3176,7 +3176,7 @@
 				showAdminBannerMessage("Network error while setting offset.");
 			};
 
-			xhrRequest.open("POST", "/api/units/offset", true);
+			xhrRequest.open("POST", "/api/units?action=offset", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 			xhrRequest.send("id=" + encodeURIComponent(unitIndex) + "&offset=" + encodeURIComponent(offsetValue));
 		}

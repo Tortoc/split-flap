@@ -855,56 +855,73 @@ void setup() {
     // Admin: re-run the I2C scan to pick up units that were connected/fixed after boot,
     // without needing a full reboot. Updates the global unitsAmount used everywhere else.
     //Deferred to loop().
-    webServer.on("/api/units/rescan", HTTP_POST, [](AsyncWebServerRequest * request) {
-      SerialPrintln("DEBUG: Admin rescan-units request received");
-      if (pendingRescanRequest != nullptr) {
-        request->send(503, "text/plain", "Another rescan is already in progress, try again shortly");
-        return;
-      }
-      pendingRescanRequestDisconnected = false;
-      pendingRescanRequest = request;
-      request->onDisconnect([]() {
-        pendingRescanRequest = nullptr;
-        pendingRescanRequestDisconnected = true;
-      });
-    });
+    //Consolidates the three unit write-actions (former /api/units/rescan, /api/units/offset,
+    ///api/units/reset) into one registered route, dispatched by ?action= - same reasoning as
+    //GET /api/diag: each registration is a small permanent heap cost this device can't spare.
+    webServer.on("/api/units", HTTP_POST, [](AsyncWebServerRequest * request) {
+      String action = request->hasParam("action") ? request->getParam("action")->value() : "";
 
-    // Admin: set a new calibration offset on a single unit, unit recalibrates immediately
-    webServer.on("/api/units/offset", HTTP_POST, [](AsyncWebServerRequest * request) {
-      if (!request->hasParam(PARAM_ID, true) || !request->hasParam(PARAM_UNIT_OFFSET, true)) {
-        SerialPrintln("Admin unit-offset request missing parameters");
-        request->send(400, "text/plain", "Both 'id' and 'offset' are required");
-        return;
-      }
-
-      String idValue = request->getParam(PARAM_ID, true)->value();
-      String offsetValue = request->getParam(PARAM_UNIT_OFFSET, true)->value();
-
-      if (!isNumber(idValue) || !isNumber(offsetValue)) {
-        SerialPrintln("Admin unit-offset request had non-numeric values");
-        request->send(400, "text/plain", "'id' and 'offset' must be numbers");
+      if (action == "rescan") {
+        SerialPrintln("DEBUG: Admin rescan-units request received");
+        if (pendingRescanRequest != nullptr) {
+          request->send(503, "text/plain", "Another rescan is already in progress, try again shortly");
+          return;
+        }
+        pendingRescanRequestDisconnected = false;
+        pendingRescanRequest = request;
+        request->onDisconnect([]() {
+          pendingRescanRequest = nullptr;
+          pendingRescanRequestDisconnected = true;
+        });
         return;
       }
 
-      int unitId = idValue.toInt();
-      long offset = atol(offsetValue.c_str());
+      if (action == "offset") {
+        if (!request->hasParam(PARAM_ID, true) || !request->hasParam(PARAM_UNIT_OFFSET, true)) {
+          SerialPrintln("Admin unit-offset request missing parameters");
+          request->send(400, "text/plain", "Both 'id' and 'offset' are required");
+          return;
+        }
 
-      if (unitId < 0 || unitId >= unitsAmount) {
-        SerialPrintln("Admin unit-offset request had out of range unit id: " + idValue);
-        request->send(400, "text/plain", "Unit id out of range. Valid range: 0 to " + String(unitsAmount - 1));
+        String idValue = request->getParam(PARAM_ID, true)->value();
+        String offsetValue = request->getParam(PARAM_UNIT_OFFSET, true)->value();
+
+        if (!isNumber(idValue) || !isNumber(offsetValue)) {
+          SerialPrintln("Admin unit-offset request had non-numeric values");
+          request->send(400, "text/plain", "'id' and 'offset' must be numbers");
+          return;
+        }
+
+        int unitId = idValue.toInt();
+        long offset = atol(offsetValue.c_str());
+
+        if (unitId < 0 || unitId >= unitsAmount) {
+          SerialPrintln("Admin unit-offset request had out of range unit id: " + idValue);
+          request->send(400, "text/plain", "Unit id out of range. Valid range: 0 to " + String(unitsAmount - 1));
+          return;
+        }
+
+        if (offset < 0 || offset >= UNIT_STEPS) {
+          SerialPrintln("Admin unit-offset request had out of range offset: " + offsetValue);
+          request->send(400, "text/plain", "Offset out of range. Valid range: 0 to " + String(UNIT_STEPS - 1));
+          return;
+        }
+
+        SerialPrintln("Setting Unit " + String(unitId) + " offset to " + String(offset));
+        writeOffsetToUnit(unitId, (uint16_t)offset);
+
+        request->send(202, "text/plain", "Offset sent. Unit is recalibrating now, this can take a few seconds.");
         return;
       }
 
-      if (offset < 0 || offset >= UNIT_STEPS) {
-        SerialPrintln("Admin unit-offset request had out of range offset: " + offsetValue);
-        request->send(400, "text/plain", "Offset out of range. Valid range: 0 to " + String(UNIT_STEPS - 1));
+      if (action == "reset") {
+        SerialPrintln("Request to Reset Units Received");
+        isPendingUnitsReset = true; //picked up in loop()
+        request->send(200, "text/plain", "Units are resetting/recalibrating now.");
         return;
       }
 
-      SerialPrintln("Setting Unit " + String(unitId) + " offset to " + String(offset));
-      writeOffsetToUnit(unitId, (uint16_t)offset);
-
-      request->send(202, "text/plain", "Offset sent. Unit is recalibrating now, this can take a few seconds.");
+      request->send(400, "text/plain", "Unknown 'action' - use rescan, offset, or reset");
     });
 
     //Replaces a single static web UI file in place, without a full littlefs.bin reflash (which
@@ -1256,15 +1273,6 @@ void setup() {
       
       request->send(200, "text/html", html);
       isPendingReboot = true;
-    });
-    
-    webServer.on("/api/units/reset", HTTP_POST, [](AsyncWebServerRequest * request) {
-      SerialPrintln("Request to Reset Units Received");
-
-      //This will be picked up in the loop
-      isPendingUnitsReset = true;
-
-      request->send(200, "text/plain", "Units are resetting/recalibrating now.");
     });
 
     webServer.on("/api/scheduled-messages", HTTP_DELETE, [](AsyncWebServerRequest * request) {

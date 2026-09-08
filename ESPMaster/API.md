@@ -54,9 +54,7 @@ other endpoint below has no auth check at all, including `GET /api/ota-password`
 | DELETE | [`/api/crash-log`](#delete-apicrash-log) | Clear the crash log |
 | GET | [`/api/i2c-scan`](#get-apii2c-scan) | Raw I2C bus scan (legacy diagnostic) |
 | GET | [`/api/units`](#get-apiunits) | Live status + offset for every unit |
-| POST | [`/api/units/rescan`](#post-apiunitsrescan) | Re-run the I2C unit scan |
-| POST | [`/api/units/offset`](#post-apiunitsoffset) | Set a unit's calibration offset |
-| POST | [`/api/units/reset`](#post-apiunitsreset) | Recalibrate every unit |
+| POST | [`/api/units?action=`](#post-apiunits) | Unit actions: `rescan`\|`offset`\|`reset` |
 | POST | [`/api/web-file`](#post-apiweb-file) | Replace `index.html` in place |
 | POST | [`/api/units/firmware`](#post-apiunitsfirmware) | Upload a Unit firmware image |
 | POST | [`/api/units/firmware-push`](#post-apiunitsfirmware-push) | Push uploaded firmware to a unit over I2C |
@@ -323,7 +321,7 @@ AsyncWebServer callback itself), so it can take a moment.
 }
 ```
 `expectedCount` is the currently-known `unitsAmount` from the last full scan (see
-[`POST /api/units/rescan`](#post-apiunitsrescan)) - a mismatch against `foundCount` suggests a
+[`POST /api/units?action=rescan`](#post-apiunits)) - a mismatch against `foundCount` suggests a
 wiring/address gap. Returns `503 text/plain` if another scan is already in progress.
 
 ```bash
@@ -375,28 +373,20 @@ curl "http://192.168.1.50/api/units?detail=1"
 
 ---
 
-### `POST /api/units/rescan`
+### `POST /api/units`
 
-Re-runs the full I2C scan to pick up units connected or fixed after boot, without a reboot.
-Updates the device-wide `unitsAmount` used everywhere else. Deferred to `loop()`.
+Three unit write-actions sharing one registered route, picked via `?action=` (same
+route-registration-costs-heap reasoning as `GET /api/diag`).
 
-**Response** `200 application/json`:
-```json
-{ "unitsAmount": 3 }
-```
-Returns `503 text/plain` if another rescan is already in progress.
+**Query param** `action` (required): `rescan` | `offset` | `reset`.
 
-```bash
-curl -X POST http://192.168.1.50/api/units/rescan
-```
+**`action=rescan`** - re-runs the full I2C scan to pick up units connected or fixed after boot,
+without a reboot. Updates the device-wide `unitsAmount` used everywhere else. Deferred to `loop()`.
+**Response** `200 application/json`: `{ "unitsAmount": 3 }`. `503 text/plain` if another rescan is
+already in progress.
 
----
-
-### `POST /api/units/offset`
-
-Sets a new calibration offset for a single unit; the unit recalibrates (a full rotation to
-re-home) immediately.
-
+**`action=offset`** - sets a new calibration offset for a single unit; the unit recalibrates (a
+full rotation to re-home) immediately.
 **Body params:**
 
 | Param | Type | Notes |
@@ -404,24 +394,19 @@ re-home) immediately.
 | `id` | integer | Unit index, `0` to `unitsAmount - 1` |
 | `offset` | integer | `0` to `UNIT_STEPS - 1` (2037 on this hardware - 28BYJ-48 stepper steps/revolution) |
 
-**Response:**
-- `202 text/plain`: `"Offset sent. Unit is recalibrating now, this can take a few seconds."`
-- `400 text/plain` if `id`/`offset` are missing, non-numeric, or out of range.
+**Response:** `202 text/plain`: `"Offset sent. Unit is recalibrating now, this can take a few
+seconds."`. `400 text/plain` if `id`/`offset` are missing, non-numeric, or out of range.
 
-```bash
-curl -X POST http://192.168.1.50/api/units/offset --data "id=0&offset=100"
-```
-
----
-
-### `POST /api/units/reset`
-
-Triggers a full recalibration of every known unit (picked up on the next `loop()` iteration).
-
+**`action=reset`** - triggers a full recalibration of every known unit (picked up on the next
+`loop()` iteration).
 **Response** `200 text/plain`: `"Units are resetting/recalibrating now."`
 
+`400 text/plain` if `action` is missing or not one of the three values above.
+
 ```bash
-curl -X POST http://192.168.1.50/api/units/reset
+curl -X POST "http://192.168.1.50/api/units?action=rescan"
+curl -X POST "http://192.168.1.50/api/units?action=offset" --data "id=0&offset=100"
+curl -X POST "http://192.168.1.50/api/units?action=reset"
 ```
 
 ---
