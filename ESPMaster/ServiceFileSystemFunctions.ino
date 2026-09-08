@@ -1,10 +1,10 @@
 //Initialize LittleFS
 void initialiseFileSystem() {
   if (!LittleFS.begin()) {
-    SerialPrintln("An error has occurred while mounting LittleFS");
+    SerialPrintln(F("An error has occurred while mounting LittleFS"));
   }
 
-  SerialPrintln("LittleFS mounted successfully");
+  SerialPrintln(F("LittleFS mounted successfully"));
 }
 
 //Load variables that are saved to the file system
@@ -32,7 +32,7 @@ void loadValuesFromFileSystem() {
 
   String scheduledMessagesJson = readFile(LittleFS, scheduledMessagesPath, "");
   if (scheduledMessagesJson != "") {
-    SerialPrintln("Loading Scheduled Messages");
+    SerialPrintln(F("Loading Scheduled Messages"));
     readScheduledMessagesFromJson(scheduledMessagesJson);
   }
 
@@ -40,7 +40,7 @@ void loadValuesFromFileSystem() {
   //and re-persists the file, which shouldn't happen on a plain boot load.
   String rotationItemsJson = readFile(LittleFS, rotationItemsPath, "[]");
   if (rotationItemsJson != "" && rotationItemsJson != "[]") {
-    SerialPrintln("Loading Rotation Items");
+    SerialPrintln(F("Loading Rotation Items"));
     JsonDocument rotationJsonDocument;
     DeserializationError rotationDeserialisationError = deserializeJson(rotationJsonDocument, rotationItemsJson);
     if (!rotationDeserialisationError && rotationJsonDocument.is<JsonArray>()) {
@@ -62,15 +62,15 @@ void loadValuesFromFileSystem() {
     }
   }
 
-  SerialPrintln("Loaded Settings:");
-  SerialPrintln("   Alignment: " + alignment);
-  SerialPrintln("   Flap Speed: " + flapSpeed);
-  SerialPrintln("   Device Mode: " + deviceMode);
-  SerialPrintln("   Countdown to Date UNIX: " + countdownToDateUnix);
-  SerialPrintln("   Countup since Date UNIX: " + countupSinceDateUnix);
-  SerialPrint("   Scheduled Message Count: ");
+  SerialPrintln(F("Loaded Settings:"));
+  SerialPrintln(F("   Alignment: ") + alignment);
+  SerialPrintln(F("   Flap Speed: ") + flapSpeed);
+  SerialPrintln(F("   Device Mode: ") + deviceMode);
+  SerialPrintln(F("   Countdown to Date UNIX: ") + countdownToDateUnix);
+  SerialPrintln(F("   Countup since Date UNIX: ") + countupSinceDateUnix);
+  SerialPrint(F("   Scheduled Message Count: "));
   SerialPrintln(scheduledMessages.size());
-  SerialPrint("   Rotation Item Count: ");
+  SerialPrint(F("   Rotation Item Count: "));
   SerialPrintln(rotationItemCount);
 }
 
@@ -80,10 +80,10 @@ String readFile(fs::FS &fs, const char * path, String defaultValue) {
 
   File file = fs.open(path, "r");
   if (!file || file.isDirectory()) {
-    SerialPrintln("- Failed to open file for reading");
+    SerialPrintln(F("- Failed to open file for reading"));
 
     if (defaultValue.length() > 0) {
-      SerialPrintln("- Writing a default value as one has been specified. Default: " + defaultValue);
+      SerialPrintln(F("- Writing a default value as one has been specified. Default: ") + defaultValue);
       writeFile(LittleFS, path, defaultValue.c_str());
       
       return defaultValue;
@@ -106,14 +106,14 @@ void writeFile(fs::FS &fs, const char * path, const char * message) {
 
   File file = fs.open(path, "w");
   if (!file) {
-    SerialPrintln("- Failed to open file for writing");
+    SerialPrintln(F("- Failed to open file for writing"));
     return;
   }
-  
+
   if (file.print(message)) {
-    SerialPrintln("- File written");
-  } 
+    SerialPrintln(F("- File written"));
+  }
   else {
-    SerialPrintln("- Write failed");
+    SerialPrintln(F("- Write failed"));
   }
 }

@@ -6,19 +6,19 @@ void addAndPersistScheduledMessage(String scheduledText, long scheduledDateTimeU
 
 //Replace/add a scheduled message
 void addScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool showIndefinitely) {
-  SerialPrintln("Processing New Scheduled Message");
-  SerialPrintln("-- Message: " + scheduledText);
-  SerialPrint("-- Unix: ");
+  SerialPrintln(F("Processing New Scheduled Message"));
+  SerialPrintln(F("-- Message: ") + scheduledText);
+  SerialPrint(F("-- Unix: "));
   SerialPrintln(scheduledDateTimeUnix);
-  SerialPrint("-- Show Indefinitely: ");
-  SerialPrintln(showIndefinitely ? "Yes" : "No");
+  SerialPrint(F("-- Show Indefinitely: "));
+  SerialPrintln(showIndefinitely ? F("Yes") : F("No"));
 
   //Find the existing scheduled message and update it if one exists
   for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
     ScheduledMessage scheduledMessage = scheduledMessages[scheduledMessageIndex];
 
     if (scheduledDateTimeUnix == scheduledMessage.ScheduledDateTimeUnix) {
-      SerialPrintln("Removing Existing Scheduled Message due to be shown, it will be replaced");
+      SerialPrintln(F("Removing Existing Scheduled Message due to be shown, it will be replaced"));
       scheduledMessages.remove(scheduledMessageIndex);
       break;
     }
@@ -26,11 +26,11 @@ void addScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool 
 
   //Add the new scheduled message with the new value
   if (scheduledDateTimeUnix > timezone.now()) {
-    SerialPrintln("Adding new Scheduled Message");
+    SerialPrintln(F("Adding new Scheduled Message"));
     scheduledMessages.add({scheduledText, scheduledDateTimeUnix, showIndefinitely});
   }
   else {
-    SerialPrintln("Not adding Scheduled Message as it is in the past");
+    SerialPrintln(F("Not adding Scheduled Message as it is in the past"));
   }
 }
 
@@ -41,7 +41,7 @@ bool removeScheduledMessage(long scheduledDateTimeUnix) {
     ScheduledMessage scheduledMessage = scheduledMessages[scheduledMessageIndex];
 
     if (scheduledDateTimeUnix == scheduledMessage.ScheduledDateTimeUnix) {
-      SerialPrintln("Deleting Scheduled Message due to be shown: " + scheduledMessage.Message);
+      SerialPrintln(F("Deleting Scheduled Message due to be shown: ") + scheduledMessage.Message);
       scheduledMessages.remove(scheduledMessageIndex);
       
       writeScheduledMessagesToFile();
@@ -67,9 +67,9 @@ void checkScheduledMessages() {
     ScheduledMessage scheduledMessage = scheduledMessages[scheduledMessageIndex];
 
     if (currentTimeUnix > scheduledMessage.ScheduledDateTimeUnix) {
-      SerialPrintln("Scheduled Message due to be shown: " + scheduledMessage.Message);
-      SerialPrint("Scheduled Message to be Shown Indefinitely: ");
-      SerialPrintln(scheduledMessage.ShowIndefinitely ? "Yes" : "No");
+      SerialPrintln(F("Scheduled Message due to be shown: ") + scheduledMessage.Message);
+      SerialPrint(F("Scheduled Message to be Shown Indefinitely: "));
+      SerialPrintln(scheduledMessage.ShowIndefinitely ? F("Yes") : F("No"));
 
       if (scheduledMessage.ShowIndefinitely) {
         deviceMode = DEVICE_MODE_TEXT;
@@ -108,17 +108,17 @@ void readScheduledMessagesFromJson(String scheduledMessagesJson) {
         
         //If there is a difference in scheduled messages, re-write the messages
         if (addedScheduledMessageCount != scheduledMessages.size()) {
-          SerialPrintln("Read message count and scheduled message count differ, writing updated messages");
+          SerialPrintln(F("Read message count and scheduled message count differ, writing updated messages"));
           writeScheduledMessagesToFile();
         }
-      } 
+      }
       else {
-        SerialPrintln("Invalid JSON Array found, scrapping and starting again");
+        SerialPrintln(F("Invalid JSON Array found, scrapping and starting again"));
         writeEmptyScheduledMessagesToFile();
       }
     }
     else {
-      SerialPrintln("Invalid JSON found, scrapping and starting again");
+      SerialPrintln(F("Invalid JSON found, scrapping and starting again"));
       writeEmptyScheduledMessagesToFile();
     }
   }
@@ -141,7 +141,7 @@ void writeScheduledMessagesToFile() {
     writeFile(LittleFS, scheduledMessagesPath, scheduledMessagesJson.c_str());
   }
   else {
-    SerialPrintln("No Scheduled Messages Left - Writing Empty to File");
+    SerialPrintln(F("No Scheduled Messages Left - Writing Empty to File"));
     writeEmptyScheduledMessagesToFile();
   }
 }

@@ -66,9 +66,9 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   }
 
   String messageDisplay = message == "" ? "<Blank>" : message;
-  SerialPrintln("Showing new Message");
-  SerialPrintln("New Message: " + messageDisplay);
-  SerialPrintln("Alignment Updated: " + String(alignmentUpdated ? "Yes" : "No"));
+  SerialPrintln(F("Showing new Message"));
+  SerialPrintln(F("New Message: ") + messageDisplay);
+  SerialPrintln(F("Alignment Updated: ") + String(alignmentUpdated ? F("Yes") : F("No")));
 
   displayJob.originalMessage = message;
   //parsedLines is a plain local here, used and discarded entirely within this function - safe.
@@ -77,7 +77,7 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   LList<String> parsedLines = processSentenceToLines(message);
   displayJob.lineCount = parsedLines.size();
   if (displayJob.lineCount > DisplayJob::MAX_DISPLAY_LINES) {
-    SerialPrintln("WARNING: message split into more lines than expected, truncating");
+    SerialPrintln(F("WARNING: message split into more lines than expected, truncating"));
     displayJob.lineCount = DisplayJob::MAX_DISPLAY_LINES;
   }
   for (int i = 0; i < displayJob.lineCount; i++) {
@@ -89,10 +89,10 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   displayJob.finalPauseMs = finalPauseMs;
   displayJob.alignmentOverride = alignmentOverride;
 
-  SerialPrintln(displayJob.isMultiLine ? "Showing a split down message" : ("Showing a simple message: " + message));
+  SerialPrintln(displayJob.isMultiLine ? String(F("Showing a split down message")) : (F("Showing a simple message: ") + message));
 
 #if UNIT_CALLS_DISABLE == true
-  SerialPrintln("Unit Calls are disabled for debugging. Will delay to simulate calls...");
+  SerialPrintln(F("Unit Calls are disabled for debugging. Will delay to simulate calls..."));
   displayJob.pauseUntil = millis() + 2000;
   displayJob.state = DISPLAY_JOB_DEBUG_PAUSE;
 #else
@@ -136,27 +136,27 @@ bool pollDisplayJobWaitAllUnitsReady() {
     unitDone = true; //0 = ready, -1 = sleeping - either way, nothing to wait for
   } else if (ok) {
     if (wantPhaseRead) {
-      SerialPrintln("Unit " + String(displayJob.waitUnitIndex) + " busy - phase " + String(phase) +
-        ", progress " + String(progress) + " (" + String((millis() - displayJob.waitUnitStart) / 1000) + "s waited)");
+      SerialPrintln(F("Unit ") + String(displayJob.waitUnitIndex) + F(" busy - phase ") + String(phase) +
+        F(", progress ") + String(progress) + F(" (") + String((millis() - displayJob.waitUnitStart) / 1000) + F("s waited)"));
       if (phase != displayJob.waitLastPhase || progress != displayJob.waitLastProgress) {
         displayJob.waitLastPhase = phase;
         displayJob.waitLastProgress = progress;
         displayJob.waitLastProgressAt = millis();
       }
     } else {
-      SerialPrintln("Unit " + String(displayJob.waitUnitIndex) + " busy (light check, " +
-        String((millis() - displayJob.waitUnitStart) / 1000) + "s waited)");
+      SerialPrintln(F("Unit ") + String(displayJob.waitUnitIndex) + F(" busy (light check, ") +
+        String((millis() - displayJob.waitUnitStart) / 1000) + F("s waited)"));
     }
   } else {
-    SerialPrintln("Unit " + String(displayJob.waitUnitIndex) + " - read failed while waiting, retrying");
+    SerialPrintln(F("Unit ") + String(displayJob.waitUnitIndex) + F(" - read failed while waiting, retrying"));
   }
 
   if (!unitDone && (millis() - displayJob.waitLastProgressAt > stuckTimeoutMs)) {
-    SerialPrintln("WARNING: Unit " + String(displayJob.waitUnitIndex) + " - no progress for " + String(stuckTimeoutMs / 1000) + "s, giving up");
+    SerialPrintln(F("WARNING: Unit ") + String(displayJob.waitUnitIndex) + F(" - no progress for ") + String(stuckTimeoutMs / 1000) + F("s, giving up"));
     forceUnitRecoveryReset(displayJob.waitUnitIndex);
     unitDone = true;
   } else if (!unitDone && (millis() - displayJob.waitUnitStart >= maxTotalWaitMs)) {
-    SerialPrintln("WARNING: Unit " + String(displayJob.waitUnitIndex) + " - hit max wait time (" + String(maxTotalWaitMs / 1000) + "s), giving up");
+    SerialPrintln(F("WARNING: Unit ") + String(displayJob.waitUnitIndex) + F(" - hit max wait time (") + String(maxTotalWaitMs / 1000) + F("s), giving up"));
     forceUnitRecoveryReset(displayJob.waitUnitIndex);
     unitDone = true;
   }
@@ -179,7 +179,7 @@ bool pollDisplayJobWaitAllUnitsReady() {
 void finishDisplayJob() {
   lastWrittenText = displayJob.originalMessage;
   alignmentUpdated = false;
-  SerialPrintln("Done showing message");
+  SerialPrintln(F("Done showing message"));
   displayJob.state = DISPLAY_JOB_IDLE;
 }
 
@@ -208,7 +208,7 @@ void updateDisplayJob() {
       //a single line always uses originalMessage verbatim, not processSentenceToLines()'s output.
       String line = displayJob.isMultiLine ? displayJob.lines[displayJob.currentLineIndex] : displayJob.originalMessage;
       if (displayJob.isMultiLine) {
-        SerialPrint("-- Message Line: ");
+        SerialPrint(F("-- Message Line: "));
         SerialPrintln(line);
       }
 
@@ -225,20 +225,20 @@ void updateDisplayJob() {
         aligned = centerString(aligned);
       }
 
-      SerialPrint("Showing Aligned Message: \"");
+      SerialPrint(F("Showing Aligned Message: \""));
       SerialPrint(aligned);
-      SerialPrintln("\"");
+      SerialPrintln(F("\""));
 
-      SerialPrintln("Unit calls are enabled. Will display message");
+      SerialPrintln(F("Unit calls are enabled. Will display message"));
       for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
         char currentLetter = aligned[unitIndex];
         int currentLetterPosition = translateLettertoInt(currentLetter);
 
-        SerialPrint("Unit Nr.: ");
+        SerialPrint(F("Unit Nr.: "));
         SerialPrint(unitIndex);
-        SerialPrint(" Letter: ");
+        SerialPrint(F(" Letter: "));
         SerialPrint(currentLetter);
-        SerialPrint(" Letter position: ");
+        SerialPrint(F(" Letter position: "));
         SerialPrintln(currentLetterPosition);
 
         if (currentLetterPosition != -1) {
@@ -304,7 +304,7 @@ void updateUnitsResetSequence() {
       //Only actually logs/transitions once the display is free - if busy, silently retries next
       //tick instead of spamming this line every loop() iteration.
       if (startDisplayJob(createRepeatingString('-'), convertSpeed(flapSpeed), 0, "")) {
-        SerialPrintln("Reseting Units now...");
+        SerialPrintln(F("Reseting Units now..."));
         unitsResetSequenceState = UNITS_RESET_SEQ_BLANK1;
       }
       return;
@@ -328,7 +328,7 @@ void updateUnitsResetSequence() {
       if (!isDisplayJobBusy()) {
         isPendingUnitsReset = false;
         unitsResetSequenceState = UNITS_RESET_SEQ_IDLE;
-        SerialPrintln("Done Units Reset!");
+        SerialPrintln(F("Done Units Reset!"));
       }
       return;
   }

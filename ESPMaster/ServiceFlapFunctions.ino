@@ -62,7 +62,7 @@ void writeToUnit(int address, int letter, int flapSpeed) {
 
   //Write values to send to slave in buffer
   for (unsigned int index = 0; index < sizeof sendArray / sizeof sendArray[0]; index++) {
-    SerialPrint("sendArray: ");
+    SerialPrint(F("sendArray: "));
     SerialPrintln(sendArray[index]);
 
     Wire.write(sendArray[index]);
@@ -77,9 +77,9 @@ void writeToUnit(int address, int letter, int flapSpeed) {
 void writeOffsetToUnit(int address, uint16_t offset) {
   int currentSpeed = convertSpeed(flapSpeed);
 
-  SerialPrint("Writing offset ");
+  SerialPrint(F("Writing offset "));
   SerialPrint(offset);
-  SerialPrint(" to unit ");
+  SerialPrint(F(" to unit "));
   SerialPrintln(address);
 
   //letter 0 = blank, matches the position the unit ends up at after recalibrating
@@ -100,9 +100,9 @@ bool readUnitInfo(int address, int &statusOut, int &offsetOut) {
   Wire.requestFrom(address, ANSWER_SIZE_LIGHT, 1);
 
   if (Wire.available() < ANSWER_SIZE_LIGHT) {
-    SerialPrint("ERROR: Unit ");
+    SerialPrint(F("ERROR: Unit "));
     SerialPrint(address);
-    SerialPrintln(" - No/incomplete response reading status+offset (light)");
+    SerialPrintln(F(" - No/incomplete response reading status+offset (light)"));
     recoverI2CBus();
     return false;
   }
@@ -121,9 +121,9 @@ bool readUnitInfo(int address, int &statusOut, int &offsetOut, int &phaseOut, in
   Wire.requestFrom(address, ANSWER_SIZE, 1);
 
   if (Wire.available() < ANSWER_SIZE) {
-    SerialPrint("ERROR: Unit ");
+    SerialPrint(F("ERROR: Unit "));
     SerialPrint(address);
-    SerialPrintln(" - No/incomplete response reading status+offset");
+    SerialPrintln(F(" - No/incomplete response reading status+offset"));
 
     // Try a bus recovery right at the point of failure (cheap) - gives the next read attempt a
     // real chance of succeeding instead of hitting the same stuck bus again.
@@ -153,21 +153,21 @@ bool isDisplayMoving() {
   for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
     displayState[unitIndex] = checkIfMoving(unitIndex);
     if (displayState[unitIndex] == 1) {
-      SerialPrint("Unit ");
+      SerialPrint(F("Unit "));
       SerialPrint(unitIndex);
-      SerialPrintln(" is busy (moving)");
+      SerialPrintln(F(" is busy (moving)"));
       return true;
-    } 
+    }
     //If unit is not available through i2c
     else if (displayState[unitIndex] == -1) {
-      SerialPrint("Unit ");
+      SerialPrint(F("Unit "));
       SerialPrint(unitIndex);
-      SerialPrintln(" is sleeping/not responding");
+      SerialPrintln(F(" is sleeping/not responding"));
       return true;
     }
   }
 
-  SerialPrintln("Display is standing still");
+  SerialPrintln(F("Display is standing still"));
   return false;
 }
 
@@ -180,35 +180,35 @@ int checkIfMoving(int address) {
     // Check I2C error
     Wire.beginTransmission(address);
     byte error = Wire.endTransmission();
-    SerialPrint("  I2C error code: ");
+    SerialPrint(F("  I2C error code: "));
     SerialPrintln(error);
 
     if (error == 2) {
-      SerialPrintln("  -> Address received NACK (device not found)");
+      SerialPrintln(F("  -> Address received NACK (device not found)"));
     } else if (error == 3) {
-      SerialPrintln("  -> Data received NACK");
+      SerialPrintln(F("  -> Data received NACK"));
     } else if (error == 4) {
-      SerialPrintln("  -> Unknown I2C error");
+      SerialPrintln(F("  -> Unknown I2C error"));
     } else if (error == 5) {
-      SerialPrintln("  -> Timeout");
+      SerialPrintln(F("  -> Timeout"));
     }
 
     return -1;
   }
 
-  SerialPrint("Unit ");
+  SerialPrint(F("Unit "));
   SerialPrint(address);
-  SerialPrint(" status: ");
+  SerialPrint(F(" status: "));
   SerialPrintln(active);
 
   if (active == -1) {
-    SerialPrint("WARNING: Unit ");
+    SerialPrint(F("WARNING: Unit "));
     SerialPrint(address);
-    SerialPrintln(" returned -1 (sleeping), attempting wake-up...");
+    SerialPrintln(F(" returned -1 (sleeping), attempting wake-up..."));
     Wire.beginTransmission(address);
     byte error = Wire.endTransmission();
     if (error != 0) {
-      SerialPrint("  Wake-up failed, I2C error: ");
+      SerialPrint(F("  Wake-up failed, I2C error: "));
       SerialPrintln(error);
     }
   }
