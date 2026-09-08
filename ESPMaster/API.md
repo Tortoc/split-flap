@@ -48,8 +48,7 @@ other endpoint below has no auth check at all, including `GET /api/ota-password`
 | GET | [`/api/settings`](#get-apisettings) | Current device settings |
 | POST | [`/api/settings`](#post-apisettings) | Update alignment/mode/text/speed/schedule/countdown |
 | POST | [`/api/text`](#post-apitext) | Lightweight text push (automations/webhooks) |
-| GET | [`/api/diag?type=`](#get-apidiag) | Diagnostics: `health`\|`heap`\|`tcp`\|`test` |
-| GET | [`/api/log`](#get-apilog) | Recent in-memory serial log |
+| GET | [`/api/diag?type=`](#get-apidiag) | Diagnostics: `health`\|`heap`\|`tcp`\|`test`\|`log` |
 | GET | [`/api/crash-log`](#get-apicrash-log) | Persisted on-device crash log |
 | DELETE | [`/api/crash-log`](#delete-apicrash-log) | Clear the crash log |
 | GET | [`/api/i2c-scan`](#get-apii2c-scan) | Raw I2C bus scan (legacy diagnostic) |
@@ -205,12 +204,13 @@ curl -X POST http://192.168.1.50/api/text --data "text=BRB&duration=10"
 
 ### `GET /api/diag`
 
-Four pure-diagnostic checks sharing one registered route, picked via `?type=` - each
+Five pure-diagnostic checks sharing one registered route, picked via `?type=` - each
 `webServer.on()` registration costs a small permanent heap allocation that's never freed, and this
-device has very little room to spare, so these were consolidated rather than left as four separate
-endpoints (formerly `/api/health`, `/api/heap`, `/api/tcp-status`, `/api/test`).
+device has very little room to spare, so these were consolidated rather than left as separate
+endpoints (formerly `/api/health`, `/api/heap`, `/api/tcp-status`, `/api/test`, and - folded in
+later - `/api/log`).
 
-**Query param** `type` (required): `health` | `heap` | `tcp` | `test`.
+**Query param** `type` (required): `health` | `heap` | `tcp` | `test` | `log`.
 
 **`type=health`** - trivial liveness check.
 **Response** `200 text/plain`: `Healthy`
@@ -237,21 +237,8 @@ list.
 **Response** `200 application/json`: `{ "status": "ok", "time": 123456 }` - `time` is `millis()`
 (milliseconds since boot), not a wall-clock timestamp.
 
-`400 text/plain` if `type` is missing or not one of the four values above.
-
-```bash
-curl "http://192.168.1.50/api/diag?type=health"
-curl "http://192.168.1.50/api/diag?type=heap"
-curl "http://192.168.1.50/api/diag?type=tcp"
-curl "http://192.168.1.50/api/diag?type=test"
-```
-
----
-
-### `GET /api/log`
-
-Last up to 50 entries from the in-memory serial log ring buffer.
-
+**`type=log`** (formerly the standalone `GET /api/log`) - last up to 50 entries from the in-memory
+serial log ring buffer.
 **Response** `200 application/json`:
 ```json
 {
@@ -262,14 +249,25 @@ Last up to 50 entries from the in-memory serial log ring buffer.
 }
 ```
 `count` is the *total* number of log lines ever recorded this boot (not just how many are
-returned); `timestamp` is milliseconds since boot.
+returned); `timestamp` is milliseconds since boot. Returns `503 text/plain` instead ("Too little
+free heap right now to safely build the log response - try again shortly") if free heap is below
+4000 bytes at request time, rather than risking an allocation failure.
 
-Returns `503 text/plain` instead ("Too little free heap right now to safely build the log
-response - try again shortly") if free heap is below 4000 bytes at request time, rather than
-risking an allocation failure.
+⚠️ **Known bug, not yet fixed** (found 2026-09-08, reproduced identically against the pre-merge
+standalone handler too - not a regression from folding it in here): once the log holds enough
+entries to push the JSON response past ~1460 bytes (one Ethernet TCP MSS), the response cuts off
+hard mid-content instead of continuing - `curl` reports "Received HTTP/0.9 when not allowed". Root
+cause not found; suspected to be in how `beginResponseStream()` + `serializeJson()` interact for a
+response exceeding a single TCP segment. See BUGFIX_LOG #123.
+
+`400 text/plain` if `type` is missing or not one of the five values above.
 
 ```bash
-curl http://192.168.1.50/api/log
+curl "http://192.168.1.50/api/diag?type=health"
+curl "http://192.168.1.50/api/diag?type=heap"
+curl "http://192.168.1.50/api/diag?type=tcp"
+curl "http://192.168.1.50/api/diag?type=test"
+curl "http://192.168.1.50/api/diag?type=log"
 ```
 
 ---

@@ -1098,39 +1098,48 @@ void setup() {
         return;
       }
 
-      request->send(400, "text/plain", "Unknown 'type' - use health, heap, tcp, or test");
-    });
-    
-    webServer.on("/api/log", HTTP_GET, [](AsyncWebServerRequest * request) {
-      // Heap-backed JsonDocument, not a StaticJsonDocument local - a large static buffer here
-      // would sit on this callback's stack, which has far less headroom than loop().
-      JsonDocument document;
-      document["count"] = serialLogCount;
-      
-      int startIndex = serialLogCount < SERIAL_LOG_SIZE ? 0 : serialLogIndex;
-      int entriesToReturn = serialLogCount < SERIAL_LOG_SIZE ? serialLogCount : SERIAL_LOG_SIZE;
-      
-      // Limit to last 50 entries to prevent JSON buffer overflow
-      int maxEntries = entriesToReturn > 50 ? 50 : entriesToReturn;
-      int actualStart = entriesToReturn > 50 ? (startIndex + entriesToReturn - 50) % SERIAL_LOG_SIZE : startIndex;
-      
-      for (int i = 0; i < maxEntries; i++) {
-        int idx = (actualStart + i) % SERIAL_LOG_SIZE;
-        // serialLog[idx].message is already a bounded, null-terminated char buffer
-        // (SERIAL_LOG_MESSAGE_MAX) - no further truncation/String copy needed here.
-        document["logs"][i]["message"] = serialLog[idx].message;
-        document["logs"][i]["timestamp"] = serialLog[idx].timestamp;
-      }
-      
-      //Check free heap before allocating - operator new aborts on failure here.
-      if (ESP.getFreeHeap() < 4000) {
-        SerialPrintln("WARNING: /log skipped building response - free heap too low (" + String(ESP.getFreeHeap()) + " bytes)");
-        request->send(503, "text/plain", "Too little free heap right now to safely build the log response - try again shortly");
+      //Former standalone /api/log, folded in here 2026-09-08 (same reasoning as the other four
+      //types, see BUGFIX_LOG #123) - recent in-memory serial log, not the persisted crash log
+      //(that's /api/crash-log). While testing this merge, found that responses truncate hard at
+      //exactly 1460 bytes (one Ethernet TCP MSS) whenever the log holds enough entries to exceed
+      //it - reproduced identically against the untouched, pre-merge standalone handler too, so
+      //this is a pre-existing bug in the beginResponseStream()+serializeJson() streaming itself,
+      //not something this merge caused. Left unfixed/unchanged here (out of scope for a
+      //registration-count merge) - see BUGFIX_LOG #123 for the open item.
+      if (type == "log") {
+        // Heap-backed JsonDocument, not a StaticJsonDocument local - a large static buffer here
+        // would sit on this callback's stack, which has far less headroom than loop().
+        JsonDocument document;
+        document["count"] = serialLogCount;
+
+        int startIndex = serialLogCount < SERIAL_LOG_SIZE ? 0 : serialLogIndex;
+        int entriesToReturn = serialLogCount < SERIAL_LOG_SIZE ? serialLogCount : SERIAL_LOG_SIZE;
+
+        // Limit to last 50 entries to prevent JSON buffer overflow
+        int maxEntries = entriesToReturn > 50 ? 50 : entriesToReturn;
+        int actualStart = entriesToReturn > 50 ? (startIndex + entriesToReturn - 50) % SERIAL_LOG_SIZE : startIndex;
+
+        for (int i = 0; i < maxEntries; i++) {
+          int idx = (actualStart + i) % SERIAL_LOG_SIZE;
+          // serialLog[idx].message is already a bounded, null-terminated char buffer
+          // (SERIAL_LOG_MESSAGE_MAX) - no further truncation/String copy needed here.
+          document["logs"][i]["message"] = serialLog[idx].message;
+          document["logs"][i]["timestamp"] = serialLog[idx].timestamp;
+        }
+
+        //Check free heap before allocating - operator new aborts on failure here.
+        if (ESP.getFreeHeap() < 4000) {
+          SerialPrintln("WARNING: /api/diag?type=log skipped building response - free heap too low (" + String(ESP.getFreeHeap()) + " bytes)");
+          request->send(503, "text/plain", "Too little free heap right now to safely build the log response - try again shortly");
+          return;
+        }
+        AsyncResponseStream *response = request->beginResponseStream("application/json");
+        serializeJson(document, *response);
+        request->send(response);
         return;
       }
-      AsyncResponseStream *response = request->beginResponseStream("application/json");
-      serializeJson(document, *response);
-      request->send(response);
+
+      request->send(400, "text/plain", "Unknown 'type' - use health, heap, tcp, test, or log");
     });
 
     // On-device crash log (see ServiceCrashLogFunctions.ino) - survives even without a live
