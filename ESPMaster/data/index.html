@@ -1077,7 +1077,6 @@
 						<a href="#" onclick="openAdminModal('system'); return false;">System</a>
 						<a href="#" onclick="openAdminModal('units'); return false;">Units</a>
 						<a href="#" onclick="openAdminModal('firmware'); return false;">Firmware Update</a>
-						<a href="/api/crash-log" target="_blank" title="Crash details captured on-device just before the last automatic reset - survives even if serial wasn't connected/reliable at the time">Crash Log</a>
 						<form action="/api/reboot" method="post" class="kebab-form" onsubmit="return confirm('Are you sure you want reboot device?')">
 							<button type="submit">Reboot</button>
 						</form>
@@ -1248,6 +1247,7 @@
 					<button type="button" id="systemTabBtnWifi" class="modal-tab-btn active" onclick="setSystemModalTab('wifi')">WLAN</button>
 					<button type="button" id="systemTabBtnTimezone" class="modal-tab-btn" onclick="setSystemModalTab('timezone')">Zeitzone</button>
 					<button type="button" id="systemTabBtnQuietHours" class="modal-tab-btn" onclick="setSystemModalTab('quietHours')">Ruhezeiten</button>
+					<button type="button" id="systemTabBtnCrashLog" class="modal-tab-btn" onclick="setSystemModalTab('crashLog')">Crash-Log</button>
 				</div>
 
 				<div id="systemTabWifi">
@@ -1341,6 +1341,19 @@
 							<button class="btn-primary" onclick="saveQuietHours()">Speichern</button>
 						</p>
 						<p id="quietHoursStatus"></p>
+					</div>
+				</div>
+
+				<div id="systemTabCrashLog" class="hidden">
+					<div style="text-align: left;">
+						<p class="note">
+							Absturz-Details, die das Gerät direkt vor dem letzten automatischen Neustart
+							selbst gespeichert hat - bleibt auch erhalten, wenn zum Absturz-Zeitpunkt keine
+							serielle Verbindung bestand.
+						</p>
+						<p>
+							<a href="/api/crash-log" target="_blank" class="btn-small action-link">Crash-Log öffnen</a>
+						</p>
 					</div>
 				</div>
 			</div>
@@ -2372,14 +2385,16 @@
 			document.getElementById("firmwareTabBtnUnits").classList.toggle("active", tab === "units");
 		}
 
-		//Switches between the System modal's WLAN/Zeitzone tabs.
+		//Switches between the System modal's WLAN/Zeitzone/Ruhezeiten/Crash-Log tabs.
 		function setSystemModalTab(tab) {
 			document.getElementById("systemTabWifi").classList.toggle("hidden", tab !== "wifi");
 			document.getElementById("systemTabTimezone").classList.toggle("hidden", tab !== "timezone");
 			document.getElementById("systemTabQuietHours").classList.toggle("hidden", tab !== "quietHours");
+			document.getElementById("systemTabCrashLog").classList.toggle("hidden", tab !== "crashLog");
 			document.getElementById("systemTabBtnWifi").classList.toggle("active", tab === "wifi");
 			document.getElementById("systemTabBtnTimezone").classList.toggle("active", tab === "timezone");
 			document.getElementById("systemTabBtnQuietHours").classList.toggle("active", tab === "quietHours");
+			document.getElementById("systemTabBtnCrashLog").classList.toggle("active", tab === "crashLog");
 		}
 
 		function closeAdminModal(name) {
