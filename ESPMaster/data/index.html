@@ -27,8 +27,6 @@
 			--color-warning: #D8A657;
 			--color-danger: #D97A6C;
 			--color-note-bg: #171C24;
-			--color-console-bg: #0B0E13;
-			--color-console-text: #9AA3AE;
 
 			--font-ui: -apple-system, "Segoe UI", Roboto, system-ui, sans-serif;
 			--font-mono: "SF Mono", "Cascadia Code", Consolas, "Liberation Mono", Menlo, monospace;
@@ -1002,18 +1000,6 @@
 			color: var(--color-danger);
 		}
 
-		/* Dark, monospace console-style panel - used by the Serial Log card. */
-		.console-panel {
-			background-color: var(--color-console-bg);
-			color: var(--color-console-text);
-			font-family: 'Courier New', monospace;
-			font-size: var(--font-size-sm);
-			padding: 10px;
-			max-height: 400px;
-			overflow-y: auto;
-			border-radius: var(--radius-sm);
-		}
-
 		/* Overrides the site-wide a{width:120px} button-look (near the top of this file) for a
 		   plain inline link inside a .note paragraph - that fixed width wrapped "Liste der
 		   TZ-Datenbank-Zeitzonen" across multiple lines instead of fitting on one. Placed last so
@@ -1091,7 +1077,7 @@
 						<a href="#" onclick="openAdminModal('system'); return false;">System</a>
 						<a href="#" onclick="openAdminModal('units'); return false;">Units</a>
 						<a href="#" onclick="openAdminModal('firmware'); return false;">Firmware Update</a>
-						<a href="#" onclick="openAdminModal('serialLog'); return false;">Serial Log</a>
+						<a href="/api/crash-log" target="_blank" title="Crash details captured on-device just before the last automatic reset - survives even if serial wasn't connected/reliable at the time">Crash Log</a>
 						<form action="/api/reboot" method="post" class="kebab-form" onsubmit="return confirm('Are you sure you want reboot device?')">
 							<button type="submit">Reboot</button>
 						</form>
@@ -1505,28 +1491,6 @@
 		</div>
 	</div>
 
-	<div id="modalSerialLog" class="modal-backdrop hidden" onclick="closeAdminModalOnBackdrop(event, 'serialLog')">
-		<div class="modal-panel modal-panel-wide" onclick="event.stopPropagation()">
-			<div class="modal-header">
-				<p class="modal-title">Serial Log (<span id="spanLogCount">0</span> messages)</p>
-				<button type="button" class="modal-close-btn" onclick="closeAdminModal('serialLog')" aria-label="Schließen">&times;</button>
-			</div>
-			<div class="modal-body">
-				<div class="card-title-buttons" style="margin-bottom: 15px;">
-					<button onclick="refreshLog()" class="btn-small">Refresh</button>
-					<button onclick="copySerialLog()" class="btn-small">Copy Full Log</button>
-					<button id="btnToggleSerialLog" onclick="toggleSerialLog()" class="btn-small">Show</button>
-					<a href="/api/crash-log" target="_blank" class="btn-small action-link" title="Crash details captured on-device just before the last automatic reset - survives even if serial wasn't connected/reliable at the time">Crash Log</a>
-				</div>
-				<!-- Deliberately inline style="display: none" (not the .hidden class) -
-				     toggleSerialLog() reads/writes container.style.display directly, and
-				     .hidden's !important would fight it when showing the panel again. -->
-				<div id="containerSerialLog" class="console-panel" style="display: none;">
-					<div style="color: var(--color-text-subtle);">Loading log...</div>
-				</div>
-			</div>
-		</div>
-	</div>
 	<!-- Stays after the form markup so document.getElementById('form') below finds it already parsed. -->
 	<script>
 		//Used for local development use
@@ -2370,15 +2334,12 @@
 		//True while ANY unit is recalibrating - disables every "Save & Recalibrate" button so the
 		//UI can't trigger overlapping I2C operations.
 		var recalibrationInProgress = false;
-		var fullSerialLogData = null; //full serial log, for copying
-		var serialLogInterval = null; //the /log auto-refresh setInterval's id
 
 		//Maps each kebab-menu entry to its modal's element id.
 		var adminModalIds = {
 			system: "modalSystem",
 			units: "modalUnits",
-			firmware: "modalFirmware",
-			serialLog: "modalSerialLog"
+			firmware: "modalFirmware"
 		};
 
 		//Admin data loads only when the relevant modal actually opens, not on every page load.
@@ -3618,116 +3579,6 @@
 			}, 300);
 		}
 
-		// Fetch and display serial log
-		function refreshLog() {
-			var xhrRequest = new XMLHttpRequest();
-			xhrRequest.onreadystatechange = function () {
-				if (this.readyState == 4 && this.status == 200) {
-					var responseObject = JSON.parse(this.responseText);
-					displaySerialLog(responseObject);
-				}
-			};
-
-			xhrRequest.open("GET", "/log", true);
-			xhrRequest.send();
-		}
-
-		// Display serial log messages
-		function displaySerialLog(logData) {
-			var container = document.getElementById("containerSerialLog");
-			var countElement = document.getElementById("spanLogCount");
-
-			// Store full log data for copying
-			fullSerialLogData = logData;
-
-			countElement.innerText = logData.count || 0;
-
-			if (!logData.logs || logData.logs.length === 0) {
-				container.innerHTML = '<div style="color: var(--color-text-subtle);">No log messages yet.</div>';
-				return;
-			}
-
-			var html = "";
-			for (var i = 0; i < logData.logs.length; i++) {
-				var logEntry = logData.logs[i];
-				// Timestamp is in milliseconds since boot, format as seconds with 1 decimal
-				var timestampSec = (logEntry.timestamp / 1000).toFixed(1) + "s";
-				var message = logEntry.message || "";
-
-				// Escape HTML and add some color coding
-				message = escapeHtml(message);
-				if (message.indexOf("DEBUG:") >= 0) {
-					message = '<span style="color: #4ec9b0;">' + message + '</span>';
-				} else if (message.indexOf("ERROR") >= 0 || message.indexOf("Error") >= 0) {
-					message = '<span style="color: #f48771;">' + message + '</span>';
-				} else if (message.indexOf("WARNING") >= 0 || message.indexOf("Warning") >= 0) {
-					message = '<span style="color: #dcdcaa;">' + message + '</span>';
-				}
-
-				html += '<div style="margin-bottom: 4px; padding: 2px 0; border-bottom: 1px solid #333;">';
-				html += '<span style="color: #808080; margin-right: 10px;">[' + timestampSec + ']</span>';
-				html += message;
-				html += '</div>';
-			}
-
-			container.innerHTML = html;
-			// Auto-scroll to bottom
-			container.scrollTop = container.scrollHeight;
-		}
-
-		//Toggles serial log visibility - starts/stops the auto-refresh poll along with the panel,
-		//so it doesn't keep polling /log every 2s while hidden.
-		function toggleSerialLog() {
-			var container = document.getElementById("containerSerialLog");
-			var button = document.getElementById("btnToggleSerialLog");
-
-			if (container.style.display === "none") {
-				container.style.display = "block";
-				if (button) button.textContent = "Hide";
-				refreshLog(); // Refresh immediately when showing
-				if (!serialLogInterval) {
-					serialLogInterval = setInterval(refreshLog, 2000);
-				}
-			} else {
-				container.style.display = "none";
-				if (button) button.textContent = "Show";
-				if (serialLogInterval) {
-					clearInterval(serialLogInterval);
-					serialLogInterval = null;
-				}
-			}
-		}
-
-		// Copy full serial log to clipboard
-		function copySerialLog() {
-			if (!fullSerialLogData || !fullSerialLogData.logs || fullSerialLogData.logs.length === 0) {
-				alert("No log data available to copy.");
-				return;
-			}
-
-			var logText = "";
-			for (var i = 0; i < fullSerialLogData.logs.length; i++) {
-				var logEntry = fullSerialLogData.logs[i];
-				var timestampSec = (logEntry.timestamp / 1000).toFixed(1) + "s";
-				var message = logEntry.message || "";
-				logText += "[" + timestampSec + "] " + message + "\n";
-			}
-
-			// Copy to clipboard
-			var textArea = document.createElement("textarea");
-			textArea.value = logText;
-			textArea.style.position = "fixed";
-			textArea.style.opacity = "0";
-			document.body.appendChild(textArea);
-			textArea.select();
-			try {
-				document.execCommand('copy');
-				alert("Serial log copied to clipboard!");
-			} catch (err) {
-				alert("Failed to copy log. Please select and copy manually.");
-			}
-			document.body.removeChild(textArea);
-		}
 	</script>
 </body>
 
