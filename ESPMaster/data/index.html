@@ -3469,7 +3469,7 @@
 			//uploadFirmware()/changeOtaPassword() for the same reasoning.
 			var currentOtaPassword = document.getElementById("currentOtaPasswordDisplay").innerText;
 			xhr.setRequestHeader("X-OTA-Password", currentOtaPassword);
-			xhr.send("id=" + encodeURIComponent(select.value));
+			xhr.send("action=push&id=" + encodeURIComponent(select.value));
 		}
 
 		//Updates every known unit sequentially (never more than one I2C push in flight). Stops on the first
@@ -3574,7 +3574,7 @@
 			//uploadFirmware()/changeOtaPassword() for the same reasoning.
 			var currentOtaPassword = document.getElementById("currentOtaPasswordDisplay").innerText;
 			xhr.setRequestHeader("X-OTA-Password", currentOtaPassword);
-			xhr.send("id=" + encodeURIComponent(unitIndex));
+			xhr.send("action=push&id=" + encodeURIComponent(unitIndex));
 		}
 
 		//Renders the JSON result of a firmware push in the result panel

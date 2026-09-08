@@ -1170,6 +1170,145 @@ void setup() {
       });
     });
 
+#if UNIT_BOOTLOADER_ENABLE == true
+    // Must be registered before "/api/units" below: ESPAsyncWebServer's canHandle() treats any
+    // request path starting with "<registered uri>/" as a match too, and _attachHandler() picks
+    // the FIRST registered handler that matches - so with "/api/units" registered first, it was
+    // silently swallowing every request to "/api/units/firmware"/"/api/units/firmware-push" (a
+    // real, undetected regression introduced when "/api/units" itself gained a POST handler in the
+    // units-actions consolidation, see BUGFIX_LOG #119/#122 - found while testing this merge, not
+    // caused by it). Registering the more specific paths first fixes it for good.
+
+    // Admin: upload a compiled Unit.ino firmware image (raw AVR .bin, NOT ESPMaster's own) to be
+    // pushed to a unit via /api/units/firmware-push. Requires X-OTA-Password, same as /api/firmware.
+    webServer.on("/api/units/firmware", HTTP_POST,
+      [](AsyncWebServerRequest * request) {
+        if (unitFirmwareUploadAuthFailed) {
+          unitFirmwareUploadAuthFailed = false;
+          request->send(401, "text/plain", "Invalid password");
+          return;
+        }
+        request->send(200, "text/plain", "OK - firmware stored, ready to push to a unit");
+      },
+      [](AsyncWebServerRequest * request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
+        static File unitFirmwareFile;
+
+        if (index == 0) {
+          unitFirmwareUploadAuthFailed = false;
+          if (String(otaPassword) != "") {
+            String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
+            if (providedPassword != String(otaPassword)) {
+              SerialPrintln("Unit firmware upload rejected: invalid password");
+              unitFirmwareUploadAuthFailed = true;
+              return;
+            }
+          }
+
+          SerialPrintln("DEBUG: Unit firmware upload starting: " + filename);
+          unitFirmwareFile = LittleFS.open(unitFirmwarePath, "w");
+          if (!unitFirmwareFile) {
+            SerialPrintln("Unit firmware upload: failed to open " + String(unitFirmwarePath) + " for writing");
+          }
+        }
+
+        if (unitFirmwareUploadAuthFailed) {
+          return; //Password rejected, ignore the rest of the upload - final response already handled above
+        }
+
+        if (unitFirmwareFile) {
+          unitFirmwareFile.write(data, len);
+        }
+
+        if (final) {
+          if (unitFirmwareFile) {
+            unitFirmwareFile.close();
+          }
+          SerialPrintln("DEBUG: Unit firmware upload finished. Total bytes: " + String(index + len));
+        }
+      }
+    );
+
+    //Pushes the currently stored unit firmware to a single unit over I2C (twiboot), or just probes
+    //which I2C address it answers on without writing anything - both deferred to loop(), both take
+    //the same 'id' param, so merged into one registration dispatched by 'action' (heap-saving
+    //pattern established for /api/wifi etc., see BUGFIX_LOG #120/#121) - unlike the /api/settings
+    //attempt in #121, both branches here are short and structurally near-identical, not a large,
+    //disjoint pair of handlers, so the same risk doesn't apply. Deliberately its own path, not
+    //merged into "/api/units/firmware" - that's a multipart upload registration (different
+    //ESPAsyncWebServer callback signature), and that upload route would otherwise intercept a
+    //sub-path anyway.
+    webServer.on("/api/units/firmware-push", HTTP_POST, [](AsyncWebServerRequest * request) {
+      String action = request->hasParam("action", true) ? request->getParam("action", true)->value() : "";
+
+      if (!request->hasParam(PARAM_ID, true)) {
+        request->send(400, "text/plain", "'id' is required");
+        return;
+      }
+
+      String idValue = request->getParam(PARAM_ID, true)->value();
+      if (!isNumber(idValue)) {
+        request->send(400, "text/plain", "'id' must be a number");
+        return;
+      }
+
+      int unitId = idValue.toInt();
+      if (unitId < 0 || unitId >= unitsAmount) {
+        request->send(400, "text/plain", "Unit id out of range. Valid range: 0 to " + String(unitsAmount - 1));
+        return;
+      }
+
+      if (action == "push") {
+        if (String(otaPassword) != "") {
+          String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
+          if (providedPassword != String(otaPassword)) {
+            SerialPrintln("Unit firmware push rejected: invalid password");
+            request->send(401, "text/plain", "Invalid password");
+            return;
+          }
+        }
+
+        if (!LittleFS.exists(unitFirmwarePath)) {
+          request->send(400, "text/plain", "No firmware uploaded yet. Upload a .bin first.");
+          return;
+        }
+
+        if (pendingFirmwarePushRequest != nullptr) {
+          request->send(503, "text/plain", "Another firmware push is already in progress, try again shortly");
+          return;
+        }
+
+        pendingFirmwarePushUnitIndex = unitId;
+        pendingFirmwarePushRequestDisconnected = false;
+        pendingFirmwarePushRequest = request;
+        //Note: an in-flight pushFirmwareToUnit() always runs to completion regardless of this flag
+        //(by design) - it just has nowhere to report the result if the client already left.
+        request->onDisconnect([]() {
+          pendingFirmwarePushRequest = nullptr;
+          pendingFirmwarePushRequestDisconnected = true;
+        });
+        return;
+      }
+
+      if (action == "probe") {
+        if (pendingBootloaderProbeRequest != nullptr) {
+          request->send(503, "text/plain", "Another bootloader probe is already in progress, try again shortly");
+          return;
+        }
+
+        pendingBootloaderProbeUnitIndex = unitId;
+        pendingBootloaderProbeRequestDisconnected = false;
+        pendingBootloaderProbeRequest = request;
+        request->onDisconnect([]() {
+          pendingBootloaderProbeRequest = nullptr;
+          pendingBootloaderProbeRequestDisconnected = true;
+        });
+        return;
+      }
+
+      request->send(400, "text/plain", "Unknown 'action' - use push or probe");
+    });
+#endif
+
     // Admin: read live status + calibration offset for every unit.
     //Deferred to loop().
     webServer.on("/api/units", HTTP_GET, [](AsyncWebServerRequest * request) {
@@ -1323,142 +1462,6 @@ void setup() {
         }
       }
     );
-
-#if UNIT_BOOTLOADER_ENABLE == true
-    // Admin: upload a compiled Unit.ino firmware image (raw AVR .bin, NOT ESPMaster's own) to be
-    // pushed to a unit via /api/units/firmware-push. Requires X-OTA-Password, same as /api/firmware.
-    webServer.on("/api/units/firmware", HTTP_POST,
-      [](AsyncWebServerRequest * request) {
-        if (unitFirmwareUploadAuthFailed) {
-          unitFirmwareUploadAuthFailed = false;
-          request->send(401, "text/plain", "Invalid password");
-          return;
-        }
-        request->send(200, "text/plain", "OK - firmware stored, ready to push to a unit");
-      },
-      [](AsyncWebServerRequest * request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
-        static File unitFirmwareFile;
-
-        if (index == 0) {
-          unitFirmwareUploadAuthFailed = false;
-          if (String(otaPassword) != "") {
-            String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-            if (providedPassword != String(otaPassword)) {
-              SerialPrintln("Unit firmware upload rejected: invalid password");
-              unitFirmwareUploadAuthFailed = true;
-              return;
-            }
-          }
-
-          SerialPrintln("DEBUG: Unit firmware upload starting: " + filename);
-          unitFirmwareFile = LittleFS.open(unitFirmwarePath, "w");
-          if (!unitFirmwareFile) {
-            SerialPrintln("Unit firmware upload: failed to open " + String(unitFirmwarePath) + " for writing");
-          }
-        }
-
-        if (unitFirmwareUploadAuthFailed) {
-          return; //Password rejected, ignore the rest of the upload - final response already handled above
-        }
-
-        if (unitFirmwareFile) {
-          unitFirmwareFile.write(data, len);
-        }
-
-        if (final) {
-          if (unitFirmwareFile) {
-            unitFirmwareFile.close();
-          }
-          SerialPrintln("DEBUG: Unit firmware upload finished. Total bytes: " + String(index + len));
-        }
-      }
-    );
-
-    //Pushes the currently stored unit firmware to a single unit over I2C (twiboot), deferred to
-    //loop(). Must be a sibling path, not a sub-path of "/api/units/firmware" - that upload route
-    //would otherwise intercept it.
-    webServer.on("/api/units/firmware-push", HTTP_POST, [](AsyncWebServerRequest * request) {
-      if (String(otaPassword) != "") {
-        String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-        if (providedPassword != String(otaPassword)) {
-          SerialPrintln("Unit firmware push rejected: invalid password");
-          request->send(401, "text/plain", "Invalid password");
-          return;
-        }
-      }
-
-      if (!request->hasParam(PARAM_ID, true)) {
-        request->send(400, "text/plain", "'id' is required");
-        return;
-      }
-
-      String idValue = request->getParam(PARAM_ID, true)->value();
-      if (!isNumber(idValue)) {
-        request->send(400, "text/plain", "'id' must be a number");
-        return;
-      }
-
-      int unitId = idValue.toInt();
-      if (unitId < 0 || unitId >= unitsAmount) {
-        request->send(400, "text/plain", "Unit id out of range. Valid range: 0 to " + String(unitsAmount - 1));
-        return;
-      }
-
-      if (!LittleFS.exists(unitFirmwarePath)) {
-        request->send(400, "text/plain", "No firmware uploaded yet. Upload a .bin first.");
-        return;
-      }
-
-      if (pendingFirmwarePushRequest != nullptr) {
-        request->send(503, "text/plain", "Another firmware push is already in progress, try again shortly");
-        return;
-      }
-
-      pendingFirmwarePushUnitIndex = unitId;
-      pendingFirmwarePushRequestDisconnected = false;
-      pendingFirmwarePushRequest = request;
-      //Note: an in-flight pushFirmwareToUnit() always runs to completion regardless of this flag
-      //(by design) - it just has nowhere to report the result if the client already left.
-      request->onDisconnect([]() {
-        pendingFirmwarePushRequest = nullptr;
-        pendingFirmwarePushRequestDisconnected = true;
-      });
-    });
-
-    //Sends a unit into bootloader mode and reports which I2C address it answers on, without
-    //writing anything - verifies the DIP-jumper address without risking a real firmware push.
-    webServer.on("/api/units/bootloader-probe", HTTP_POST, [](AsyncWebServerRequest * request) {
-      if (!request->hasParam(PARAM_ID, true)) {
-        request->send(400, "text/plain", "'id' is required");
-        return;
-      }
-
-      String idValue = request->getParam(PARAM_ID, true)->value();
-      if (!isNumber(idValue)) {
-        request->send(400, "text/plain", "'id' must be a number");
-        return;
-      }
-
-      int unitId = idValue.toInt();
-      if (unitId < 0 || unitId >= unitsAmount) {
-        request->send(400, "text/plain", "Unit id out of range. Valid range: 0 to " + String(unitsAmount - 1));
-        return;
-      }
-
-      if (pendingBootloaderProbeRequest != nullptr) {
-        request->send(503, "text/plain", "Another bootloader probe is already in progress, try again shortly");
-        return;
-      }
-
-      pendingBootloaderProbeUnitIndex = unitId;
-      pendingBootloaderProbeRequestDisconnected = false;
-      pendingBootloaderProbeRequest = request;
-      request->onDisconnect([]() {
-        pendingBootloaderProbeRequest = nullptr;
-        pendingBootloaderProbeRequestDisconnected = true;
-      });
-    });
-#endif
 
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
     //Browser-based firmware upload in three chunked steps. Shared password check for all three.

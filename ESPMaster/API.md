@@ -30,7 +30,7 @@ endpoints require it via an `X-OTA-Password: <password>` request header:
 
 - `POST /api/web-file`
 - `POST /api/units/firmware`
-- `POST /api/units/firmware-push`
+- `POST /api/units/firmware-push` with `action=push` (`action=probe` needs no password)
 - `POST /api/firmware-start`
 - `POST /api/firmware-chunk`
 - `POST /api/firmware-finish`
@@ -57,8 +57,7 @@ other endpoint below has no auth check at all, including `GET /api/ota-password`
 | POST | [`/api/units?action=`](#post-apiunits) | Unit actions: `rescan`\|`offset`\|`reset` |
 | POST | [`/api/web-file`](#post-apiweb-file) | Replace `index.html` in place |
 | POST | [`/api/units/firmware`](#post-apiunitsfirmware) | Upload a Unit firmware image |
-| POST | [`/api/units/firmware-push`](#post-apiunitsfirmware-push) | Push uploaded firmware to a unit over I2C |
-| POST | [`/api/units/bootloader-probe`](#post-apiunitsbootloader-probe) | Diagnostic bootloader probe, writes nothing |
+| POST | [`/api/units/firmware-push?action=`](#post-apiunitsfirmware-push) | `push` uploaded firmware to a unit over I2C, or `probe` its bootloader address (writes nothing) |
 | POST | [`/api/firmware-start`](#post-apifirmware-start) | Begin a browser-based ESPMaster firmware update |
 | POST | [`/api/firmware-chunk`](#post-apifirmware-chunk) | Upload one chunk of the firmware |
 | POST | [`/api/firmware-finish`](#post-apifirmware-finish) | Finalize the update, reboot on success |
@@ -467,22 +466,31 @@ curl -X POST http://192.168.1.50/api/units/firmware \
 ### `POST /api/units/firmware-push`
 
 Pushes the firmware previously uploaded via `/api/units/firmware` to one unit over I2C (twiboot
-protocol). Deferred to `loop()` - a real push can take several seconds to a couple minutes.
+protocol), or just probes which I2C address a unit answers on without writing anything - dispatched
+by `action`. Both deferred to `loop()` - a real push can take several seconds to a couple minutes.
 
 **Renamed 2026-08-22** from `/api/units/firmware/push` - that path was a strict prefix-extension
 of the upload endpoint above and got silently intercepted by it (ESPAsyncWebServer's route
 matching for the two-callback upload form), making it completely unreachable. Always use a
-sibling path, never a sub-path of an upload endpoint's URL.
+sibling path, never a sub-path of an upload endpoint's URL. **Merged with the former, separate
+`/api/units/bootloader-probe` 2026-09-08** (one registration instead of two, see BUGFIX_LOG #122) -
+while doing so, found and fixed a related instance of the same underlying issue: this path is also
+a prefix-extension of `/api/units` (which only gained its own POST handler in an earlier
+same-day change), so it - and the upload endpoint above - had to be **registered before**
+`/api/units` in source order, or ESPAsyncWebServer's "first matching handler wins" dispatch
+silently swallows requests to either into `/api/units`'s handler instead.
 
-**Auth:** requires `X-OTA-Password` header if a password is set.
+**Auth:** `action=push` requires the `X-OTA-Password` header if a password is set; `action=probe`
+requires none (read-only, no write to flash).
 
 **Body params:**
 
 | Param | Type | Notes |
 | --- | --- | --- |
+| `action` | string | `push` or `probe` |
 | `id` | integer | Target unit index |
 
-**Response** `200` (success) or `500` (failure) `application/json`:
+**`action=push` response** `200` (success) or `500` (failure) `application/json`:
 ```json
 {
   "unitIndex": 0,
@@ -499,31 +507,12 @@ On failure, `success: false` and an `error` field instead of `message`/`started`
 missing `bootAddress`/`pageSize`/`totalPages`/`pagesWritten` if the failure happened before the
 unit was even found, e.g. no unit answered in bootloader mode). The critical first flash page
 (interrupt vector table) is always written last and only after every other page is verified - a
-failed push leaves the old firmware fully intact. `400` if `id` is missing/invalid/out of range
-or no firmware has been uploaded yet; `401` on a wrong password; `503` if another push is already
-in progress.
+failed push leaves the old firmware fully intact. `400` if `no firmware has been uploaded yet;
+`503` if another push is already in progress.
 
-```bash
-curl -X POST http://192.168.1.50/api/units/firmware-push \
-  -H "X-OTA-Password: splitflap" \
-  --data "id=0"
-```
-
----
-
-### `POST /api/units/bootloader-probe`
-
-Diagnostic-only: sends a unit into bootloader mode and reports which I2C address it answers on
-and its chip info, **without writing anything to flash**. Used to verify the DIP-jumper address
-is read live by twiboot. Deferred to `loop()`.
-
-**Body params:**
-
-| Param | Type | Notes |
-| --- | --- | --- |
-| `id` | integer | Target unit index |
-
-**Response** `200 application/json` on success:
+**`action=probe` response** `200 application/json` on success - diagnostic-only, sends a unit into
+bootloader mode and reports which I2C address it answers on and its chip info, **without writing
+anything to flash**. Used to verify the DIP-jumper address is read live by twiboot:
 ```json
 {
   "unitIndex": 0,
@@ -539,11 +528,16 @@ is read live by twiboot. Deferred to `loop()`.
 }
 ```
 or `{"unitIndex":N,"success":false,"error":"..."}` if no unit (or more than one) answered in
-bootloader mode. `400` if `id` is missing/invalid/out of range; `503` if another probe is already
-in progress.
+bootloader mode. `503` if another probe is already in progress.
+
+Both actions: `400` if `id` is missing/invalid/out of range, or `action` is missing/unrecognized.
 
 ```bash
-curl -X POST http://192.168.1.50/api/units/bootloader-probe --data "id=0"
+curl -X POST http://192.168.1.50/api/units/firmware-push \
+  -H "X-OTA-Password: splitflap" \
+  --data "action=push&id=0"
+
+curl -X POST http://192.168.1.50/api/units/firmware-push --data "action=probe&id=0"
 ```
 
 ---
