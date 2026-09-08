@@ -336,6 +336,9 @@ card polls. Deferred to `loop()`, same reasoning as `/api/i2c-scan` above. Uses 
 6-byte read internal display logic uses, since this endpoint's response was never used for
 anything beyond status/offset.
 
+**Shares one registration with `POST /api/units` below** (heap-saving pattern established for
+`/api/wifi` etc., see BUGFIX_LOG #124) - dispatched internally by request method, same path.
+
 **Query param** `detail` (any value, e.g. `?detail=1`): opts into the heavier 6-byte read instead,
 adding `phase`/`progress` to each unit - added as a diagnostic for
 watching a Unit that starts rotating with no ESPMaster-issued display job involved (the normal

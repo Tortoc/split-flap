@@ -1318,31 +1318,31 @@ void setup() {
     });
 #endif
 
-    // Admin: read live status + calibration offset for every unit.
-    //Deferred to loop().
-    webServer.on("/api/units", HTTP_GET, [](AsyncWebServerRequest * request) {
-      SerialPrintln("DEBUG: Admin units request received");
-      if (pendingUnitsInfoRequest != nullptr) {
-        request->send(503, "text/plain", "Another units request is already in progress, try again shortly");
+    // Admin: read live status + calibration offset for every unit (GET, deferred to loop()), or
+    // trigger a unit write-action (POST, dispatched by ?action=: rescan/offset/reset - former
+    // /api/units/rescan, /api/units/offset, /api/units/reset). Merged into one registration
+    // (heap-saving pattern established for /api/wifi etc., see BUGFIX_LOG #120/#124) - the two
+    // branches stay structurally small and independent (unlike the failed /api/settings attempt
+    // in #121), so the same size-related risk doesn't apply here.
+    webServer.on("/api/units", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (request->method() == HTTP_GET) {
+        SerialPrintln("DEBUG: Admin units request received");
+        if (pendingUnitsInfoRequest != nullptr) {
+          request->send(503, "text/plain", "Another units request is already in progress, try again shortly");
+          return;
+        }
+        //Opt-in heavy 6-byte read (adds phase/progress) only via ?detail=1 - routine polling stays cheap.
+        pendingUnitsInfoRequestDetail = request->hasParam("detail");
+        pendingUnitsInfoRequestDisconnected = false;
+        pendingUnitsInfoRequest = request;
+        request->onDisconnect([]() {
+          pendingUnitsInfoRequest = nullptr;
+          pendingUnitsInfoRequestDisconnected = true;
+        });
         return;
       }
-      //Opt-in heavy 6-byte read (adds phase/progress) only via ?detail=1 - routine polling stays cheap.
-      pendingUnitsInfoRequestDetail = request->hasParam("detail");
-      pendingUnitsInfoRequestDisconnected = false;
-      pendingUnitsInfoRequest = request;
-      request->onDisconnect([]() {
-        pendingUnitsInfoRequest = nullptr;
-        pendingUnitsInfoRequestDisconnected = true;
-      });
-    });
 
-    // Admin: re-run the I2C scan to pick up units that were connected/fixed after boot,
-    // without needing a full reboot. Updates the global unitsAmount used everywhere else.
-    //Deferred to loop().
-    //Consolidates the three unit write-actions (former /api/units/rescan, /api/units/offset,
-    ///api/units/reset) into one registered route, dispatched by ?action= - same reasoning as
-    //GET /api/diag: each registration is a small permanent heap cost this device can't spare.
-    webServer.on("/api/units", HTTP_POST, [](AsyncWebServerRequest * request) {
+      // request->method() == HTTP_POST
       String action = request->hasParam("action") ? request->getParam("action")->value() : "";
 
       if (action == "rescan") {
