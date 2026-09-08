@@ -52,17 +52,17 @@ void checkWifiScanRequest() {
 //POST /api/wifi/connect - call every loop() iteration (a cheap no-op while WIFI_CONNECT_NONE).
 void checkWifiConnectAttempt() {
   if (wifiConnectPhase == WIFI_CONNECT_PENDING) {
-    SerialPrintln("Attempting to connect to new WiFi network: \"" + wifiConnectNewSsid + "\"");
+    SerialPrintln(F("Attempting to connect to new WiFi network: \"") + wifiConnectNewSsid + F("\""));
     WiFi.begin(wifiConnectNewSsid.c_str(), wifiConnectNewPassword.c_str());
     wifiConnectPhaseChangedAt = millis();
     wifiConnectPhase = WIFI_CONNECT_TESTING;
   } else if (wifiConnectPhase == WIFI_CONNECT_TESTING) {
     if (WiFi.status() == WL_CONNECTED) {
-      SerialPrintln("New WiFi network connected successfully: \"" + WiFi.SSID() + "\", IP: " + WiFi.localIP().toString());
+      SerialPrintln(F("New WiFi network connected successfully: \"") + WiFi.SSID() + F("\", IP: ") + WiFi.localIP().toString());
       wifiConnectPhase = WIFI_CONNECT_SUCCESS;
     } else if (millis() - wifiConnectPhaseChangedAt > WIFI_CONNECT_TIMEOUT_MS) {
-      SerialPrintln("New WiFi network failed to connect within " + String(WIFI_CONNECT_TIMEOUT_MS / 1000) +
-        "s - reverting to previous network: \"" + wifiConnectOldSsid + "\"");
+      SerialPrintln(F("New WiFi network failed to connect within ") + String(WIFI_CONNECT_TIMEOUT_MS / 1000) +
+        F("s - reverting to previous network: \"") + wifiConnectOldSsid + F("\""));
       WiFi.begin(wifiConnectOldSsid.c_str(), wifiConnectOldPassword.c_str());
       wifiConnectPhase = WIFI_CONNECT_FAILED_REVERTED;
     }
@@ -78,14 +78,14 @@ void initWiFi() {
   //Logs the real 802.11 disconnect reason so a "full signal but won't connect" report can be
   //pinned to a concrete cause instead of WiFiManager's generic "AutoConnect: FAILED".
   wifiDisconnectEventHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected &event) {
-    SerialPrintln("DEBUG: WiFi Disconnected - SSID: \"" + event.ssid + "\", Reason: " + wifiDisconnectReasonToString(event.reason));
+    SerialPrintln(F("DEBUG: WiFi Disconnected - SSID: \"") + event.ssid + F("\", Reason: ") + wifiDisconnectReasonToString(event.reason));
   });
 
   //No WiFi.setSleepMode(WIFI_NONE_SLEEP) here deliberately - forcing the radio always-on was a
   //plausible power-instability contributor.
 
 #if WIFI_USE_DIRECT == false
-  SerialPrintln("Setting up WiFi AP Setup Mode");
+  SerialPrintln(F("Setting up WiFi AP Setup Mode"));
 
   //Bumped from the default so WiFiManager's own connect attempts/results show up in the log.
   wifiManager.setDebugOutput(true, WM_DEBUG_VERBOSE);
@@ -94,7 +94,7 @@ void initWiFi() {
 
 #if WIFI_STATIC_IP == true
   wifiManager.setSTAStaticIPConfig(wifiDeviceStaticIp, wifiRouterGateway, wifiSubnet, wifiPrimaryDns);
-  SerialPrintln("WiFi Static IP Configured");
+  SerialPrintln(F("WiFi Static IP Configured"));
 #endif
 
   wifiManager.setTitle("Split-Flap Setup");
@@ -108,23 +108,23 @@ void initWiFi() {
   wifiManager.setSaveConfigCallback([]() {
     //Running the config portal and our own webserver together doesn't work reliably - reboot
     //after saving new credentials is the accepted workaround.
-    SerialPrintln("New WiFi configuration saved. Will need to reboot device to let webserver work...");
+    SerialPrintln(F("New WiFi configuration saved. Will need to reboot device to let webserver work..."));
     isPendingReboot = true;
   });
 
   std::vector<const char *> menu = { "wifi", "info" ,"param", "sep", "restart", "exit" };
   wifiManager.setMenu(menu);
 
-  SerialPrintln("Attempting to connect to WiFi... Will fallback to AP mode to allow configuring of WiFi if fails...");
+  SerialPrintln(F("Attempting to connect to WiFi... Will fallback to AP mode to allow configuring of WiFi if fails..."));
   if(wifiManager.autoConnect("Split-Flap-AP")) {
-    SerialPrint("Successfully Connected to WiFi. IP Address: ");
+    SerialPrint(F("Successfully Connected to WiFi. IP Address: "));
     SerialPrintln(WiFi.localIP());
 
     isWifiConfigured = true;
   }
 
 #else
-  SerialPrintln("Setting up WiFi Direct");
+  SerialPrintln(F("Setting up WiFi Direct"));
 
   if (wifiDirectSsid != "" && wifiDirectPassword != "") {
     WiFi.disconnect(true);
@@ -135,24 +135,24 @@ void initWiFi() {
     WiFi.persistent(true);
     WiFi.setOutputPower(20.5); //max power for range (ESP01)
 
-    SerialPrintln("DEBUG: WiFi disconnected, starting fresh connection");
-    SerialPrintln("DEBUG: SSID: " + String(wifiDirectSsid));
-    SerialPrintln("DEBUG: Attempting connection (timeout: " + String(wifiConnectTimeoutSeconds) + "s)");
+    SerialPrintln(F("DEBUG: WiFi disconnected, starting fresh connection"));
+    SerialPrintln(F("DEBUG: SSID: ") + String(wifiDirectSsid));
+    SerialPrintln(F("DEBUG: Attempting connection (timeout: ") + String(wifiConnectTimeoutSeconds) + F("s)"));
 
 #if WIFI_STATIC_IP == true
-    SerialPrintln("DEBUG: Configuring static IP...");
+    SerialPrintln(F("DEBUG: Configuring static IP..."));
     if (WiFi.config(wifiDeviceStaticIp, wifiRouterGateway, wifiSubnet, wifiPrimaryDns)) {
-      SerialPrintln("DEBUG: WiFi Static IP Configuration Success");
+      SerialPrintln(F("DEBUG: WiFi Static IP Configuration Success"));
       delay(100);
       yield();
     }
     else {
-      SerialPrintln("DEBUG: WiFi Static IP Configuration could not take place");
+      SerialPrintln(F("DEBUG: WiFi Static IP Configuration could not take place"));
     }
 #endif
 
     WiFi.begin(wifiDirectSsid, wifiDirectPassword);
-    SerialPrint("DEBUG: Connecting");
+    SerialPrint(F("DEBUG: Connecting"));
 
     unsigned long connectionStartTime = millis();
     int maxAttemptsCount = 0;
@@ -162,24 +162,24 @@ void initWiFi() {
       int currentStatus = WiFi.status();
 
       if (currentStatus != lastStatus) {
-        SerialPrintln("");
-        SerialPrint("DEBUG: WiFi status changed: ");
+        SerialPrintln(F(""));
+        SerialPrint(F("DEBUG: WiFi status changed: "));
         switch(currentStatus) {
-          case WL_IDLE_STATUS: SerialPrintln("IDLE"); break;
-          case WL_NO_SSID_AVAIL: SerialPrintln("NO_SSID_AVAIL"); break;
-          case WL_SCAN_COMPLETED: SerialPrintln("SCAN_COMPLETED"); break;
-          case WL_CONNECTED: SerialPrintln("CONNECTED"); break;
-          case WL_CONNECT_FAILED: SerialPrintln("CONNECT_FAILED"); break;
-          case WL_CONNECTION_LOST: SerialPrintln("CONNECTION_LOST"); break;
-          case WL_DISCONNECTED: SerialPrintln("DISCONNECTED"); break;
-          default: SerialPrintln("UNKNOWN (" + String(currentStatus) + ")"); break;
+          case WL_IDLE_STATUS: SerialPrintln(F("IDLE")); break;
+          case WL_NO_SSID_AVAIL: SerialPrintln(F("NO_SSID_AVAIL")); break;
+          case WL_SCAN_COMPLETED: SerialPrintln(F("SCAN_COMPLETED")); break;
+          case WL_CONNECTED: SerialPrintln(F("CONNECTED")); break;
+          case WL_CONNECT_FAILED: SerialPrintln(F("CONNECT_FAILED")); break;
+          case WL_CONNECTION_LOST: SerialPrintln(F("CONNECTION_LOST")); break;
+          case WL_DISCONNECTED: SerialPrintln(F("DISCONNECTED")); break;
+          default: SerialPrintln(F("UNKNOWN (") + String(currentStatus) + F(")")); break;
         }
         lastStatus = currentStatus;
       }
 
       if (maxAttemptsCount % 10 == 0 && maxAttemptsCount > 0) {
         SerialPrint('\n');
-        SerialPrint("DEBUG: Still connecting... (" + String(maxAttemptsCount) + "s elapsed)");
+        SerialPrint(F("DEBUG: Still connecting... (") + String(maxAttemptsCount) + F("s elapsed)"));
       }
       else {
         SerialPrint('.');
@@ -193,18 +193,18 @@ void initWiFi() {
       maxAttemptsCount++;
 
       if ((millis() - connectionStartTime) > (wifiConnectTimeoutSeconds * 1000)) {
-        SerialPrintln("");
-        SerialPrintln("DEBUG: Connection timeout exceeded");
+        SerialPrintln(F(""));
+        SerialPrintln(F("DEBUG: Connection timeout exceeded"));
         break;
       }
     }
 
     if (WiFi.status() == WL_CONNECTED) {
-      SerialPrintln("");
-      SerialPrint("DEBUG: Successfully Connected to WiFi. IP Address: ");
+      SerialPrintln(F(""));
+      SerialPrint(F("DEBUG: Successfully Connected to WiFi. IP Address: "));
       SerialPrintln(WiFi.localIP());
-      SerialPrintln("DEBUG: Signal Strength (RSSI): " + String(WiFi.RSSI()) + " dBm");
-      SerialPrintln("DEBUG: Connection took " + String(maxAttemptsCount) + " seconds");
+      SerialPrintln(F("DEBUG: Signal Strength (RSSI): ") + String(WiFi.RSSI()) + F(" dBm"));
+      SerialPrintln(F("DEBUG: Connection took ") + String(maxAttemptsCount) + F(" seconds"));
 
       delay(500);
       yield();
@@ -212,22 +212,22 @@ void initWiFi() {
       if (WiFi.status() == WL_CONNECTED) {
         isWifiConfigured = true;
       } else {
-        SerialPrintln("DEBUG: WARNING - Connection lost immediately after connect!");
+        SerialPrintln(F("DEBUG: WARNING - Connection lost immediately after connect!"));
         isWifiConfigured = false;
       }
     } else {
-      SerialPrintln("");
-      SerialPrintln("DEBUG: ERROR - Failed to connect to WiFi after " + String(maxAttemptsCount) + " seconds");
-      SerialPrintln("DEBUG: Final WiFi status: " + String(WiFi.status()));
-      SerialPrintln("DEBUG: Possible causes:");
-      SerialPrintln("DEBUG:   - Incorrect SSID or password");
-      SerialPrintln("DEBUG:   - Router not in range");
-      SerialPrintln("DEBUG:   - Router not allowing new connections");
-      SerialPrintln("DEBUG:   - Power supply issues (ESP01 needs stable 3.3V)");
+      SerialPrintln(F(""));
+      SerialPrintln(F("DEBUG: ERROR - Failed to connect to WiFi after ") + String(maxAttemptsCount) + F(" seconds"));
+      SerialPrintln(F("DEBUG: Final WiFi status: ") + String(WiFi.status()));
+      SerialPrintln(F("DEBUG: Possible causes:"));
+      SerialPrintln(F("DEBUG:   - Incorrect SSID or password"));
+      SerialPrintln(F("DEBUG:   - Router not in range"));
+      SerialPrintln(F("DEBUG:   - Router not allowing new connections"));
+      SerialPrintln(F("DEBUG:   - Power supply issues (ESP01 needs stable 3.3V)"));
       isWifiConfigured = false;
     }
   } else {
-    SerialPrintln("DEBUG: ERROR - WiFi SSID or password not configured!");
+    SerialPrintln(F("DEBUG: ERROR - WiFi SSID or password not configured!"));
     isWifiConfigured = false;
   }
 
