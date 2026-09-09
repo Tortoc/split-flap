@@ -44,6 +44,12 @@ const uint8_t addressPins[ADDRESS_PIN_COUNT] = {A0, A1, A2, A3, 3, 4}; //bit 0..
 
 //constants others
 #define BAUDRATE 115200
+//Valid stepperSpeed range - must stay in sync with ESPMaster.ino's MIN_SPEED/MAX_SPEED
+//(convertSpeed() there clamps to this same range before ever sending). Used defensively here too
+//(see receiveLetter()'s comment) - a garbled-but-checksum-valid speed byte shouldn't reach the
+//motor unclamped, same reasoning as ESPMaster.ino's own comment on convertSpeed().
+#define MIN_SPEED 1
+#define MAX_SPEED 12
 #define ROTATIONDIRECTION -1 //-1 for reverse direction
 #define OVERHEATINGTIMEOUT 2 //timeout in seconds to avoid overheating of stepper. After starting rotation, the counter will start. Stepper won't move again until timeout is passed
 unsigned long lastRotation = 0;
@@ -327,8 +333,13 @@ void receiveLetter(int numBytes) {
     Wire.read();
   }
 
-  if (actualBytes < 2) {
-    return; //too short to contain even a 1-byte payload + checksum - ignore
+  //Every real message from ESPMaster carries at least 2 payload bytes (letter + speed) plus the
+  //checksum. Previously only actualBytes<2 (payloadLen<1) was rejected here, which let a bare
+  //{letter, checksum} 2-byte packet through with payloadLen==1 - receiveArray[1] (the checksum
+  //byte itself) then got silently read as the speed a few lines below (found 2026-09-09,
+  //CODE_REVIEW.md #20, reproduced with such a packet).
+  if (actualBytes < 3) {
+    return; //too short to contain a real letter+speed payload + checksum - ignore
   }
 
   int payloadLen = actualBytes - 1; //last received byte is always the checksum
@@ -346,15 +357,29 @@ void receiveLetter(int numBytes) {
     return;
   }
 
+  //A matching checksum only proves the bytes weren't corrupted in transit, not that they're a
+  //*plausible* letter position - a garbled-but-checksum-valid value outside the 45 real positions
+  //(1-in-256 chance per corrupted byte) was previously accepted and driven to as-is (found
+  //2026-09-09, CODE_REVIEW.md #20, reproduced with e.g. letter=100). Reject it the same way
+  //ESPMaster.ino's own translateLettertoInt() already only ever returns 0..44 (or -1).
+  if (receiveArray[0] < 0 || receiveArray[0] >= AMOUNTFLAPS) {
+    return;
+  }
+
   //Write received bytes to correct variables
   receivedNumber = receiveArray[0];
-  //Defensive floor: stepperSpeed=0 makes Stepper::setSpeed(0) divide by zero, spinning
+  //Defensive floor AND ceiling: stepperSpeed=0 makes Stepper::setSpeed(0) divide by zero, spinning
   //Stepper::step() forever waiting for a delay that never elapses (needs a power cycle to
-  //recover) - independent of what the master actually sends.
-  stepperSpeed = receiveArray[1] > 0 ? receiveArray[1] : 1;
+  //recover); an implausibly high speed risks missed steps/motor strain, the same concern
+  //ESPMaster.ino's own convertSpeed() comment already raises - constrain() to the same
+  //MIN_SPEED..MAX_SPEED range used there, independent of what the master actually sends.
+  stepperSpeed = constrain(receiveArray[1], MIN_SPEED, MAX_SPEED);
   if (payloadLen >= 4) {
     newCalOffset = receiveArray[2] + (receiveArray[3] << 8);
-    if (newCalOffset != calOffset) {
+    //Same range ESPMaster.ino's own /api/units?action=offset already validates against
+    //(0..STEPS-1) - without this, a garbled-but-checksum-valid offset could set calOffset far
+    //outside a real rotation's worth of steps, the same failure mode fixed in getOffset() above.
+    if (newCalOffset < STEPS && newCalOffset != calOffset) {
       calOffset = newCalOffset;
       //Defer the actual EEPROM.put() to loop() - receiveLetter() runs inside the AVR's TWI
       //interrupt handler with global interrupts disabled, and EEPROM.put() blocks for several ms.
@@ -397,7 +422,13 @@ int getaddress() {
 //gets magnet sensor offset from EEPROM in steps
 void getOffset() {
   EEPROM.get(eeAddress, calOffset);
-  if (calOffset < 0) {
+  //calOffset is uint16_t - "< 0" can never be true, this check never did anything (found
+  //2026-09-09, CODE_REVIEW.md #17). A blank/erased EEPROM (0xFFFF = 65535, e.g. after a fresh ISP
+  //chip-erase) needs an upper-bound check instead: without one, calibrate()'s
+  //stepper.step(ROTATIONDIRECTION * calOffset) runs with a bogus value far larger than one
+  //rotation's worth of steps - live-reproduced as an unintended ~3-minute spin. Same valid range
+  //ESPMaster.ino's own /api/units?action=offset already validates against (0..STEPS-1).
+  if (calOffset >= STEPS) {
     calOffset = 0;
   }
 #ifdef SERIAL_ENABLE

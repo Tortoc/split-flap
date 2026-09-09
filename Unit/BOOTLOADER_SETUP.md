@@ -168,6 +168,24 @@ bleibenden Teil per `avrdude -c ... -p atmega328p -t` und
 `dump flash 0x7800 32` (Bootloader) bzw. `dump flash 0x0 16` (App-Vektortabelle)
 gegenprüfen - nicht nur den gerade geschriebenen Teil.
 
+**Einschränkung dieser Faustregel** (live erlebt, 2026-09-09, siehe
+BUGFIX_LOG #140 - lokal): `-D` funktioniert nur, wenn der Zielbereich schon
+**blank (`0xFF`)** ist - AVR-Flash kann ohne vorheriges Löschen nur Bits von
+1→0 setzen, nie zurück. Beim Versuch, per `-D` NUR den Bootloader auf einer
+Unit zu aktualisieren, die schon einen (alten) Bootloader hatte, entstand
+dadurch ein inkonsistenter Bit-Mix aus altem und neuem Inhalt (avrdude
+meldete einen Verifikationsfehler, `Warning: flash verification mismatch`) -
+sofort per vollem Chip-Erase + Neuschreiben beider Bereiche korrigiert.
+**Praktische Konsequenz:** ein bereits programmierter Bootloader kann NICHT
+in-place per ISP aktualisiert werden, ohne die App mit zu löschen - dafür
+gibt es keinen Weg, der beide Bereiche gleichzeitig erhält. Die volle Sequenz
+lautet dann: `avrdude -U flash:w:twiboot.hex:i` (ohne `-D`, kompletter
+Chip-Erase, App geht verloren) → App per I2C-Push wiederherstellen (siehe
+`ServiceUnitFirmwareFunctions.ino`s `pushFirmwareToUnit()` - genau der jetzt
+durch Punkt 137 abgesicherte Weg) → Kalibrierungs-Offset erneut setzen (vorher
+per EEPROM-Dump sichern, siehe Beispiel: `dump eeprom 0 4` zeigt `calOffset`
+als Little-Endian-`uint16_t` in den ersten beiden Bytes).
+
 ## Schritt 3: Smoke-Test (an der Ersatz-Unit, vor jeder verbauten Unit)
 
 Direkt nach `make install` + `make fuses` + erneutem App-Flash, **bevor**
