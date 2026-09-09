@@ -199,6 +199,22 @@ PendingRequestSlot pendingUnitsInfoSlot;
 PendingRequestSlot pendingLegacyI2CScanSlot;
 bool pendingUnitsInfoRequestDetail = false; //captured from the "detail" query param at request time
 
+//writeOffsetToUnit() used to be called directly from the /api/units?action=offset handler - the
+//only I2C write anywhere in this file NOT deferred to loop() like every other one, for no
+//documented reason (found 2026-09-09, CODE_REVIEW.md #30). Same deferred-request pattern as
+//pendingRescanSlot above.
+PendingRequestSlot pendingUnitOffsetSlot;
+int pendingUnitOffsetUnitId = -1;
+uint16_t pendingUnitOffsetValue = 0;
+
+//timezone.setLocation() does a synchronous network lookup against ezTime's timezoned service -
+//was called directly from the /api/timezone POST handler, blocking that AsyncWebServer callback
+//on network I/O instead of the response-stream/deferred-to-loop() pattern used everywhere else in
+//this file (found 2026-09-09, CODE_REVIEW.md #30). Same deferred-request pattern as
+//pendingRescanSlot/pendingUnitOffsetSlot above.
+PendingRequestSlot pendingTimezoneSlot;
+String pendingTimezoneValue = "";
+
 //Same reasoning, for the twiboot/bootloader endpoints (UNIT_BOOTLOADER_ENABLE).
 PendingRequestSlot pendingFirmwarePushSlot;
 int pendingFirmwarePushUnitIndex = -1;
@@ -578,50 +594,61 @@ void setup() {
         html += "</head><body>";
         html += "<h1>Split Flap - Debug Mode</h1>";
         html += "<button onclick='continueToNormal()'>Continue to Normal Mode</button>";
+        html += "<button onclick='loadDiag()'>Refresh Diagnostics</button>";
         html += "<div class='status'>Current Status: " + debugStatus + "</div>";
-        html += "<p>Debug mode is enabled. This page shows the initialization log. When you continue to normal mode, you'll also see error status panel, page load debug log, and serial debug log features.</p>";
+        html += "<p>Debug mode is enabled. This page shows current crash log and heap diagnostics. When you continue to normal mode, you'll also see error status panel and page load debug log features.</p>";
         html += "<div class='log-container' id='logContainer'>";
-        html += "<div style='color: #888;'>Loading log...</div>";
+        html += "<div style='color: #888;'>Loading diagnostics...</div>";
         html += "</div>";
         html += "<script>";
-        html += "function loadLog() {";
-        html += "  var xhr = new XMLHttpRequest();";
-        html += "  xhr.onreadystatechange = function() {";
-        html += "    if (this.readyState == 4) {";
-        html += "      var container = document.getElementById('logContainer');";
-        html += "      if (this.status == 200) {";
-        html += "        try {";
-        html += "          var data = JSON.parse(this.responseText);";
-        html += "          var html = '';";
-        html += "          if (data.logs && data.logs.length > 0) {";
-        html += "            for (var i = 0; i < data.logs.length; i++) {";
-        html += "              var entry = data.logs[i];";
-        html += "              var msg = entry.message || '';";
-        html += "              var timestamp = (entry.timestamp / 1000).toFixed(1) + 's';";
-        html += "              var colorClass = '';";
-        html += "              if (msg.indexOf('DEBUG:') >= 0) colorClass = 'debug';";
-        html += "              else if (msg.indexOf('ERROR') >= 0 || msg.indexOf('Error') >= 0) colorClass = 'error';";
-        html += "              else if (msg.indexOf('WARNING') >= 0 || msg.indexOf('Warning') >= 0) colorClass = 'warning';";
-        html += "              html += '<div class=\"log-entry\"><span class=\"timestamp\">[' + timestamp + ']</span><span class=\"' + colorClass + '\">' + escapeHtml(msg) + '</span></div>';";
-        html += "            }";
-        html += "          } else {";
-        html += "            html = '<div style=\"color: #888;\">No log messages yet. (Count: ' + (data.count || 0) + ')</div>';";
-        html += "          }";
-        html += "          container.innerHTML = html;";
-        html += "        } catch (e) {";
-        html += "          container.innerHTML = '<div style=\"color: #f48771;\">Error parsing log: ' + e.message + '<br>Response: ' + escapeHtml(this.responseText.substring(0, 200)) + '</div>';";
-        html += "        }";
+        //Was a 1s-interval poll of /log - that route (and its RAM ring buffer) was removed in an
+        //earlier session (BUGFIX_LOG #41-43, freeing heap headroom), leaving this page polling a
+        //dead endpoint (404 every second) whenever debug mode was on (found 2026-09-09,
+        //CODE_REVIEW.md #27). Switched to the diagnostic sources that actually exist now
+        //(/api/crash-log, /api/diag?type=heap) - a one-shot fetch on load plus a manual refresh
+        //button, not a re-added interval poll, to avoid reintroducing the same kind of steady-state
+        //cost that #41-43 removed.
+        html += "function loadDiag() {";
+        html += "  var container = document.getElementById('logContainer');";
+        html += "  container.innerHTML = '<div style=\"color: #888;\">Loading diagnostics...</div>';";
+        html += "  var xhrCrash = new XMLHttpRequest();";
+        html += "  xhrCrash.onreadystatechange = function() {";
+        html += "    if (this.readyState != 4) return;";
+        html += "    var crashHtml;";
+        html += "    if (this.status == 200) {";
+        html += "      var lines = this.responseText.split('\\n').filter(function(l) { return l.trim() != ''; });";
+        html += "      if (lines.length == 0) {";
+        html += "        crashHtml = '<div class=\"debug\">Crash log: empty</div>';";
         html += "      } else {";
-        html += "        container.innerHTML = '<div style=\"color: #f48771;\">Error loading log: Status ' + this.status + '</div>';";
+        html += "        crashHtml = '<div class=\"error\">Crash log (' + lines.length + ' entr' + (lines.length == 1 ? 'y' : 'ies') + '):</div>';";
+        html += "        for (var i = 0; i < lines.length; i++) {";
+        html += "          crashHtml += '<div class=\"log-entry\">' + escapeHtml(lines[i]) + '</div>';";
+        html += "        }";
         html += "      }";
+        html += "    } else {";
+        html += "      crashHtml = '<div class=\"error\">Error loading crash log: Status ' + this.status + '</div>';";
         html += "    }";
+        html += "    document.getElementById('crashLogSection').innerHTML = crashHtml;";
         html += "  };";
-        html += "  xhr.onerror = function() {";
-        html += "    var container = document.getElementById('logContainer');";
-        html += "    container.innerHTML = '<div style=\"color: #f48771;\">Network error loading log</div>';";
+        html += "  xhrCrash.onerror = function() {";
+        html += "    document.getElementById('crashLogSection').innerHTML = '<div class=\"error\">Network error loading crash log</div>';";
         html += "  };";
-        html += "  xhr.open('GET', '/log', true);";
-        html += "  xhr.send();";
+        html += "  xhrCrash.open('GET', '/api/crash-log', true);";
+        html += "  var xhrHeap = new XMLHttpRequest();";
+        html += "  xhrHeap.onreadystatechange = function() {";
+        html += "    if (this.readyState != 4) return;";
+        html += "    var heapHtml = this.status == 200";
+        html += "      ? '<div class=\"debug\">Heap: ' + escapeHtml(this.responseText) + '</div>'";
+        html += "      : '<div class=\"error\">Error loading heap diagnostics: Status ' + this.status + '</div>';";
+        html += "    document.getElementById('heapSection').innerHTML = heapHtml;";
+        html += "  };";
+        html += "  xhrHeap.onerror = function() {";
+        html += "    document.getElementById('heapSection').innerHTML = '<div class=\"error\">Network error loading heap diagnostics</div>';";
+        html += "  };";
+        html += "  xhrHeap.open('GET', '/api/diag?type=heap', true);";
+        html += "  container.innerHTML = '<div id=\"heapSection\">Loading...</div><div id=\"crashLogSection\"></div>';";
+        html += "  xhrCrash.send();";
+        html += "  xhrHeap.send();";
         html += "}";
         html += "function escapeHtml(text) {";
         html += "  var map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#039;' };";
@@ -638,8 +665,7 @@ void setup() {
         html += "  xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');";
         html += "  xhr.send('enabled=false');";
         html += "}";
-        html += "loadLog();";
-        html += "setInterval(loadLog, 1000);"; // Auto-refresh every second
+        html += "loadDiag();";
         html += "</script>";
         html += "</body></html>";
         
@@ -1432,14 +1458,16 @@ void setup() {
           return;
         }
 
-        SerialPrintln(F("Setting Unit ") + String(unitId) + F(" offset to ") + String(offset));
-        writeOffsetToUnit(unitId, (uint16_t)offset);
-        //Recalibration re-homes the unit - its previously-displayed letter is no longer
-        //guaranteed correct even though the cache's text/alignment are unchanged. See
-        //displayRenderGeneration's comment - CODE_REVIEW.md #14.
-        displayRenderGeneration++;
+        if (pendingUnitOffsetSlot.request != nullptr) {
+          request->send(503, "text/plain", "Another offset change is already in progress, try again shortly");
+          return;
+        }
 
-        request->send(202, "text/plain", "Offset sent. Unit is recalibrating now, this can take a few seconds.");
+        SerialPrintln(F("Setting Unit ") + String(unitId) + F(" offset to ") + String(offset));
+        //Deferred to loop() (see pendingUnitOffsetSlot's comment) - not written here directly.
+        pendingUnitOffsetUnitId = unitId;
+        pendingUnitOffsetValue = (uint16_t)offset;
+        pendingUnitOffsetSlot.accept(request);
         return;
       }
 
@@ -2058,18 +2086,15 @@ void setup() {
         return;
       }
 
-      // setLocation() does a live lookup against ezTime's timezoned service, so an invalid/
-      // unknown TZ database name is rejected here instead of silently persisting garbage.
-      if (!timezone.setLocation(newTimezoneValue)) {
-        SerialPrintln(F("Timezone change rejected: '") + newTimezoneValue + F("' not recognized"));
-        request->send(400, "text/plain", "Timezone not recognized - use a TZ database name like Europe/Berlin");
+      if (pendingTimezoneSlot.request != nullptr) {
+        request->send(503, "text/plain", "Another timezone change is already in progress, try again shortly");
         return;
       }
 
-      timezoneSetting = newTimezoneValue;
-      writeFile(LittleFS, timezonePath, timezoneSetting.c_str());
-      SerialPrintln(F("Timezone changed to: ") + timezoneSetting);
-      request->send(200, "text/plain", "Timezone changed");
+      //setLocation() does a live lookup against ezTime's timezoned service - deferred to loop()
+      //(see pendingTimezoneSlot's comment), not run here directly.
+      pendingTimezoneValue = newTimezoneValue;
+      pendingTimezoneSlot.accept(request);
     });
 
     //No dedicated GET here - quietHoursEnabled/Start/End are already folded into GET /api/settings
@@ -2182,6 +2207,72 @@ void loop() {
       AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
       serializeJson(doc, *response);
       deferredRequest->send(response);
+    }
+  }
+
+  if (pendingUnitOffsetSlot.request != nullptr) {
+    uint32_t generation;
+    AsyncWebServerRequest* deferredRequest = pendingUnitOffsetSlot.take(generation);
+
+    bool writeOk = writeOffsetToUnit(pendingUnitOffsetUnitId, pendingUnitOffsetValue);
+    //Recalibration re-homes the unit - its previously-displayed letter is no longer
+    //guaranteed correct even though the cache's text/alignment are unchanged. See
+    //displayRenderGeneration's comment - CODE_REVIEW.md #14.
+    displayRenderGeneration++;
+
+    if (pendingUnitOffsetSlot.stillConnected(generation)) {
+      if (writeOk) {
+        deferredRequest->send(202, "text/plain", "Offset sent. Unit is recalibrating now, this can take a few seconds.");
+      } else {
+        deferredRequest->send(503, "text/plain", "Failed to write offset to unit (I2C write failed) - try again");
+      }
+    }
+  }
+
+  if (pendingTimezoneSlot.request != nullptr) {
+    uint32_t generation;
+    AsyncWebServerRequest* deferredRequest = pendingTimezoneSlot.take(generation);
+
+    //Live network lookup against ezTime's timezoned service - an invalid/unknown TZ database name
+    //is rejected here instead of silently persisting garbage.
+    //
+    //KNOWN OPEN ISSUE, NOT FIXED (found + investigated 2026-09-09, CODE_REVIEW.md #30 - see
+    //BUGFIX_LOG, local, for the full writeup): setLocation() blocks for up to ezTime's own 2s
+    //TIMEZONED_TIMEOUT waiting on a UDP round-trip to an external service, plus whatever DNS
+    //resolution for that hostname takes first. Under real network stress (this project has an
+    //already-documented, router-level intermittent reachability gap, "WiFi ~30s cycle" - and a
+    //genuine WiFi AUTH_EXPIRE disconnect was newly confirmed live during this investigation) that
+    //wait can exceed the software watchdog's patience and reset the device. A wdtDisable()/
+    //wdtEnable() bracket around this call was tried as the ESP8266 core's own documented mitigation
+    //for a known-bounded blocking call - it was REVERTED after live-reproducing a WORSE failure
+    //mode with it in place: a genuine LoadStoreAlignment exception (invalid memory access,
+    //excvaddr=3) with its fault address landing inside the ROM's wdt_feed() routine, on this
+    //exact ESP8266 core/SDK version (3.1.2) - i.e. explicitly disabling the software watchdog
+    //around a multi-second blocking call apparently conflicts with something else in the SDK that
+    //expects it to stay active, corrupting internal state instead of just delaying a reset. This
+    //isn't specific to being called from loop() instead of the old AsyncWebServer callback - the
+    //exact same blocking call sat in the callback before this refactor and was equally exposed to
+    //the ORIGINAL (pre-wdtDisable) risk; moving it here just happened to be what got tested during
+    //a live network stress window and caught it. A real fix needs either a non-blocking rewrite of
+    //ezTime's timezoned UDP protocol (avoids the block entirely) or a version of this mitigation
+    //that doesn't touch the SDK's watchdog internals - both bigger undertakings than fits safely
+    //under time pressure against already-verified production hardware. Left as the original,
+    //unwrapped call, matching its behavior before this whole investigation.
+    bool timezoneOk = timezone.setLocation(pendingTimezoneValue);
+    if (timezoneOk) {
+      timezoneSetting = pendingTimezoneValue;
+      writeFile(LittleFS, timezonePath, timezoneSetting.c_str());
+      SerialPrintln(F("Timezone changed to: ") + timezoneSetting);
+    } else {
+      SerialPrintln(F("Timezone change rejected: '") + pendingTimezoneValue + F("' not recognized"));
+    }
+
+    if (pendingTimezoneSlot.stillConnected(generation)) {
+      if (timezoneOk) {
+        deferredRequest->send(200, "text/plain", "Timezone changed");
+      } else {
+        deferredRequest->send(400, "text/plain", "Timezone not recognized - use a TZ database name like Europe/Berlin");
+      }
     }
   }
 
@@ -2532,9 +2623,28 @@ void loop() {
     isPendingUnitsReset = false; //nothing to reset, don't leave this stuck pending
   }
   
-  //ezTime library sync
-  events(); 
-  
+  //ezTime library sync - events() can internally block for up to ~1.5s (ezTime's own NTP_TIMEOUT)
+  //plus DNS resolution time whenever a scheduled NTP resync happens to be due (every 6h per
+  //setInterval() above, or every 20s - ezTime's hardcoded, not-publicly-configurable NTP_RETRY -
+  //after ANY single failed attempt), but on every OTHER tick (the overwhelming majority) it's a
+  //cheap no-op that just checks whether anything is due yet.
+  //
+  //TRIED AND REVERTED (2026-09-09, CODE_REVIEW.md #30): wrapping this bare call in
+  //wdtDisable()/wdtEnable() unconditionally, on the reasoning that it shares the exact same
+  //blocking-network-call risk as /api/timezone's setLocation() (see that call site's own comment).
+  //That reasoning about the underlying risk was correct, but doing it HERE - on literally every
+  //single loop() tick, thousands of times per second, not just the rare tick where a sync is
+  //actually due - caused a NEW, worse, live-reproduced problem: a genuine LoadStoreAlignment
+  //exception (invalid unaligned memory access, excvaddr=3) with its fault address landing directly
+  //inside the ROM's wdt_feed() routine - i.e. rapidly toggling the software watchdog on/off at this
+  //frequency corrupts something in the SDK's own watchdog-adjacent state, a strictly worse failure
+  //mode (a real exception, not just an occasional clean self-recovering WDT reset) than the
+  //original risk being mitigated. Reverted to the plain, unwrapped call - the actual fix for THIS
+  //specific site's exposure (if pursued further) would need to gate the wdtDisable()/wdtEnable()
+  //bracket to only the rare tick where ezTime is actually about to attempt the network round-trip,
+  //not wrap the call unconditionally.
+  events();
+
   //Process every second
   unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= 1000) {

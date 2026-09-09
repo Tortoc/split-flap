@@ -1,6 +1,18 @@
 //Non-blocking display-update state machine - showText() starts a job and returns immediately;
 //updateDisplayJob() does at most one I2C transfer per loop() tick.
 
+//millis() wraps back to 0 after ~49.7 days. A direct "millis() >= target"/"millis() < target"
+//comparison breaks right at that wraparound: once millis() has wrapped but target (captured
+//before the wrap) hasn't, the comparison flips its answer for a while - a pause could end
+//instantly, or a poll due just before the wrap could block for a very long time afterwards
+//(found 2026-09-09, CODE_REVIEW.md #28, derived from the code, not reproduced live - would need
+//>49 days of uptime). Casting the unsigned difference to signed gives the correct answer across
+//the wraparound too, since unsigned subtraction itself wraps consistently either way - this is
+//the standard Arduino millis()-rollover-safe comparison idiom.
+static inline bool millisReached(unsigned long target) {
+  return (long)(millis() - target) >= 0;
+}
+
 enum DisplayJobState {
   DISPLAY_JOB_IDLE,
   DISPLAY_JOB_WAIT_READY_BEFORE,
@@ -140,7 +152,7 @@ bool pollDisplayJobWaitAllUnitsReady() {
     return true; //nothing to wait on, e.g. unitsAmount == 0
   }
 
-  if (millis() < displayJob.waitNextPollAt) {
+  if (!millisReached(displayJob.waitNextPollAt)) {
     return false; //not due yet this tick
   }
 
@@ -266,7 +278,7 @@ void updateDisplayJob() {
       return;
 
     case DISPLAY_JOB_DEBUG_PAUSE:
-      if (millis() >= displayJob.pauseUntil) {
+      if (millisReached(displayJob.pauseUntil)) {
         finishDisplayJob();
       }
       return;
@@ -357,7 +369,7 @@ void updateDisplayJob() {
       return;
 
     case DISPLAY_JOB_PAUSE_BETWEEN_LINES:
-      if (millis() >= displayJob.pauseUntil) {
+      if (millisReached(displayJob.pauseUntil)) {
         displayJob.currentLineIndex++;
         if (displayJob.currentLineIndex < displayJob.lineCount) {
           resetDisplayJobWaitSubstate();
@@ -372,7 +384,7 @@ void updateDisplayJob() {
       return;
 
     case DISPLAY_JOB_PAUSE_AFTER_FINISH:
-      if (millis() >= displayJob.pauseUntil) {
+      if (millisReached(displayJob.pauseUntil)) {
         finishDisplayJob();
       }
       return;
@@ -405,7 +417,7 @@ void updateUnitsResetSequence() {
       return;
 
     case UNITS_RESET_SEQ_PAUSE:
-      if (millis() >= unitsResetSequencePauseUntil) {
+      if (millisReached(unitsResetSequencePauseUntil)) {
         if (startDisplayJob(createRepeatingString('.'), convertSpeed(flapSpeed), 0, "")) {
           unitsResetSequenceState = UNITS_RESET_SEQ_BLANK2;
         }

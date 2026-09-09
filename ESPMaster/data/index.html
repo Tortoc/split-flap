@@ -1756,9 +1756,16 @@
 
 								//Scheduled messages aren't part of this response either (see BUGFIX_LOG #117 -
 								//moved to its own endpoint, same reasoning as rotation items above) - load them
-								//separately, but only if there's actually something to fetch.
+								//separately, but only fetch if there's actually something to fetch. If the count
+								//just dropped to 0 (e.g. the last scheduled message fired or got removed
+								//elsewhere), skip the round-trip but still clear any stale rendered list directly
+								//(found 2026-09-09, CODE_REVIEW.md #26b - the previous version left the last-
+								//rendered, now-outdated list standing forever in this case since neither branch
+								//ever ran).
 								if (responseObject.scheduledMessageCount > 0) {
 									loadScheduledMessages();
+								} else {
+									showScheduledMessages([]);
 								}
 
 								showContent();

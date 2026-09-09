@@ -11,6 +11,7 @@
 #include <EEPROM.h>
 #include <avr/sleep.h>
 #include <avr/wdt.h>
+#include <util/atomic.h>
 
 //sentinel value sent over I2C (in place of a letter) to request a reboot into the twiboot
 //bootloader for a firmware update - see Unit/BOOTLOADER_SETUP.md. Out of range of valid
@@ -62,7 +63,23 @@ boolean newData = false;
 #endif
 
 //globals
-int displayedLetter = 0; //currently shown letter
+//Wire's onReceive()/onRequest() callbacks (receiveLetter()/requestEvent() below) run directly
+//inside the AVR TWI interrupt handler, with global interrupts disabled for their own duration -
+//so a variable written or read by BOTH one of those callbacks and "normal" code (setup()/loop()/
+//everything they call) needs `volatile` (found 2026-09-09, CODE_REVIEW.md #30): without it, the
+//compiler is free to cache a copy of the variable in a register across normal-code statements,
+//since it can't see the ISR-side write - normal code could then keep observing a stale value
+//indefinitely, an optimization-dependent bug that wouldn't show up in every build. `volatile`
+//alone doesn't make a multi-byte (int/uint16_t) access atomic though - normal code CAN be
+//interrupted mid-access by the ISR, unlike the ISR interrupting itself - see the ATOMIC_BLOCK
+//uses below at the specific multi-byte cross-context accesses where a torn value would actually
+//matter physically (how far the motor turns, whether a rotation is issued at all). The frequent,
+//self-correcting-next-poll ones (currentPhaseProgress, currentlyrotating, currentPhase - a stuck-
+//detection heartbeat and busy flags, not motor-movement or rotation-dispatch decisions) are left
+//as plain volatile without extra wrapping, deliberately - see BOOTLOADER_SETUP.md-style reasoning:
+//the risk here is real but narrow and non-destructive, not worth the added per-step overhead/risk
+//of wrapping the hot stepLetters()/calibrate() progress-counter loops too.
+volatile int displayedLetter = 0; //currently shown letter
 int desiredLetter = 0; //letter to be shown
 const char letters[] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'Ä', 'Ö', 'Ü', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', '-', '?', '!'};
 Stepper stepper(STEPS, STEPPERPIN1, STEPPERPIN3, STEPPERPIN2, STEPPERPIN4); //stepper setup
@@ -71,22 +88,22 @@ bool lastInd2 = false; //store last status of phase
 bool lastInd3 = false; //store last status of phase
 bool lastInd4 = false; //store last status of phase
 float missedSteps = 0; //cummulate steps <1, to compensate via additional step when reaching >1
-int currentlyrotating = 0; // 1 = drum is currently rotating, 0 = drum is standing still
+volatile int currentlyrotating = 0; // 1 = drum is currently rotating, 0 = drum is standing still
 
 //Extra I2C status byte so ESPMaster can tell a slow calibration search from an actually stuck unit.
 #define PHASE_IDLE        0
 #define PHASE_CALIBRATING 1
 #define PHASE_ROTATING    2
-uint8_t currentPhase = PHASE_IDLE;
-uint16_t currentPhaseProgress = 0; //steps done so far in the current phase - lets a watcher tell "still making progress" from "stuck"
-int stepperSpeed = 10; //current speed of stepper, value only for first homing
+volatile uint8_t currentPhase = PHASE_IDLE;
+volatile uint16_t currentPhaseProgress = 0; //steps done so far in the current phase - lets a watcher tell "still making progress" from "stuck"
+volatile int stepperSpeed = 10; //current speed of stepper, value only for first homing
 int eeAddress = 0;   //EEPROM address for calibration offset
-uint16_t calOffset;       //Offset for calibration in steps, stored in EEPROM, gets read in setup
-int receivedNumber = 0;
+volatile uint16_t calOffset;       //Offset for calibration in steps, stored in EEPROM, gets read in setup
+volatile int receivedNumber = 0;
 int i2cAddress;
-bool forceRecalibrate = false;   //new offset received via I2C, recalibrate immediately in loop()
-bool pendingEepromWrite = false; //new offset received via I2C, EEPROM.put() must happen in loop(), not the ISR
-bool enterBootloaderRequested = false; //CMD_ENTER_BOOTLOADER received, triggers a watchdog reset in loop()
+volatile bool forceRecalibrate = false;   //new offset received via I2C, recalibrate immediately in loop()
+volatile bool pendingEepromWrite = false; //new offset received via I2C, EEPROM.put() must happen in loop(), not the ISR
+volatile bool enterBootloaderRequested = false; //CMD_ENTER_BOOTLOADER received, triggers a watchdog reset in loop()
 
 //sleep globals
 const unsigned long WAIT_TIME = 2000;    //wait time before sleep routine gets executed again in milliseconds
@@ -158,7 +175,14 @@ void loop() {
   //the ISR - see the comment there) before recalibrating.
   if (pendingEepromWrite) {
     pendingEepromWrite = false;
-    writeToEEPROM(calOffset);
+    //calOffset is 2 bytes - snapshot it atomically so a TWI interrupt firing mid-read (updating
+    //calOffset again from a second, near-simultaneous I2C write) can't hand writeToEEPROM() a
+    //torn, half-old/half-new value (see the volatile-block comment near calOffset's declaration).
+    uint16_t offsetSnapshot;
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+      offsetSnapshot = calOffset;
+    }
+    writeToEEPROM(offsetSnapshot);
   }
 
   //if a new calibration offset arrived via I2C, recalibrate immediately so the change is visible right away
@@ -200,7 +224,17 @@ void loop() {
   }  // end of time to sleep
 
   //check if new letter was received through i2c
-  if (displayedLetter != receivedNumber)
+  //Both are 2-byte ints, each independently written from the other context (receivedNumber only
+  //by the ISR, displayedLetter only by rotateToLetter() below) - snapshot both atomically so this
+  //comparison (and the value handed to rotateToLetter()) can't see one of them mid-update, torn
+  //between its old and new byte (see the volatile-block comment near their declarations).
+  int receivedNumberSnapshot;
+  int displayedLetterSnapshot;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    receivedNumberSnapshot = receivedNumber;
+    displayedLetterSnapshot = displayedLetter;
+  }
+  if (displayedLetterSnapshot != receivedNumberSnapshot)
   {
     /*
       #ifdef SERIAL_ENABLE
@@ -212,7 +246,7 @@ void loop() {
       #endif
     */
     //rotate to new letter
-    rotateToLetter(receivedNumber);
+    rotateToLetter(receivedNumberSnapshot);
   }
 
 #ifdef SERIAL_ENABLE
@@ -498,7 +532,14 @@ int calibrate(bool initialCalibration) {
     else {
       //reached marker, go to calibrated offset position
       reachedMarker = true;
-      stepper.step(ROTATIONDIRECTION * calOffset);
+      //Snapshot atomically before use - a torn calOffset here would turn the motor by a wrong,
+      //momentarily-garbled step count instead of just reporting a stale status value (see the
+      //volatile-block comment near calOffset's declaration).
+      uint16_t offsetSnapshot;
+      ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        offsetSnapshot = calOffset;
+      }
+      stepper.step(ROTATIONDIRECTION * offsetSnapshot);
       displayedLetter = 0;
       missedSteps = 0;
 #ifdef SERIAL_ENABLE
