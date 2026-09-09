@@ -83,17 +83,26 @@ void checkScheduledMessages() {
       SerialPrint(F("Scheduled Message to be Shown Indefinitely: "));
       SerialPrintln(scheduledMessage.ShowIndefinitely ? F("Yes") : F("No"));
 
+      bool shown;
       if (scheduledMessage.ShowIndefinitely) {
         deviceMode = DEVICE_MODE_TEXT;
         inputText = scheduledMessage.Message;
-        showText(scheduledMessage.Message);
+        shown = showText(scheduledMessage.Message);
       }
       else {
-        showText(scheduledMessage.Message, scheduledMessageDisplayTimeMillis);
-      }      
+        shown = showText(scheduledMessage.Message, scheduledMessageDisplayTimeMillis);
+      }
 
-      scheduledMessages.remove(scheduledMessageIndex);
-      writeScheduledMessagesToFile();
+      //Only dequeue on actual success (found 2026-09-09, CODE_REVIEW.md #10) - a busy display or
+      //no detected units previously still removed the entry unconditionally, silently losing the
+      //message. Leaving it queued means the next ~1s tick retries the same (still-due) message;
+      //no risk of it firing twice, since ShowIndefinitely's own deviceMode/inputText assignment
+      //above already makes the very next tick's normal mode-dispatch show it regardless of this
+      //call's own result, and a still-queued entry just means this function tries again too.
+      if (shown) {
+        scheduledMessages.remove(scheduledMessageIndex);
+        writeScheduledMessagesToFile();
+      }
       break;
     }
   }

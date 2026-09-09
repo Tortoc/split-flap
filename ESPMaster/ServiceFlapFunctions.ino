@@ -3,33 +3,43 @@
 //alignmentOverride: "" (default) uses the global default alignment; a non-empty value
 //("left"/"center"/"right") overrides it just for this message - used by Rotation items that set
 //their own alignment (see checkRotation()).
-void showText(String message) {
-  showText(message, 0, "");
+//
+//Returns whether the message was actually accepted (already showing, or a job was successfully
+//started) vs. genuinely dropped (no units, or the display was busy and couldn't start a job) -
+//added 2026-09-09, CODE_REVIEW.md #10: callers that consume a one-shot input (scheduled messages
+//dequeuing an entry, /api/text) were previously discarding this entirely and treating every call
+//as successful, silently losing the message whenever the display happened to be busy.
+bool showText(String message) {
+  return showText(message, 0, "");
 }
 
-void showText(String message, int delayMillis) {
-  showText(message, delayMillis, "");
+bool showText(String message, int delayMillis) {
+  return showText(message, delayMillis, "");
 }
 
-void showText(String message, int delayMillis, String alignmentOverride) {
+bool showText(String message, int delayMillis, String alignmentOverride) {
   //Nothing to display to - see scanI2CBus(). Guarded here (rather than at every call site)
-  //so scheduled messages, countdown, clock/date modes etc. all stay safe automatically.
+  //so scheduled messages, countdown, clock/date modes etc. all stay safe automatically. A real
+  //failure to deliver, not a no-op - see the comment above this function.
   if (unitsAmount <= 0) {
-    return;
+    return false;
   }
 
   //Quiet Hours override whatever was actually requested - checked here, not at each call site, so
   //every path (mode dispatch, Rotation, scheduled messages, the /api/text push endpoint, ...)
-  //parks the display uniformly without needing its own check.
+  //parks the display uniformly without needing its own check. Deliberate, not a failure - the
+  //caller asked to show something and quiet hours correctly overrode it.
   if (isQuietHoursActive()) {
     message = "";
   }
 
   if (lastWrittenText != message || alignmentUpdated) {
     //If a job is still running, this attempt is silently skipped - lastWrittenText hasn't updated
-    //yet, so the next ~1s loop() tick naturally retries once the display is free.
-    startDisplayJob(message, convertSpeed(flapSpeed), (unsigned long)delayMillis, alignmentOverride);
+    //yet, so the next ~1s loop() tick naturally retries once the display is free. Propagate
+    //startDisplayJob()'s own result rather than assuming success.
+    return startDisplayJob(message, convertSpeed(flapSpeed), (unsigned long)delayMillis, alignmentOverride);
   }
+  return true; //already showing this - not a failure, nothing to do
 }
 
 //Translates char to letter position

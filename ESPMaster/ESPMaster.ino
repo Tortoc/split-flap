@@ -1767,11 +1767,19 @@ void setup() {
         //Temporary: deviceMode/inputText are deliberately left untouched, same pattern
         //checkScheduledMessages() already uses for a non-indefinite scheduled message - once the
         //hold time elapses, the next 1s tick's normal mode loop redisplays whatever deviceMode
-        //currently is on its own, no extra "revert" logic needed here.
-        showText(newText, (int)(durationSeconds * 1000));
+        //currently is on its own, no extra "revert" logic needed here. Because of that, there's no
+        //other code path that will ever retry this specific call - unlike the permanent branch
+        //below, a busy display here means the message is genuinely lost, not just delayed. Report
+        //that honestly instead of claiming success (found 2026-09-09, CODE_REVIEW.md #10).
+        if (!showText(newText, (int)(durationSeconds * 1000))) {
+          request->send(503, "text/plain", "Display is busy right now (a message is still being shown) - nothing was displayed, try again shortly");
+          return;
+        }
       } else {
         //Permanent: switches the display into Text mode, same net effect as submitting the main
-        //form with deviceMode=text&inputText=<text>.
+        //form with deviceMode=text&inputText=<text>. Unlike the temporary branch above, a busy
+        //display here isn't a loss - deviceMode/inputText are set regardless, so the normal 1s
+        //mode-dispatch loop keeps retrying this exact message on its own until it succeeds.
         if (deviceMode != DEVICE_MODE_TEXT) {
           deviceMode = DEVICE_MODE_TEXT;
           writeFile(LittleFS, deviceModePath, deviceMode.c_str());
