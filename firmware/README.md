@@ -30,6 +30,21 @@ firmware/
 
 ## Build-Konfiguration (wie diese Dateien entstanden sind)
 
+⚠️ **Das `:eesz=4M1M` ist Teil des FQBN, kein optionaler Zusatz.** Ein Build
+mit dem bloßen `esp8266:esp8266:generic` (ohne `eesz`) kompiliert still und
+ohne Fehler - aber mit einem falschen (kleineren) Flash-Layout, das die
+echte LittleFS-Partition und die WLAN-Zugangsdaten unsichtbar macht (Gerät
+verhält sich wie zurückgesetzt: eigener AP-Modus, leere Einstellungen) und
+gleichzeitig den OTA-Slot auf ~438KB schrumpft, was auch die
+Web-OTA-Selbstreparatur mit dem korrekten Build vereitelt (Absturz mitten im
+Chunk-Upload). **Nach JEDEM Compile+Flash zwingend `flashConfigured` gegen
+`flashReal` in `GET /api/diag?type=heap` prüfen**, nicht erst bei einem
+Chip-Tausch (siehe Vorfall Punkt 136 in `BUGFIX_LOG.md`, 2026-09-08/09).
+Falls es doch passiert: Web-OTA kann sich selbst nicht reparieren (siehe
+oben) - Recovery nur per seriellem `arduino-cli upload`/`esptool.py`, das
+unabhängig vom aktuell laufenden (falschen) Partitionsschema an absoluten
+Flash-Adressen schreibt.
+
 **ESPMaster** (`esp8266:esp8266:generic`, Flash-Layout `eesz=4M1M`):
 ```bash
 arduino-cli compile --fqbn "esp8266:esp8266:generic:eesz=4M1M" ESPMaster

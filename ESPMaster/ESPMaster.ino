@@ -474,7 +474,15 @@ void setup() {
     
     //No .setCacheControl() - drove heap fragmentation up fast on repeated requests when tried.
     //Hard-refresh needed after updating a web file.
-    webServer.serveStatic("/", LittleFS, "/");
+    //Defensive heap guard (BUGFIX_LOG #51/#44 pattern): LittleFSImpl::open() -> operator new()
+    //is one of two confirmed abort() sites under low heap (the other, header assembly deep inside
+    //this library, isn't guardable from here). Pure boolean check, no response sent from the
+    //filter itself - a false here falls through to onNotFound below, which decides 503 vs 404.
+    //Threshold has real margin above what a single static file response needs, current normal
+    //free heap on this build is >20000 bytes, so this should never trigger in normal operation.
+    webServer.serveStatic("/", LittleFS, "/").setFilter([](AsyncWebServerRequest * request) {
+      return ESP.getFreeHeap() >= 6000;
+    });
 
     //All API routes below live under a single "/api/" prefix - full endpoint reference in API.md.
     webServer.on("/", HTTP_GET, [](AsyncWebServerRequest * request) {
@@ -1924,7 +1932,14 @@ void setup() {
     });
 
     //Without this, ESPAsyncWebSrv's catch-all handler returns 500 instead of 404 for unknown routes.
+    //Also the fallback for the static-file heap filter above: a request that was declined there
+    //(free heap too low to safely open+serve a file) lands here too - tell the caller to retry
+    //shortly instead of a plain, misleading 404.
     webServer.onNotFound([](AsyncWebServerRequest * request) {
+      if (ESP.getFreeHeap() < 6000) {
+        request->send(503, "text/plain", "Low memory, try again shortly");
+        return;
+      }
       request->send(404, "text/plain", "Not Found");
     });
 
