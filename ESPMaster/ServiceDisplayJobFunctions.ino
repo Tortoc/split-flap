@@ -187,6 +187,35 @@ void finishDisplayJob() {
 //idle. Does at most one I2C read/write per call, so a single call is always fast regardless of
 //display job state.
 void updateDisplayJob() {
+  //Quiet Hours became active mid-job (found 2026-09-09, CODE_REVIEW.md #13): previously only a
+  //NEW showText() call got blanked - an already-running multi-line job kept writing its remaining
+  //lines and moving motors regardless, and a long finalPauseMs hold (e.g. a temporary /api/text
+  //push) blocked blanking until the whole hold elapsed. Abort cleanly to IDLE here instead,
+  //checked once per tick before the state switch below - safe at every state: WRITE_LINE hasn't
+  //sent anything yet for the CURRENT line if we're here before it runs this tick, and every other
+  //state is either a pure timing wait or an already-in-flight unit rotation that ESPMaster has no
+  //way to cancel anyway (a Unit keeps rotating to its last commanded letter regardless of what
+  //ESPMaster does next - aborting here just stops issuing FURTHER commands, it never interrupts
+  //one already sent). Deliberately does NOT call finishDisplayJob() - that would mark
+  //originalMessage as "lastWrittenText" even though only part of it (or none) was actually shown.
+  //Leaving lastWrittenText untouched (still whatever was last actually completed) guarantees the
+  //very next showText("") call - Quiet Hours forces message="" - sees a mismatch and starts a
+  //fresh job to actually blank the display, through the normal, already-proven job machinery.
+  //
+  //originalMessage != "" is required here (bug found live during this same fix's own testing,
+  //2026-09-09): without it, the blank-out job itself - started by that very showText("") call
+  //above, its originalMessage correctly "" - would get caught by this exact same check and
+  //re-aborted before ever reaching WRITE_LINE, forever, since Quiet Hours stays active the whole
+  //time by definition. The display never actually went blank; it just silently never finished
+  //starting. Checking originalMessage lets a job that's ALREADY trying to show blank text (i.e.
+  //doing exactly what Quiet Hours wants) run to completion, and only aborts a job trying to show
+  //real content.
+  if (displayJob.state != DISPLAY_JOB_IDLE && isQuietHoursActive() && displayJob.originalMessage != "") {
+    SerialPrintln(F("Quiet Hours became active mid-job - aborting remaining lines"));
+    displayJob.state = DISPLAY_JOB_IDLE;
+    return;
+  }
+
   switch (displayJob.state) {
     case DISPLAY_JOB_IDLE:
       return;
