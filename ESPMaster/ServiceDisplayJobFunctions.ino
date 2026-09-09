@@ -34,6 +34,11 @@ struct DisplayJob {
   //deriving it at completion time would silently attribute the job's LAST rendered line to
   //whatever alignment happens to be current NOW, not what was actually sent to the units).
   String lastUsedEffectiveAlignment = "";
+  //Set true by DISPLAY_JOB_WRITE_LINE if any unit's I2C write failed (any line, not just the
+  //last) - finishDisplayJob() uses this to force a retry on the very next showText() call for
+  //the same text, even though the job otherwise completed and nothing else about the cache
+  //changed. See CODE_REVIEW.md #15.
+  bool hadWriteFailure = false;
 
   //Sub-state for the "wait for all units ready" phase - one unit at a time, 90s max-wait / 15s
   //stuck-timeout, spread non-blockingly across loop() ticks (see pollDisplayJobWaitAllUnitsReady() below).
@@ -96,6 +101,7 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   displayJob.finalPauseMs = finalPauseMs;
   displayJob.alignmentOverride = alignmentOverride;
   displayJob.lastUsedEffectiveAlignment = ""; //defensive reset - see the field's own comment
+  displayJob.hadWriteFailure = false; //reset once per job, not per line - see the field's own comment
 
   SerialPrintln(displayJob.isMultiLine ? String(F("Showing a split down message")) : (F("Showing a simple message: ") + message));
 
@@ -201,6 +207,14 @@ void finishDisplayJob() {
   lastWrittenAlignment = displayJob.lastUsedEffectiveAlignment != "" ? displayJob.lastUsedEffectiveAlignment :
     (displayJob.alignmentOverride != "" ? displayJob.alignmentOverride : alignment);
   lastRenderedGeneration = displayRenderGeneration;
+  //If any unit's write failed partway through this job, the physical display doesn't actually
+  //match lastWrittenText even though everything above just claimed it does. Bump the generation
+  //AFTER snapshotting lastRenderedGeneration (order matters - see CODE_REVIEW.md #14's identical
+  //reasoning) so the very next showText() call for this same text sees a mismatch and retries the
+  //whole thing, including the unit that failed. See CODE_REVIEW.md #15.
+  if (displayJob.hadWriteFailure) {
+    displayRenderGeneration++;
+  }
   SerialPrintln(F("Done showing message"));
   displayJob.state = DISPLAY_JOB_IDLE;
 }
@@ -294,7 +308,13 @@ void updateDisplayJob() {
         SerialPrintln(currentLetterPosition);
 
         if (currentLetterPosition != -1) {
-          writeToUnit(unitIndex, currentLetterPosition, displayJob.flapSpeedValue);
+          if (!writeToUnit(unitIndex, currentLetterPosition, displayJob.flapSpeedValue)) {
+            //Don't retry inline here - writeToUnit() already tried a bus recovery once. Just
+            //remember it and let finishDisplayJob() force a full retry of this same text on the
+            //next showText() call, once the current (now-known-incomplete) job otherwise
+            //completes normally. See CODE_REVIEW.md #15.
+            displayJob.hadWriteFailure = true;
+          }
         }
       }
 

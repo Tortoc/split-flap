@@ -74,8 +74,13 @@ uint8_t i2cChecksum(uint8_t* data, int len) {
   return checksum;
 }
 
-//Write letter position and speed in rpm to single unit
-void writeToUnit(int address, int letter, int flapSpeed) {
+//Write letter position and speed in rpm to single unit. Returns true if the I2C write actually
+//succeeded (Wire.endTransmission() == 0) - previously discarded entirely (found 2026-09-09,
+//CODE_REVIEW.md #15): a NACK'd write left that one unit's flap untouched, but the caller
+//(DISPLAY_JOB_WRITE_LINE) had no way to know and went on to mark the whole line "shown" once every
+//unit merely reported "not moving" - true for a unit that never received a new letter in the first
+//place, not just one that finished moving to it.
+bool writeToUnit(int address, int letter, int flapSpeed) {
   uint8_t sendArray[2] = {(uint8_t)letter, (uint8_t)flapSpeed}; //Array with values to send to unit
 
   Wire.beginTransmission(address);
@@ -88,13 +93,22 @@ void writeToUnit(int address, int letter, int flapSpeed) {
     Wire.write(sendArray[index]);
   }
   Wire.write(i2cChecksum(sendArray, sizeof sendArray / sizeof sendArray[0]));
-  Wire.endTransmission(); //send values to unit
+  uint8_t result = Wire.endTransmission(); //send values to unit
+  if (result != 0) {
+    SerialPrintln(F("ERROR: Unit ") + String(address) + F(" - write failed (Wire.endTransmission()=") + String(result) + F(")"));
+    recoverI2CBus(); //same "try recovery right at the point of failure" pattern as readUnitInfo()
+  }
+  return result == 0;
 }
 
 //Write a new calibration offset to a single unit. The unit recalibrates immediately upon
 //receiving this and ends up showing letter 0 (blank), so that letter is sent along with it
-//to avoid triggering a second, separate rotation.
-void writeOffsetToUnit(int address, uint16_t offset) {
+//to avoid triggering a second, separate rotation. Returns true on a successful I2C write - see
+//writeToUnit()'s comment (CODE_REVIEW.md #15); the caller (/api/units?action=offset) already
+//tells the admin recalibration is in progress rather than instantaneous, so on failure it just
+//logs here rather than retrying - a genuinely stuck offset is already visible via the unit's
+//own reported offset not matching what was requested.
+bool writeOffsetToUnit(int address, uint16_t offset) {
   int currentSpeed = convertSpeed(flapSpeed);
 
   SerialPrint(F("Writing offset "));
@@ -110,7 +124,12 @@ void writeOffsetToUnit(int address, uint16_t offset) {
     Wire.write(sendArray[index]);
   }
   Wire.write(i2cChecksum(sendArray, sizeof sendArray / sizeof sendArray[0]));
-  Wire.endTransmission();
+  uint8_t result = Wire.endTransmission();
+  if (result != 0) {
+    SerialPrintln(F("ERROR: Unit ") + String(address) + F(" - offset write failed (Wire.endTransmission()=") + String(result) + F(")"));
+    recoverI2CBus();
+  }
+  return result == 0;
 }
 
 //Lightweight version for callers that only need status/offset - 3 bytes instead of 6, so the
