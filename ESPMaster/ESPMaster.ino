@@ -736,6 +736,11 @@ void setup() {
       SerialPrintln(F("DEBUG: Request Post of Form Received"));
 
       bool submissionError = false;
+      //Set if replaceRotationItemsFromJson() rejects invalid JSON - see CODE_REVIEW.md #24. Kept
+      //separate from submissionError above: unlike that flag (which aborts the whole request
+      //with 400 before touching anything), the rest of this request still gets processed
+      //normally either way - only the final response wording changes.
+      bool rotationItemsUpdateRejected = false;
 
       //Separate declarations - `bool a, b = false;` only initializes b, not a.
       bool newMessageScheduleEnabledValue = false;
@@ -1028,8 +1033,17 @@ void setup() {
         //from the rotation tab's onsubmit case - submitting from any other tab resubmits its
         //stale/default "[]" and would otherwise silently wipe an existing, loaded rotation list.
         if (newDeviceModeValue == DEVICE_MODE_ROTATION && hasNewRotationItems) {
-          replaceRotationItemsFromJson(newRotationItemsJson);
-          SerialPrintln(F("Rotation Items Updated, count: ") + String(rotationItemCount));
+          //Return value checked now (found 2026-09-09, CODE_REVIEW.md #24) - invalid rotation
+          //JSON no longer wipes the existing list, but the response below should say so too,
+          //rather than unconditionally claiming success while quietly discarding the submission.
+          //The rest of this request (scheduled messages, mode switch, etc.) still gets processed
+          //normally - a broken rotation submission doesn't need to block unrelated fields in the
+          //same request.
+          if (replaceRotationItemsFromJson(newRotationItemsJson)) {
+            SerialPrintln(F("Rotation Items Updated, count: ") + String(rotationItemCount));
+          } else {
+            rotationItemsUpdateRejected = true;
+          }
         }
 
         //If its a new scheduled message, add it to the backlog and proceed, don't want to change device mode
@@ -1059,7 +1073,11 @@ void setup() {
           }
         }
 
-        request->send(200, "text/plain", "OK");
+        if (rotationItemsUpdateRejected) {
+          request->send(400, "text/plain", "OK, but the submitted rotation items were invalid JSON and were NOT applied - the existing rotation list is unchanged.");
+        } else {
+          request->send(200, "text/plain", "OK");
+        }
       }
     });
 

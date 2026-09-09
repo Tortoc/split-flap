@@ -59,34 +59,53 @@ void checkRotation() {
 
 //Rebuilds the whole rotation list from a JSON array - a full replace, the client always submits
 //the complete list. Extra entries beyond ROTATION_ITEMS_MAX are dropped as a server-side backstop.
-void replaceRotationItemsFromJson(String rotationItemsJson) {
+//Returns whether the submitted JSON was actually valid and applied - previously void, silently
+//wiping the list on invalid input with no way for the caller to even know (found 2026-09-09,
+//CODE_REVIEW.md #24).
+bool replaceRotationItemsFromJson(String rotationItemsJson) {
+  //rotationItemCount used to be zeroed unconditionally right here, before the JSON was even
+  //looked at - a syntax error or a top-level value that isn't a JSON array fell through to the
+  //`else` below, which only logged a message and did nothing to undo that reset. The existing,
+  //previously-working rotation list was gone regardless, and writeRotationItemsToFile() at the
+  //end ran unconditionally too, persisting the now-empty list - while the caller
+  //(ESPMaster.ino's /api/settings POST handler) still unconditionally answered 200 OK, since
+  //this function returned nothing to report failure with.
+  //
+  //Every individual item field below already uses ArduinoJson's `| default` fallback operator,
+  //which never fails - a missing or wrong-typed field just becomes a sensible default, not an
+  //error. So there's no genuine PER-ITEM validation concern to guard against here, only the
+  //TOP-LEVEL one (malformed JSON, or valid JSON that isn't an array) - fixed by only touching
+  //rotationItemCount/rotationItems/the persisted file once that's already confirmed to hold,
+  //leaving the previous, working list completely untouched otherwise.
+  if (rotationItemsJson == "") {
+    return true; //nothing submitted - leave the existing list exactly as it is, don't wipe it either
+  }
+
+  JsonDocument jsonDocument;
+  DeserializationError deserialisationError = deserializeJson(jsonDocument, rotationItemsJson);
+
+  if (deserialisationError || !jsonDocument.is<JsonArray>()) {
+    SerialPrintln(F("Invalid rotation items JSON - keeping the existing list, not touching it"));
+    return false;
+  }
+
   rotationItemCount = 0;
-
-  if (rotationItemsJson != "") {
-    JsonDocument jsonDocument;
-    DeserializationError deserialisationError = deserializeJson(jsonDocument, rotationItemsJson);
-
-    if (!deserialisationError && jsonDocument.is<JsonArray>()) {
-      for (JsonVariant value : jsonDocument.as<JsonArray>()) {
-        if (rotationItemCount >= ROTATION_ITEMS_MAX) {
-          SerialPrintln(F("Rotation items JSON has more than ROTATION_ITEMS_MAX entries - dropping the rest"));
-          break;
-        }
-
-        RotationItem &item = rotationItems[rotationItemCount];
-        item.Type = value["type"] | DEVICE_MODE_TEXT;
-        item.Value = String((const char*)(value["value"] | ""));
-        item.Format = String((const char*)(value["format"] | ""));
-        item.TargetDateTimeUnix = value["targetDateTimeUnix"] | 0;
-        item.Prefix = String((const char*)(value["prefix"] | ""));
-        item.Suffix = String((const char*)(value["suffix"] | ""));
-        item.DurationSeconds = value["durationSeconds"] | 5;
-        item.Alignment = String((const char*)(value["alignment"] | ""));
-        rotationItemCount++;
-      }
-    } else {
-      SerialPrintln(F("Invalid rotation items JSON - keeping the list empty"));
+  for (JsonVariant value : jsonDocument.as<JsonArray>()) {
+    if (rotationItemCount >= ROTATION_ITEMS_MAX) {
+      SerialPrintln(F("Rotation items JSON has more than ROTATION_ITEMS_MAX entries - dropping the rest"));
+      break;
     }
+
+    RotationItem &item = rotationItems[rotationItemCount];
+    item.Type = value["type"] | DEVICE_MODE_TEXT;
+    item.Value = String((const char*)(value["value"] | ""));
+    item.Format = String((const char*)(value["format"] | ""));
+    item.TargetDateTimeUnix = value["targetDateTimeUnix"] | 0;
+    item.Prefix = String((const char*)(value["prefix"] | ""));
+    item.Suffix = String((const char*)(value["suffix"] | ""));
+    item.DurationSeconds = value["durationSeconds"] | 5;
+    item.Alignment = String((const char*)(value["alignment"] | ""));
+    rotationItemCount++;
   }
 
   //Always start a freshly-submitted sequence from the beginning.
@@ -94,6 +113,7 @@ void replaceRotationItemsFromJson(String rotationItemsJson) {
   rotationItemStartedAtSeconds = 0;
 
   writeRotationItemsToFile();
+  return true;
 }
 
 //Convert the rotation items to a JSON document and save to file
