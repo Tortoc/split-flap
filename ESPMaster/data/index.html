@@ -1986,20 +1986,20 @@
 			if (dateUnix !== 0) {
 				var countdownDate = new Date(dateUnix * 1000);
 				if (countdownDate >= currentDate) {
-					currentCountdownDate.value = convertDateToString(countdownDate);
+					currentCountdownDate.value = convertDateOnlyToString(countdownDate);
 
 					if (countdownDate - currentDate < 24000) {
-						currentCountdownDate.min = convertDateToString(nextDayDate);
+						currentCountdownDate.min = convertDateOnlyToString(nextDayDate);
 						return;
 					}
 				}
 			}
 			else {
 				//Set date fields to be a minimum of tomorrows date
-				currentCountdownDate.value = convertDateToString(nextDayDate);
+				currentCountdownDate.value = convertDateOnlyToString(nextDayDate);
 			}
 
-			currentCountdownDate.min = convertDateToString(nextDayDate);
+			currentCountdownDate.min = convertDateOnlyToString(nextDayDate);
 		}
 
 		//Countup counts days elapsed since a date, so - unlike Countdown above - it's constrained to
@@ -2011,13 +2011,13 @@
 
 			if (dateUnix !== 0) {
 				var countupDate = new Date(dateUnix * 1000);
-				currentCountupDate.value = convertDateToString(countupDate);
+				currentCountupDate.value = convertDateOnlyToString(countupDate);
 			}
 			else {
-				currentCountupDate.value = convertDateToString(currentDate);
+				currentCountupDate.value = convertDateOnlyToString(currentDate);
 			}
 
-			currentCountupDate.max = convertDateToString(currentDate);
+			currentCountupDate.max = convertDateOnlyToString(currentDate);
 		}
 
 		function convertDateToString(dateTime) {
@@ -2029,6 +2029,19 @@
 			const minutes = String(dateTime.getMinutes()).padStart(2, '0');
 
 			return `${year}-${month}-${day}T${hours}:${minutes}`;
+		}
+
+		//Same as convertDateToString() above, but without the time component - for the two
+		//<input type="date"> fields (Countdown/Countup), which reject a "YYYY-MM-DDTHH:mm" value
+		//outright (found 2026-09-09, CODE_REVIEW.md #12: assigning an invalid-for-the-control-type
+		//value to .value/.min/.max on a date input is silently ignored per the HTML spec, leaving
+		//it empty - reproduced live, both fields showed "" after every page load).
+		function convertDateOnlyToString(dateTime) {
+			const year = dateTime.getFullYear();
+			const month = String(dateTime.getMonth() + 1).padStart(2, '0');
+			const day = String(dateTime.getDate()).padStart(2, '0');
+
+			return `${year}-${month}-${day}`;
 		}
 
 		//Converts a <input type="datetime-local">'s raw value ("YYYY-MM-DDTHH:mm", never a
