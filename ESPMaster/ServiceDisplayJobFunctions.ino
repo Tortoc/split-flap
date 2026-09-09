@@ -27,6 +27,13 @@ struct DisplayJob {
   unsigned long finalPauseMs = 0;
   unsigned long pauseUntil = 0;
   String alignmentOverride = ""; //"" = use the global default alignment, see showText()
+  //Set by DISPLAY_JOB_WRITE_LINE to whatever effective alignment ("left"/"center"/"right") it
+  //actually just used - finishDisplayJob() records THIS into lastWrittenAlignment, not a fresh
+  //re-computation from alignmentOverride/the global alignment, since the global one could have
+  //changed again while this job was still running (found 2026-09-09, CODE_REVIEW.md #14: re-
+  //deriving it at completion time would silently attribute the job's LAST rendered line to
+  //whatever alignment happens to be current NOW, not what was actually sent to the units).
+  String lastUsedEffectiveAlignment = "";
 
   //Sub-state for the "wait for all units ready" phase - one unit at a time, 90s max-wait / 15s
   //stuck-timeout, spread non-blockingly across loop() ticks (see pollDisplayJobWaitAllUnitsReady() below).
@@ -68,7 +75,7 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   String messageDisplay = message == "" ? "<Blank>" : message;
   SerialPrintln(F("Showing new Message"));
   SerialPrintln(F("New Message: ") + messageDisplay);
-  SerialPrintln(F("Alignment Updated: ") + String(alignmentUpdated ? F("Yes") : F("No")));
+  SerialPrintln(F("Effective alignment: ") + (alignmentOverride != "" ? alignmentOverride : alignment));
 
   displayJob.originalMessage = message;
   //parsedLines is a plain local here, used and discarded entirely within this function - safe.
@@ -88,6 +95,7 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   displayJob.flapSpeedValue = flapSpeedValue;
   displayJob.finalPauseMs = finalPauseMs;
   displayJob.alignmentOverride = alignmentOverride;
+  displayJob.lastUsedEffectiveAlignment = ""; //defensive reset - see the field's own comment
 
   SerialPrintln(displayJob.isMultiLine ? String(F("Showing a split down message")) : (F("Showing a simple message: ") + message));
 
@@ -178,7 +186,21 @@ bool pollDisplayJobWaitAllUnitsReady() {
 
 void finishDisplayJob() {
   lastWrittenText = displayJob.originalMessage;
-  alignmentUpdated = false;
+  //Record the alignment this job ACTUALLY used - displayJob.lastUsedEffectiveAlignment, captured
+  //live in DISPLAY_JOB_WRITE_LINE, not re-derived here from alignmentOverride/the current global
+  //alignment, which could have changed again while this job was still running (found live during
+  //this same fix's own testing, 2026-09-09: re-deriving here would attribute the job to whatever
+  //alignment happens to be current NOW, not what was really sent to the units - silently masking
+  //exactly the desync this fix exists to catch). Falls back to a fresh computation only for the
+  //DISPLAY_JOB_DEBUG_PAUSE path (UNIT_CALLS_DISABLE builds), which never runs DISPLAY_JOB_WRITE_LINE
+  //at all. The generation is recorded as of THIS completion, not when the job started - if
+  //displayRenderGeneration moved on again while this job was still running, that's a real (if
+  //rare) further change this render never reflects, and leaving lastRenderedGeneration at the
+  //now-stale value correctly forces yet another redraw next time rather than wrongly appearing
+  //"already handled". See displayRenderGeneration's own comment - CODE_REVIEW.md #14.
+  lastWrittenAlignment = displayJob.lastUsedEffectiveAlignment != "" ? displayJob.lastUsedEffectiveAlignment :
+    (displayJob.alignmentOverride != "" ? displayJob.alignmentOverride : alignment);
+  lastRenderedGeneration = displayRenderGeneration;
   SerialPrintln(F("Done showing message"));
   displayJob.state = DISPLAY_JOB_IDLE;
 }
@@ -244,6 +266,7 @@ void updateDisplayJob() {
       //"" (no override, the common case) falls back to the global default alignment - see
       //showText()/startDisplayJob(). Only Rotation items ever set a non-empty override.
       String effectiveAlignment = displayJob.alignmentOverride != "" ? displayJob.alignmentOverride : alignment;
+      displayJob.lastUsedEffectiveAlignment = effectiveAlignment; //see the field's own comment
 
       String aligned = line;
       if (effectiveAlignment == ALIGNMENT_MODE_LEFT) {

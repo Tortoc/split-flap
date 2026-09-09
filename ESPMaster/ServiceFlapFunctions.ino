@@ -33,7 +33,17 @@ bool showText(String message, int delayMillis, String alignmentOverride) {
     message = "";
   }
 
-  if (lastWrittenText != message || alignmentUpdated) {
+  //"" (no override, the common case) falls back to the global default alignment - same fallback
+  //DISPLAY_JOB_WRITE_LINE itself uses once the job actually runs.
+  String effectiveAlignment = alignmentOverride != "" ? alignmentOverride : alignment;
+
+  //Redraw if the text or effective alignment actually differs from what's really on the display,
+  //OR if displayRenderGeneration has moved on since the last completed render even though neither
+  //of those changed - see the comment on displayRenderGeneration (found 2026-09-09,
+  //CODE_REVIEW.md #14: the old check only ever compared message text plus a single global
+  //alignment-changed flag, missing per-item Rotation alignment changes and any hardware-side
+  //desync entirely).
+  if (lastWrittenText != message || lastWrittenAlignment != effectiveAlignment || lastRenderedGeneration != displayRenderGeneration) {
     //If a job is still running, this attempt is silently skipped - lastWrittenText hasn't updated
     //yet, so the next ~1s loop() tick naturally retries once the display is free. Propagate
     //startDisplayJob()'s own result rather than assuming success.

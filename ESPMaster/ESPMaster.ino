@@ -269,7 +269,25 @@ String countdownToDateUnix = "";
 String countupSinceDateUnix = "";
 String lastWrittenText = "";
 String lastReceivedMessageDateTime = "";
-bool alignmentUpdated = false;
+//Together with lastWrittenText and displayRenderGeneration below, what showText() compares a new
+//request against to decide whether a redraw is actually needed - see the long comment on
+//displayRenderGeneration (found 2026-09-09, CODE_REVIEW.md #14). Replaces the old bare
+//alignmentUpdated bool, which only ever reflected the GLOBAL default alignment setting, not the
+//per-call alignmentOverride Rotation items use - two Rotation entries with identical text but
+//different per-item alignment never triggered a redraw. lastWrittenAlignment stores whichever
+//alignment (override or global) was ACTUALLY used for the last completed render, so it's directly
+//comparable against a new call's own effective alignment regardless of which one it came from.
+String lastWrittenAlignment = "";
+//Bumped whenever something could make the PHYSICAL display state diverge from what
+//lastWrittenText/lastWrittenAlignment claim, without the requested text or alignment itself
+//necessarily changing - the global alignment setting changing (replaces the old alignmentUpdated
+//bool), a rescan (a unit may have restarted and lost its displayed letter), or a per-unit
+//calibration offset change (recalibration re-homes the unit, so its previously-displayed letter
+//is no longer guaranteed correct). showText() redraws whenever this doesn't match
+//lastRenderedGeneration (the generation that was current at the last completed render, set by
+//finishDisplayJob()), even if lastWrittenText and the effective alignment are both unchanged.
+unsigned long displayRenderGeneration = 0;
+unsigned long lastRenderedGeneration = 0;
 bool isPendingReboot = false;
 bool isPendingUnitsReset = false;
 bool isWifiConfigured = false;
@@ -932,7 +950,7 @@ void setup() {
         //Only if a new alignment value
         if (newAlignmentValue != "" && alignment != newAlignmentValue) {
           alignment = newAlignmentValue;
-          alignmentUpdated = true;
+          displayRenderGeneration++; //see the comment on this variable - CODE_REVIEW.md #14
 
           writeFile(LittleFS, alignmentPath, alignment.c_str());
           SerialPrintln(F("Alignment Updated: ") + alignment);
@@ -1398,6 +1416,10 @@ void setup() {
 
         SerialPrintln(F("Setting Unit ") + String(unitId) + F(" offset to ") + String(offset));
         writeOffsetToUnit(unitId, (uint16_t)offset);
+        //Recalibration re-homes the unit - its previously-displayed letter is no longer
+        //guaranteed correct even though the cache's text/alignment are unchanged. See
+        //displayRenderGeneration's comment - CODE_REVIEW.md #14.
+        displayRenderGeneration++;
 
         request->send(202, "text/plain", "Offset sent. Unit is recalibrating now, this can take a few seconds.");
         return;
@@ -1406,6 +1428,11 @@ void setup() {
       if (action == "reset") {
         SerialPrintln(F("Request to Reset Units Received"));
         isPendingUnitsReset = true; //picked up in loop()
+        //updateUnitsResetSequence() writes its own blank1/pause/blank2 sequence directly, bypassing
+        //showText()/lastWrittenText entirely - without this, the cache would still believe
+        //whatever text was shown before the reset is still correctly displayed. See
+        //displayRenderGeneration's comment - CODE_REVIEW.md #14.
+        displayRenderGeneration++;
         request->send(200, "text/plain", "Units are resetting/recalibrating now.");
         return;
       }
@@ -2588,6 +2615,13 @@ int scanI2CBus() {
     detectedAmount++;
   }
   unitsAmount = detectedAmount;
+  //A rescan can mean a unit restarted and lost its displayed letter (or the unit count itself
+  //changed) - either way the physical display may no longer match the text-content cache, even
+  //though the cache's own text/alignment never changed. See displayRenderGeneration's comment -
+  //CODE_REVIEW.md #14. Bumped unconditionally (including at boot, harmless there) rather than
+  //only when detectedAmount differs from before, since a unit restarting mid-scan with the SAME
+  //final count is exactly the case this needs to catch.
+  displayRenderGeneration++;
 
   // Summary report
   SerialPrintln(F(""));
