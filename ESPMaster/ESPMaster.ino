@@ -150,24 +150,60 @@ int unitsAmount = 0; //auto-detected via I2C scan, sequential from 0 - see scanI
 //Calling Wire directly from an AsyncWebServer callback crashes the ESP (too little stack for I2C
 //clock-stretch handling) - these just stash the request, loop() does the I2C work and sends the
 //response itself. One in flight at a time; a second request while one's pending gets 503.
-AsyncWebServerRequest* pendingRescanRequest = nullptr;
-AsyncWebServerRequest* pendingUnitsInfoRequest = nullptr;
-AsyncWebServerRequest* pendingLegacyI2CScanRequest = nullptr;
+//
+//Generation-tracked, not a bare pointer+bool: ESPAsyncWebServer deletes the request object on
+//client disconnect, even mid-flight, and loop() frees the slot for a new request the moment it
+//starts working on the current one (so a second request isn't needlessly rejected while the
+//first is still being processed). Found 2026-09-09 (CODE_REVIEW.md #4): with a bare pointer+bool,
+//an old request's disconnect firing during that window would unconditionally null out whatever
+//NEWER request has since taken the slot, and flag it as disconnected too - a real, reachable race
+//between two genuinely unrelated requests, not just a single slow one. accept()/take()/
+//stillConnected() below scope every disconnect to the specific request generation it belongs to.
+struct PendingRequestSlot {
+  AsyncWebServerRequest* request = nullptr;
+  uint32_t generation = 0;             //bumped every time a new request is accepted into this slot
+  uint32_t disconnectedGeneration = 0; //which generation (if any) has disconnected; 0 = none yet (generations start at 1)
 
-//ESPAsyncWebServer deletes the request object on client disconnect, even mid-flight - each pending
-//request gets a matching *Disconnected flag so loop() knows its pointer is no longer safe to use.
-bool pendingRescanRequestDisconnected = false;
-bool pendingUnitsInfoRequestDisconnected = false;
-bool pendingLegacyI2CScanRequestDisconnected = false;
+  //Call from the HTTP request handler when accepting a new request into this (assumed-empty) slot.
+  //Registers the disconnect callback itself, correctly scoped to this specific generation.
+  void accept(AsyncWebServerRequest* newRequest) {
+    uint32_t myGeneration = ++generation;
+    request = newRequest;
+    newRequest->onDisconnect([this, myGeneration]() {
+      disconnectedGeneration = myGeneration;
+      if (generation == myGeneration) { //still the current occupant - safe to clear the slot too
+        request = nullptr;
+      }
+    });
+  }
+
+  //Call from loop() when starting to process this slot - returns the request to use and frees the
+  //slot immediately so a new request can be accepted while this one's work is still in progress.
+  //generationOut identifies this specific request for the stillConnected() check below.
+  AsyncWebServerRequest* take(uint32_t &generationOut) {
+    AsyncWebServerRequest* result = request;
+    generationOut = generation;
+    request = nullptr;
+    return result;
+  }
+
+  //Call from loop() right before using the request returned by take() (e.g. ->send()) - false
+  //means that specific request's connection is gone and the pointer is no longer safe to touch.
+  bool stillConnected(uint32_t generation) {
+    return disconnectedGeneration != generation;
+  }
+};
+
+PendingRequestSlot pendingRescanSlot;
+PendingRequestSlot pendingUnitsInfoSlot;
+PendingRequestSlot pendingLegacyI2CScanSlot;
 bool pendingUnitsInfoRequestDetail = false; //captured from the "detail" query param at request time
 
 //Same reasoning, for the twiboot/bootloader endpoints (UNIT_BOOTLOADER_ENABLE).
-AsyncWebServerRequest* pendingFirmwarePushRequest = nullptr;
+PendingRequestSlot pendingFirmwarePushSlot;
 int pendingFirmwarePushUnitIndex = -1;
-bool pendingFirmwarePushRequestDisconnected = false;
-AsyncWebServerRequest* pendingBootloaderProbeRequest = nullptr;
+PendingRequestSlot pendingBootloaderProbeSlot;
 int pendingBootloaderProbeUnitIndex = -1;
-bool pendingBootloaderProbeRequestDisconnected = false;
 
 //Search for parameter in HTTP POST request
 const char* PARAM_ALIGNMENT = "alignment";
@@ -306,6 +342,10 @@ enum OtaPhase { OTA_PHASE_NONE, OTA_PHASE_BEGIN, OTA_PHASE_WRITE, OTA_PHASE_FINI
 volatile OtaPhase otaPendingPhase = OTA_PHASE_NONE; //what loop() should do next
 volatile OtaPhase otaCompletedPhase = OTA_PHASE_NONE;
 volatile uint32_t otaBeginSize = 0;
+//Bytes actually handed to Update.write() so far, tracked ourselves rather than trusting
+//Update.progress() at finish time (found 2026-09-09, live-verified against a real firmware image
+//- see the comment at the finish-phase comparison below for why Update.progress() alone is wrong).
+volatile size_t otaBytesWritten = 0;
 volatile bool otaChunkRejected = false;
 volatile bool otaResultReady = false;
 volatile bool otaResultSuccess = false;
@@ -314,8 +354,7 @@ volatile unsigned long otaLastActivityAt = 0; //watchdog for an abandoned upload
 //90s: a client retrying a dropped chunk over flaky WiFi can genuinely take a while even though the
 //upload itself is fine.
 #define OTA_ABANDONED_TIMEOUT_MS 90000
-AsyncWebServerRequest* pendingFirmwareUploadRequest = nullptr;
-bool pendingFirmwareUploadRequestDisconnected = false;
+PendingRequestSlot pendingFirmwareUploadSlot; //reused in turn by all three /api/firmware-* steps
 #endif
 #if UNIT_BOOTLOADER_ENABLE == true
 bool unitFirmwareUploadAuthFailed = false;
@@ -1114,16 +1153,11 @@ void setup() {
     webServer.on("/api/i2c-scan", HTTP_GET, [](AsyncWebServerRequest * request) {
       SerialPrintln(F("DEBUG: I2C scan requested"));
       //Deferred to loop().
-      if (pendingLegacyI2CScanRequest != nullptr) {
+      if (pendingLegacyI2CScanSlot.request != nullptr) {
         request->send(503, "text/plain", "Another I2C scan is already in progress, try again shortly");
         return;
       }
-      pendingLegacyI2CScanRequestDisconnected = false;
-      pendingLegacyI2CScanRequest = request;
-      request->onDisconnect([]() {
-        pendingLegacyI2CScanRequest = nullptr;
-        pendingLegacyI2CScanRequestDisconnected = true;
-      });
+      pendingLegacyI2CScanSlot.accept(request);
     });
 
 #if UNIT_BOOTLOADER_ENABLE == true
@@ -1272,36 +1306,26 @@ void setup() {
           return;
         }
 
-        if (pendingFirmwarePushRequest != nullptr) {
+        if (pendingFirmwarePushSlot.request != nullptr) {
           request->send(503, "text/plain", "Another firmware push is already in progress, try again shortly");
           return;
         }
 
         pendingFirmwarePushUnitIndex = unitId;
-        pendingFirmwarePushRequestDisconnected = false;
-        pendingFirmwarePushRequest = request;
-        //Note: an in-flight pushFirmwareToUnit() always runs to completion regardless of this flag
-        //(by design) - it just has nowhere to report the result if the client already left.
-        request->onDisconnect([]() {
-          pendingFirmwarePushRequest = nullptr;
-          pendingFirmwarePushRequestDisconnected = true;
-        });
+        //Note: an in-flight pushFirmwareToUnit() always runs to completion regardless of a
+        //disconnect (by design) - it just has nowhere to report the result if the client already left.
+        pendingFirmwarePushSlot.accept(request);
         return;
       }
 
       if (action == "probe") {
-        if (pendingBootloaderProbeRequest != nullptr) {
+        if (pendingBootloaderProbeSlot.request != nullptr) {
           request->send(503, "text/plain", "Another bootloader probe is already in progress, try again shortly");
           return;
         }
 
         pendingBootloaderProbeUnitIndex = unitId;
-        pendingBootloaderProbeRequestDisconnected = false;
-        pendingBootloaderProbeRequest = request;
-        request->onDisconnect([]() {
-          pendingBootloaderProbeRequest = nullptr;
-          pendingBootloaderProbeRequestDisconnected = true;
-        });
+        pendingBootloaderProbeSlot.accept(request);
         return;
       }
 
@@ -1318,18 +1342,13 @@ void setup() {
     webServer.on("/api/units", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
       if (request->method() == HTTP_GET) {
         SerialPrintln(F("DEBUG: Admin units request received"));
-        if (pendingUnitsInfoRequest != nullptr) {
+        if (pendingUnitsInfoSlot.request != nullptr) {
           request->send(503, "text/plain", "Another units request is already in progress, try again shortly");
           return;
         }
         //Opt-in heavy 6-byte read (adds phase/progress) only via ?detail=1 - routine polling stays cheap.
         pendingUnitsInfoRequestDetail = request->hasParam("detail");
-        pendingUnitsInfoRequestDisconnected = false;
-        pendingUnitsInfoRequest = request;
-        request->onDisconnect([]() {
-          pendingUnitsInfoRequest = nullptr;
-          pendingUnitsInfoRequestDisconnected = true;
-        });
+        pendingUnitsInfoSlot.accept(request);
         return;
       }
 
@@ -1338,16 +1357,11 @@ void setup() {
 
       if (action == "rescan") {
         SerialPrintln(F("DEBUG: Admin rescan-units request received"));
-        if (pendingRescanRequest != nullptr) {
+        if (pendingRescanSlot.request != nullptr) {
           request->send(503, "text/plain", "Another rescan is already in progress, try again shortly");
           return;
         }
-        pendingRescanRequestDisconnected = false;
-        pendingRescanRequest = request;
-        request->onDisconnect([]() {
-          pendingRescanRequest = nullptr;
-          pendingRescanRequestDisconnected = true;
-        });
+        pendingRescanSlot.accept(request);
         return;
       }
 
@@ -1535,12 +1549,7 @@ void setup() {
       otaBeginSize = size;
       otaLastActivityAt = millis();
       otaResultReady = false;
-      pendingFirmwareUploadRequestDisconnected = false;
-      pendingFirmwareUploadRequest = request;
-      request->onDisconnect([]() {
-        pendingFirmwareUploadRequest = nullptr;
-        pendingFirmwareUploadRequestDisconnected = true;
-      });
+      pendingFirmwareUploadSlot.accept(request);
       otaPendingPhase = OTA_PHASE_BEGIN; //loop() calls Update.begin()
     });
 
@@ -1571,12 +1580,7 @@ void setup() {
           return;
         }
         otaLastActivityAt = millis();
-        pendingFirmwareUploadRequestDisconnected = false;
-        pendingFirmwareUploadRequest = request;
-        request->onDisconnect([]() {
-          pendingFirmwareUploadRequest = nullptr;
-          pendingFirmwareUploadRequestDisconnected = true;
-        });
+        pendingFirmwareUploadSlot.accept(request);
         otaPendingPhase = OTA_PHASE_WRITE; //loop() calls Update.write()
       },
       nullptr, //no multipart upload needed - this is a plain raw-body request
@@ -1624,12 +1628,7 @@ void setup() {
         return;
       }
       otaLastActivityAt = millis();
-      pendingFirmwareUploadRequestDisconnected = false;
-      pendingFirmwareUploadRequest = request;
-      request->onDisconnect([]() {
-        pendingFirmwareUploadRequest = nullptr;
-        pendingFirmwareUploadRequestDisconnected = true;
-      });
+      pendingFirmwareUploadSlot.accept(request);
       otaPendingPhase = OTA_PHASE_FINISH; //loop() calls Update.end()
     });
 #endif
@@ -2112,20 +2111,16 @@ void loop() {
   //any deferred-request handling below, so an in-progress display update can't block loop().
   updateDisplayJob();
 
-  //I2C admin requests deferred here by the web handlers (see pendingRescanRequest's comment near
+  //I2C admin requests deferred here by the web handlers (see pendingRescanSlot's comment near
   //unitsAmount) - checked first so a pending request gets served as soon as possible.
-  if (pendingRescanRequest != nullptr) {
-    AsyncWebServerRequest* deferredRequest = pendingRescanRequest;
-    pendingRescanRequestDisconnected = false; //this run's flag starts clean - see the comment near unitsAmount
+  if (pendingRescanSlot.request != nullptr) {
+    uint32_t generation;
+    AsyncWebServerRequest* deferredRequest = pendingRescanSlot.take(generation);
 
     int detectedAmount = scanI2CBus();
 
-    //Guard slot released only now (not before scanI2CBus() ran) so a request arriving mid-scan
-    //correctly gets 503 instead of silently overwriting this one. Same pattern below.
-    pendingRescanRequest = nullptr;
-
     //Client may have disconnected while scanI2CBus() ran, making deferredRequest a dangling pointer.
-    if (!pendingRescanRequestDisconnected) {
+    if (pendingRescanSlot.stillConnected(generation)) {
       JsonDocument doc;
       doc["unitsAmount"] = detectedAmount;
       AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
@@ -2134,9 +2129,9 @@ void loop() {
     }
   }
 
-  if (pendingUnitsInfoRequest != nullptr) {
-    AsyncWebServerRequest* deferredRequest = pendingUnitsInfoRequest;
-    pendingUnitsInfoRequestDisconnected = false;
+  if (pendingUnitsInfoSlot.request != nullptr) {
+    uint32_t generation;
+    AsyncWebServerRequest* deferredRequest = pendingUnitsInfoSlot.take(generation);
 
     JsonDocument doc;
     doc["unitsAmount"] = unitsAmount;
@@ -2164,18 +2159,16 @@ void loop() {
       yield();
     }
 
-    pendingUnitsInfoRequest = nullptr;
-
-    if (!pendingUnitsInfoRequestDisconnected) {
+    if (pendingUnitsInfoSlot.stillConnected(generation)) {
       AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
       serializeJson(doc, *response);
       deferredRequest->send(response);
     }
   }
 
-  if (pendingLegacyI2CScanRequest != nullptr) {
-    AsyncWebServerRequest* deferredRequest = pendingLegacyI2CScanRequest;
-    pendingLegacyI2CScanRequestDisconnected = false;
+  if (pendingLegacyI2CScanSlot.request != nullptr) {
+    uint32_t generation;
+    AsyncWebServerRequest* deferredRequest = pendingLegacyI2CScanSlot.take(generation);
 
     JsonDocument doc;
     doc["scanTime"] = millis();
@@ -2213,9 +2206,7 @@ void loop() {
     doc["foundCount"] = foundCount;
     doc["expectedCount"] = unitsAmount;
 
-    pendingLegacyI2CScanRequest = nullptr;
-
-    if (!pendingLegacyI2CScanRequestDisconnected) {
+    if (pendingLegacyI2CScanSlot.stillConnected(generation)) {
       AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
       serializeJson(doc, *response);
       deferredRequest->send(response);
@@ -2232,6 +2223,7 @@ void loop() {
 
     bool ok = Update.begin(updateSize, U_FLASH);
     if (ok) {
+      otaBytesWritten = 0;
       //Allocated here, not statically - free heap on this device is chronically tight, no reason
       //to hold 4KB for a rarely-used feature the other 99% of the time.
       if (otaChunkBuffer != nullptr) {
@@ -2265,6 +2257,8 @@ void loop() {
       Update.end(false);
       delete[] otaChunkBuffer; //abort the whole upload - a missing chunk buffer makes the other
       otaChunkBuffer = nullptr; //two endpoints cleanly reject anything further
+    } else {
+      otaBytesWritten += otaChunkLen; //see the finish-phase comment for why not Update.progress()
     }
 
     otaResultSuccess = ok;
@@ -2281,9 +2275,18 @@ void loop() {
     //stay true for the real end() call below, though - Update.begin() rounds its internal target
     //size UP to the next flash sector, always larger than the exact byte count actually
     //transferred, so the library's own isFinished() would never be satisfied even for a genuinely
-    //complete, correctly-sized upload. Update.progress() (bytes actually written) against the
-    //exact size declared by /api/firmware-start is the right comparison instead.
-    size_t received = Update.progress();
+    //complete, correctly-sized upload.
+    //
+    //Deliberately otaBytesWritten here, NOT Update.progress(): live-tested 2026-09-09 against a
+    //real firmware image (518944 bytes, not a multiple of 4096) and it reproducibly rejected every
+    //single upload as "incomplete", short by exactly the size of the final chunk. Root cause is in
+    //Updater.cpp - write() only advances progress() when a full SPI_FLASH_SEC_SIZE (4096) buffer
+    //gets flushed to flash; a trailing partial sector stays in Updater's internal _buffer and is
+    //only flushed inside end(), i.e. AFTER this comparison would run. So Update.progress() legitimately
+    //under-reports by design for any image whose size isn't an exact multiple of 4096 - which is
+    //effectively every real image. otaBytesWritten instead counts bytes actually handed to (and
+    //accepted by) Update.write() call-by-call, independent of Updater's internal flush timing.
+    size_t received = otaBytesWritten;
     bool sizeMatches = (received == otaBeginSize);
     bool ok = false;
     if (!sizeMatches) {
@@ -2320,12 +2323,11 @@ void loop() {
 
   // Separate from the block above on purpose: the flash-side result and the deferred request can
   // become ready in either order.
-  if (otaResultReady && pendingFirmwareUploadRequest != nullptr) {
-    AsyncWebServerRequest* deferredRequest = pendingFirmwareUploadRequest;
-    bool wasDisconnected = pendingFirmwareUploadRequestDisconnected;
-    pendingFirmwareUploadRequest = nullptr;
+  if (otaResultReady && pendingFirmwareUploadSlot.request != nullptr) {
+    uint32_t generation;
+    AsyncWebServerRequest* deferredRequest = pendingFirmwareUploadSlot.take(generation);
 
-    if (!wasDisconnected) {
+    if (pendingFirmwareUploadSlot.stillConnected(generation)) {
       AsyncWebServerResponse* response = deferredRequest->beginResponse(otaResultSuccess ? 200 : 500, "text/plain", otaResultMessage);
       response->addHeader("Connection", "close");
       deferredRequest->send(response);
@@ -2342,10 +2344,10 @@ void loop() {
 #endif
 
 #if UNIT_BOOTLOADER_ENABLE == true
-  if (pendingFirmwarePushRequest != nullptr) {
-    AsyncWebServerRequest* deferredRequest = pendingFirmwarePushRequest;
+  if (pendingFirmwarePushSlot.request != nullptr) {
+    uint32_t generation;
+    AsyncWebServerRequest* deferredRequest = pendingFirmwarePushSlot.take(generation);
     int unitIndex = pendingFirmwarePushUnitIndex;
-    pendingFirmwarePushRequestDisconnected = false;
 
     SerialPrintln(F("Pushing firmware to Unit ") + String(unitIndex) + F("..."));
     String resultJson;
@@ -2353,17 +2355,15 @@ void loop() {
     //comment on the onDisconnect handler for /unit-firmware-push above.
     bool success = pushFirmwareToUnit(unitIndex, resultJson);
 
-    pendingFirmwarePushRequest = nullptr;
-
-    if (!pendingFirmwarePushRequestDisconnected) {
+    if (pendingFirmwarePushSlot.stillConnected(generation)) {
       deferredRequest->send(success ? 200 : 500, "application/json", resultJson);
     }
   }
 
-  if (pendingBootloaderProbeRequest != nullptr) {
-    AsyncWebServerRequest* deferredRequest = pendingBootloaderProbeRequest;
+  if (pendingBootloaderProbeSlot.request != nullptr) {
+    uint32_t generation;
+    AsyncWebServerRequest* deferredRequest = pendingBootloaderProbeSlot.take(generation);
     int unitIndex = pendingBootloaderProbeUnitIndex;
-    pendingBootloaderProbeRequestDisconnected = false;
 
     SerialPrintln(F("Bootloader probe: requesting Unit ") + String(unitIndex) + F(" to enter bootloader..."));
     unsigned long bootloaderSearchStart = millis();
@@ -2420,9 +2420,7 @@ void loop() {
         : "Nothing was written, but the explicit return-to-app command failed - the unit may still be sitting in the bootloader. Check /admin/units, or power-cycle the unit if it doesn't come back on its own.";
     }
 
-    pendingBootloaderProbeRequest = nullptr;
-
-    if (!pendingBootloaderProbeRequestDisconnected) {
+    if (pendingBootloaderProbeSlot.stillConnected(generation)) {
       AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
       serializeJson(doc, *response);
       deferredRequest->send(response);
