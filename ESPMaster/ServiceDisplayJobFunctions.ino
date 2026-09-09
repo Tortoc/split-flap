@@ -82,16 +82,25 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   SerialPrintln(F("New Message: ") + messageDisplay);
   SerialPrintln(F("Effective alignment: ") + (alignmentOverride != "" ? alignmentOverride : alignment));
 
-  displayJob.originalMessage = message;
   //parsedLines is a plain local here, used and discarded entirely within this function - safe.
   //See the long comment on DisplayJob::lines for why the LList itself must never be copied out
   //of a scope like this one, only its individual String elements.
   LList<String> parsedLines = processSentenceToLines(message);
-  displayJob.lineCount = parsedLines.size();
-  if (displayJob.lineCount > DisplayJob::MAX_DISPLAY_LINES) {
-    SerialPrintln(F("WARNING: message split into more lines than expected, truncating"));
-    displayJob.lineCount = DisplayJob::MAX_DISPLAY_LINES;
+  //MAX_DISPLAY_LINES (50) was sized for "500 chars fits comfortably" assuming a fairly large
+  //unitsAmount - with fewer units (or many explicit line breaks packed into the 500-char budget),
+  //a fully within-limits message can genuinely need more lines than that. Previously silently
+  //truncated to the first 50 lines while still setting originalMessage (and so lastWrittenText)
+  //to the FULL text, as if all of it had actually been shown (found 2026-09-09, CODE_REVIEW.md
+  //#23). Reject clearly instead of silently dropping the tail - matches the same "false = really
+  //not accepted" contract showText() callers already rely on since CODE_REVIEW.md #10, rather
+  //than the bigger, riskier redesign of streaming lines incrementally without a full list.
+  if (parsedLines.size() > DisplayJob::MAX_DISPLAY_LINES) {
+    SerialPrintln(F("Message needs more lines than MAX_DISPLAY_LINES - refusing rather than silently truncating"));
+    return false;
   }
+
+  displayJob.originalMessage = message;
+  displayJob.lineCount = parsedLines.size();
   for (int i = 0; i < displayJob.lineCount; i++) {
     displayJob.lines[i] = parsedLines[i];
   }

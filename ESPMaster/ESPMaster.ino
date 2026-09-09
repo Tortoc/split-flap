@@ -1798,8 +1798,11 @@ void setup() {
         //other code path that will ever retry this specific call - unlike the permanent branch
         //below, a busy display here means the message is genuinely lost, not just delayed. Report
         //that honestly instead of claiming success (found 2026-09-09, CODE_REVIEW.md #10).
+        //showText() returning false doesn't distinguish WHY - busy display (CODE_REVIEW.md #10)
+        //or a message needing more lines than fit (CODE_REVIEW.md #23) both look the same here -
+        //worded generically rather than assuming "busy" for a reason that might not be it.
         if (!showText(newText, (int)(durationSeconds * 1000))) {
-          request->send(503, "text/plain", "Display is busy right now (a message is still being shown) - nothing was displayed, try again shortly");
+          request->send(503, "text/plain", "Nothing was displayed - either the display is busy right now, or the message needs more lines than fit. Try again or shorten the message.");
           return;
         }
       } else {
