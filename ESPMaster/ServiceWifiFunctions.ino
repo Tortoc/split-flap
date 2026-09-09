@@ -38,6 +38,15 @@ String wifiDisconnectReasonToString(WiFiDisconnectReason reason) {
   }
 }
 
+//Both functions below use wifiScanRequested/wifiConnectPhase/WIFI_CONNECT_* - all only declared
+//under `#if WIFI_USE_DIRECT == false` in ESPMaster.ino (WiFiManager-based AP-config mode; direct
+//mode has no such scan/reconnect UI). These two definitions themselves were previously
+//unconditional, so a WIFI_USE_DIRECT=true build failed with "not declared in this scope" for
+//both identifiers (found 2026-09-09, CODE_REVIEW.md #25, reproduced: a temporary
+//WIFI_USE_DIRECT=true build failed exactly here). Matches the same compile condition as their
+//own dependencies, and the existing WIFI_USE_DIRECT==false guards already wrapping every call
+//site of these two functions in ESPMaster.ino's setup()/loop().
+#if WIFI_USE_DIRECT == false
 //Starts the network scan requested via POST /api/wifi/scan - kept out of the AsyncWebServer
 //callback. Empty completion callback: GET /api/wifi/scan-result polls WiFi.scanComplete() directly.
 void checkWifiScanRequest() {
@@ -68,6 +77,7 @@ void checkWifiConnectAttempt() {
     }
   }
 }
+#endif
 
 //Initialize WiFi
 void initWiFi() {
