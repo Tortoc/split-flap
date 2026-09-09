@@ -212,6 +212,9 @@ const char* countdownPath = "/countdown.txt";
 const char* scheduledMessagesPath = "/scheduled-messages.txt";
 const char* debugModePath = "/debugmode.txt";
 const char* unitFirmwarePath = "/unit-firmware.bin";
+//Temp path for the unit-firmware upload's write-then-atomic-rename() pattern - see the comment on
+//that handler (CODE_REVIEW.md #5).
+const char* unitFirmwareTmpPath = "/unit-firmware.bin.tmp";
 const char* clockFormatPath = "/clockformat.txt";
 const char* dateFormatPath = "/dateformat.txt";
 const char* rotationItemsPath = "/rotation-items.txt";
@@ -316,8 +319,13 @@ bool pendingFirmwareUploadRequestDisconnected = false;
 #endif
 #if UNIT_BOOTLOADER_ENABLE == true
 bool unitFirmwareUploadAuthFailed = false;
+//Set when the upload couldn't be written/moved into place (open() or write() failure, or the
+//final rename() failing) - see the temp-file+atomic-rename pattern on that handler
+//(CODE_REVIEW.md #5). Distinct from ...AuthFailed so the final response can tell the two apart.
+bool unitFirmwareUploadWriteFailed = false;
 #endif
 bool webFileUploadAuthFailed = false;
+bool webFileUploadWriteFailed = false; //same reasoning as unitFirmwareUploadWriteFailed above
 
 String debugStatus = "";
 
@@ -1136,13 +1144,33 @@ void setup() {
           request->send(401, "text/plain", "Invalid password");
           return;
         }
+        if (unitFirmwareUploadWriteFailed) {
+          unitFirmwareUploadWriteFailed = false;
+          request->send(500, "text/plain", "Upload failed while writing the file. The previously stored firmware (if any) is unchanged.");
+          return;
+        }
         request->send(200, "text/plain", "OK - firmware stored, ready to push to a unit");
       },
       [](AsyncWebServerRequest * request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
         static File unitFirmwareFile;
 
         if (index == 0) {
+          //If a previous upload's connection just vanished mid-transfer, "final" never fired for
+          //it and this handle was never closed - found live 2026-09-09 while testing the fix
+          //below (a dangling handle measurably cost heap/fragmentation across the next upload).
+          //Close it defensively before reusing the static variable for this new attempt.
+          if (unitFirmwareFile) {
+            unitFirmwareFile.close();
+          }
+          //Same reasoning for a leftover temp file from that vanished upload - LittleFS.open(...,
+          //"w") below truncates it anyway, but remove it explicitly so a request that fails before
+          //ever opening the new file (e.g. a rejected password) doesn't leave stale bytes behind.
+          if (LittleFS.exists(unitFirmwareTmpPath)) {
+            LittleFS.remove(unitFirmwareTmpPath);
+          }
+
           unitFirmwareUploadAuthFailed = false;
+          unitFirmwareUploadWriteFailed = false;
           if (String(otaPassword) != "") {
             String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
             if (providedPassword != String(otaPassword)) {
@@ -1153,25 +1181,42 @@ void setup() {
           }
 
           SerialPrintln(F("DEBUG: Unit firmware upload starting: ") + filename);
-          unitFirmwareFile = LittleFS.open(unitFirmwarePath, "w");
+          //Write to a temp path, atomically rename() onto the real path only once the whole
+          //upload is confirmed complete and error-free - an aborted/failed upload must never
+          //leave the previously-stored (working) firmware truncated or corrupted (found
+          //2026-09-09, CODE_REVIEW.md #5).
+          unitFirmwareFile = LittleFS.open(unitFirmwareTmpPath, "w");
           if (!unitFirmwareFile) {
-            SerialPrintln(F("Unit firmware upload: failed to open ") + String(unitFirmwarePath) + F(" for writing"));
+            SerialPrintln(F("Unit firmware upload: failed to open ") + String(unitFirmwareTmpPath) + F(" for writing"));
+            unitFirmwareUploadWriteFailed = true;
           }
         }
 
-        if (unitFirmwareUploadAuthFailed) {
-          return; //Password rejected, ignore the rest of the upload - final response already handled above
+        if (unitFirmwareUploadAuthFailed || unitFirmwareUploadWriteFailed) {
+          return; //Already failed - final response already handled/will be handled above
         }
 
         if (unitFirmwareFile) {
-          unitFirmwareFile.write(data, len);
+          size_t written = unitFirmwareFile.write(data, len);
+          if (written != len) {
+            SerialPrintln(F("Unit firmware upload: short write (") + String(written) + F(" of ") + String(len) + F(" bytes) - aborting"));
+            unitFirmwareUploadWriteFailed = true;
+          }
         }
 
         if (final) {
           if (unitFirmwareFile) {
             unitFirmwareFile.close();
           }
-          SerialPrintln(F("DEBUG: Unit firmware upload finished. Total bytes: ") + String(index + len));
+          if (unitFirmwareUploadWriteFailed) {
+            LittleFS.remove(unitFirmwareTmpPath); //don't leave a corrupt temp file lying around
+            SerialPrintln(F("DEBUG: Unit firmware upload failed, previously stored firmware (if any) left untouched"));
+          } else if (LittleFS.rename(unitFirmwareTmpPath, unitFirmwarePath)) {
+            SerialPrintln(F("DEBUG: Unit firmware upload finished. Total bytes: ") + String(index + len));
+          } else {
+            SerialPrintln(F("Unit firmware upload: failed to move temp file into place"));
+            unitFirmwareUploadWriteFailed = true;
+          }
         }
       }
     );
@@ -1363,14 +1408,31 @@ void setup() {
           request->send(401, "text/plain", "Invalid password");
           return;
         }
+        if (webFileUploadWriteFailed) {
+          webFileUploadWriteFailed = false;
+          request->send(500, "text/plain", "Upload failed while writing the file. The previous file (if any) is unchanged.");
+          return;
+        }
         request->send(200, "text/plain", "OK - file updated");
       },
       [](AsyncWebServerRequest * request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
         static File webUploadFile;
         static bool webUploadFilenameValid = false;
+        static String webUploadTmpPath;
 
         if (index == 0) {
+          //Same defensive cleanup as /api/units/firmware above, for a previous upload whose
+          //connection vanished mid-transfer ("final" never fired, so this never ran) - see that
+          //handler's comment.
+          if (webUploadFile) {
+            webUploadFile.close();
+          }
+          if (webUploadTmpPath != "" && LittleFS.exists(webUploadTmpPath)) {
+            LittleFS.remove(webUploadTmpPath);
+          }
+
           webFileUploadAuthFailed = false;
+          webFileUploadWriteFailed = false;
           if (String(otaPassword) != "") {
             String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
             if (providedPassword != String(otaPassword)) {
@@ -1389,31 +1451,51 @@ void setup() {
             return;
           }
 
-          //A leftover uncompressed "/index.html" would take precedence over "/index.html.gz".
-          if (LittleFS.exists("/index.html")) {
-            LittleFS.remove("/index.html");
-          }
-
           SerialPrintln(F("DEBUG: Web file upload starting: ") + filename);
-          webUploadFile = LittleFS.open("/" + filename, "w");
+          //Same temp-file + atomic rename() pattern as /api/units/firmware above - an
+          //aborted/failed upload must never leave the live web UI file truncated (found
+          //2026-09-09, CODE_REVIEW.md #5). The stale-"/index.html"-removal below moved to right
+          //before the swap too, so a failed upload can't leave neither file in place.
+          webUploadTmpPath = "/" + filename + ".tmp";
+          webUploadFile = LittleFS.open(webUploadTmpPath, "w");
           if (!webUploadFile) {
-            SerialPrintln(F("Web file upload: failed to open /") + filename + F(" for writing"));
+            SerialPrintln(F("Web file upload: failed to open ") + webUploadTmpPath + F(" for writing"));
+            webFileUploadWriteFailed = true;
           }
         }
 
-        if (webFileUploadAuthFailed || !webUploadFilenameValid) {
+        if (webFileUploadAuthFailed || !webUploadFilenameValid || webFileUploadWriteFailed) {
           return;
         }
 
         if (webUploadFile) {
-          webUploadFile.write(data, len);
+          size_t written = webUploadFile.write(data, len);
+          if (written != len) {
+            SerialPrintln(F("Web file upload: short write (") + String(written) + F(" of ") + String(len) + F(" bytes) - aborting"));
+            webFileUploadWriteFailed = true;
+          }
         }
 
         if (final) {
           if (webUploadFile) {
             webUploadFile.close();
           }
-          SerialPrintln(F("DEBUG: Web file upload finished: ") + filename + F(", total bytes: ") + String(index + len));
+          if (webFileUploadWriteFailed) {
+            LittleFS.remove(webUploadTmpPath); //don't leave a corrupt temp file lying around
+            SerialPrintln(F("DEBUG: Web file upload failed, previous file (if any) left untouched"));
+          } else {
+            //A leftover uncompressed "/index.html" would take precedence over "/index.html.gz" -
+            //only now, right before the atomic swap, not eagerly at the start.
+            if (LittleFS.exists("/index.html")) {
+              LittleFS.remove("/index.html");
+            }
+            if (LittleFS.rename(webUploadTmpPath, "/" + filename)) {
+              SerialPrintln(F("DEBUG: Web file upload finished: ") + filename + F(", total bytes: ") + String(index + len));
+            } else {
+              SerialPrintln(F("Web file upload: failed to move temp file into place"));
+              webFileUploadWriteFailed = true;
+            }
+          }
         }
       }
     );
