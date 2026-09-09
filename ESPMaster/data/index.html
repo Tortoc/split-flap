@@ -1077,9 +1077,7 @@
 						<a href="#" onclick="openAdminModal('system'); return false;">System</a>
 						<a href="#" onclick="openAdminModal('units'); return false;">Units</a>
 						<a href="#" onclick="openAdminModal('firmware'); return false;">Firmware Update</a>
-						<form action="/api/reboot" method="post" class="kebab-form" onsubmit="return confirm('Are you sure you want reboot device?')">
-							<button type="submit">Reboot</button>
-						</form>
+						<button type="button" class="kebab-form" onclick="triggerReboot()">Reboot</button>
 					</div>
 				</div>
 			</div>
@@ -1248,6 +1246,7 @@
 					<button type="button" id="systemTabBtnTimezone" class="modal-tab-btn" onclick="setSystemModalTab('timezone')">Zeitzone</button>
 					<button type="button" id="systemTabBtnQuietHours" class="modal-tab-btn" onclick="setSystemModalTab('quietHours')">Ruhezeiten</button>
 					<button type="button" id="systemTabBtnCrashLog" class="modal-tab-btn" onclick="setSystemModalTab('crashLog')">Crash-Log</button>
+					<button type="button" id="systemTabBtnAccessControl" class="modal-tab-btn" onclick="setSystemModalTab('accessControl')">Zugriffskontrolle</button>
 				</div>
 
 				<div id="systemTabWifi">
@@ -1356,6 +1355,56 @@
 						</p>
 					</div>
 				</div>
+
+				<div id="systemTabAccessControl" class="hidden">
+					<div style="text-align: left;">
+						<p>
+							<label>Passwortschutz</label>
+							<br>
+							<span id="accessControlPasswordStatus" style="font-family: monospace; font-size: 1.1rem;">wird geladen...</span>
+						</p>
+						<p class="note">
+							Ein leeres Passwort schaltet den Schutz <b>komplett</b> ab - dann sind auch
+							Firmware-Update und WLAN-Verwaltung ohne Passwort erreichbar, unabhängig von den
+							Häkchen unten.
+						</p>
+
+						<p>
+							<label for="accessControlCurrentPassword">Aktuelles Passwort</label>
+							<br>
+							<input type="password" id="accessControlCurrentPassword" autocomplete="current-password" style="width: 250px;" placeholder="(leer, falls noch kein Passwort gesetzt)" />
+						</p>
+						<p>
+							<label for="accessControlNewPassword">Neues Passwort setzen</label>
+							<br>
+							<input type="password" id="accessControlNewPassword" autocomplete="new-password" style="width: 250px;" placeholder="Neues Passwort" />
+							<button class="btn-primary" onclick="changeOtaPassword()">Ändern</button>
+						</p>
+						<p>
+							<button class="btn-small" onclick="disablePasswordProtection()">Passwortschutz komplett deaktivieren</button>
+						</p>
+						<p id="otaPasswordChangeStatus"></p>
+
+						<p class="note" style="margin-top: 1.5em;">
+							Diese Kategorien sind <b>ohne</b> Passwort erreichbar, solange eines gesetzt ist
+							(wirkt erst, wenn oben ein Passwort gesetzt ist). Firmware-Update, Web-UI-Datei-
+							Upload und dieses Zugriffskontroll-Formular selbst sind immer geschützt, sobald
+							ein Passwort gesetzt ist - dafür gibt es bewusst kein Häkchen.
+						</p>
+						<p>
+							<label class="ls-checkbox-label"><input type="checkbox" id="accessControlText" /> Anzeige-Text setzen (<code>/api/text</code>)</label><br>
+							<label class="ls-checkbox-label"><input type="checkbox" id="accessControlSettings" /> Geräte-Einstellungen (Modus, Tempo, Countdown, Rotation, Ruhezeiten, geplante Nachrichten)</label><br>
+							<label class="ls-checkbox-label"><input type="checkbox" id="accessControlUnits" /> Einheiten-Kalibrierung (Offset/Reset)</label><br>
+							<label class="ls-checkbox-label"><input type="checkbox" id="accessControlWifi" /> WLAN-Verwaltung</label><br>
+							<label class="ls-checkbox-label"><input type="checkbox" id="accessControlTimezone" /> Zeitzone</label><br>
+							<label class="ls-checkbox-label"><input type="checkbox" id="accessControlSystem" /> Neustart / Debug-Modus</label>
+						</p>
+						<p>
+							<button class="btn-primary" onclick="saveAccessControl()">Zugriffskontrolle speichern</button>
+						</p>
+						<p id="accessControlStatus"></p>
+					</div>
+				</div>
 			</div>
 		</div>
 	</div>
@@ -1399,19 +1448,10 @@
 			</div>
 			<div class="modal-body">
 				<div style="text-align: left;">
-					<!-- Shared by both tabs - one OTA password protects both the ESPMaster upload and
-					     the Unit firmware push. -->
-					<p>
-						<label for="newOtaPassword">Neues OTA-Passwort setzen</label>
-						<br>
-						<input type="password" id="newOtaPassword" autocomplete="new-password" style="width: 250px;" placeholder="Neues Passwort" />
-						<button class="btn-primary" onclick="changeOtaPassword()">Ändern</button>
-					</p>
-					<p class="note">
-						Aktuell gesetzt: <span id="currentOtaPasswordDisplay" style="font-family: monospace; font-size: 1.1rem;">wird geladen...</span>
-					</p>
-					<p id="otaPasswordChangeStatus"></p>
-
+					<!-- Passwort-Verwaltung selbst lebt jetzt in System > Zugriffskontrolle - eine
+					     Kategorie unter vielen, die dasselbe Passwort schützt, nicht mehr Firmware-
+					     spezifisch. Beide Tabs unten fragen bei Bedarf per getAdminPassword() danach
+					     (Prompt + sessionStorage-Cache). -->
 					<div class="modal-tab-bar">
 						<button type="button" id="firmwareTabBtnEsp" class="modal-tab-btn active" onclick="setFirmwareModalTab('esp')">ESPMaster</button>
 						<button type="button" id="firmwareTabBtnUnits" class="modal-tab-btn" onclick="setFirmwareModalTab('units')">Units</button>
@@ -1598,6 +1638,9 @@
 
 						if (this.status == 200) {
 							loadPage();
+						} else if (this.status == 401) {
+							clearAdminPassword();
+							showBannerMessage("Falsches Administrator-Passwort - siehe System &gt; Zugriffskontrolle.");
 						} else {
 							showBannerMessage(this.responseText || `
 								Something went wrong during submission. Feel free to try again, ensure that you have entered valid information.
@@ -1612,6 +1655,7 @@
 					showBannerMessage("Network error while submitting.");
 				};
 				xhrRequest.open("POST", "/api/settings", true);
+				xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 				xhrRequest.send(formData);
 
 				return false;
@@ -1850,10 +1894,14 @@
 				//Reload the page
 				if (this.readyState == 4 && this.status == 202) {
 					window.location.reload();
+				} else if (this.readyState == 4 && this.status == 401) {
+					clearAdminPassword();
+					alert("Falsches Administrator-Passwort.");
 				}
 			};
 
 			xhr.open("DELETE", `/api/scheduled-messages?id=${id}`, true);
+			xhr.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhr.send();
 		}
 
@@ -2499,10 +2547,12 @@
 			document.getElementById("systemTabTimezone").classList.toggle("hidden", tab !== "timezone");
 			document.getElementById("systemTabQuietHours").classList.toggle("hidden", tab !== "quietHours");
 			document.getElementById("systemTabCrashLog").classList.toggle("hidden", tab !== "crashLog");
+			document.getElementById("systemTabAccessControl").classList.toggle("hidden", tab !== "accessControl");
 			document.getElementById("systemTabBtnWifi").classList.toggle("active", tab === "wifi");
 			document.getElementById("systemTabBtnTimezone").classList.toggle("active", tab === "timezone");
 			document.getElementById("systemTabBtnQuietHours").classList.toggle("active", tab === "quietHours");
 			document.getElementById("systemTabBtnCrashLog").classList.toggle("active", tab === "crashLog");
+			document.getElementById("systemTabBtnAccessControl").classList.toggle("active", tab === "accessControl");
 		}
 
 		function closeAdminModal(name) {
@@ -2548,7 +2598,15 @@
 							formResetWifi.classList.add("hidden");
 						}
 
-						document.getElementById("currentOtaPasswordDisplay").innerText = responseObject.otaPassword || "(leer)";
+						//The password itself is never sent by the device (CODE_REVIEW.md #29) - only
+						//whether one is set, plus the per-category toggle states (both non-secret).
+						setAccessControlStatusDisplay(!!responseObject.otaPasswordSet);
+						document.getElementById("accessControlText").checked = !!responseObject.accessControlTextPublic;
+						document.getElementById("accessControlSettings").checked = !!responseObject.accessControlSettingsPublic;
+						document.getElementById("accessControlUnits").checked = !!responseObject.accessControlUnitsPublic;
+						document.getElementById("accessControlWifi").checked = !!responseObject.accessControlWifiPublic;
+						document.getElementById("accessControlTimezone").checked = !!responseObject.accessControlTimezonePublic;
+						document.getElementById("accessControlSystem").checked = !!responseObject.accessControlSystemPublic;
 						document.getElementById("currentTimezoneDisplay").innerText = responseObject.timezone || "(leer)";
 						document.getElementById("quietHoursEnabled").checked = !!responseObject.quietHoursEnabled;
 						document.getElementById("quietHoursStart").value = responseObject.quietHoursStart || "22:00";
@@ -2563,6 +2621,16 @@
 		}
 
 		//Fire-and-confirm actions, all via AJAX (no page navigation) with a banner message result.
+		//Was a plain <form action="/api/reboot" method="post"> - forms can't send a custom
+		//X-OTA-Password header, so this became a JS-driven POST like every other admin action once
+		///api/reboot could require one (CODE_REVIEW.md #29).
+		function triggerReboot() {
+			if (!confirm("Are you sure you want reboot device?")) {
+				return;
+			}
+			postActionForBanner("/api/reboot", "Rebooting now - this can take 10-20 seconds.");
+		}
+
 		function triggerResetWifi() {
 			if (!confirm("Are you sure you want to Reset WiFi settings?")) {
 				return;
@@ -2596,6 +2664,10 @@
 					if (this.status == 200 || this.status == 409) {
 						// 409 = a scan from an earlier click is already running - just start polling too.
 						pollWifiScanResult(0);
+					} else if (this.status == 401) {
+						clearAdminPassword();
+						button.disabled = false;
+						resultEl.innerHTML = '<span class="status-offline">Falsches Administrator-Passwort.</span>';
 					} else {
 						button.disabled = false;
 						resultEl.innerHTML = '<span class="status-offline">Scan konnte nicht gestartet werden.</span>';
@@ -2607,6 +2679,7 @@
 				resultEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
 			};
 			xhrRequest.open("POST", "/api/wifi?action=scan", true);
+			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send();
 		}
 
@@ -2713,6 +2786,10 @@
 				if (this.readyState == 4) {
 					if (this.status == 200) {
 						pollWifiConnectStatus(0);
+					} else if (this.status == 401) {
+						clearAdminPassword();
+						button.disabled = false;
+						statusEl.innerHTML = '<span class="status-offline">Falsches Administrator-Passwort.</span>';
 					} else {
 						button.disabled = false;
 						statusEl.innerHTML = '<span class="status-offline">' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
@@ -2726,6 +2803,7 @@
 			};
 			xhrRequest.open("POST", "/api/wifi?action=connect", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("ssid=" + encodeURIComponent(ssid) + "&password=" + encodeURIComponent(password));
 		}
 
@@ -2786,6 +2864,8 @@
 
 		//Shared helper for the three simple fire-and-confirm admin actions above - POSTs with no body,
 		//shows successMessage in the banner on success, or the server's error text on failure.
+		//Always attaches X-OTA-Password (harmless/ignored if the category it hits happens to be
+		//toggled public - see CODE_REVIEW.md #29's access-control toggles).
 		function postActionForBanner(path, successMessage) {
 			if (localDevelopment) {
 				showAdminBannerMessage(successMessage, true);
@@ -2797,6 +2877,9 @@
 				if (this.readyState == 4) {
 					if (this.status == 200) {
 						showAdminBannerMessage(successMessage, true);
+					} else if (this.status == 401) {
+						clearAdminPassword();
+						showAdminBannerMessage("Falsches Administrator-Passwort.");
 					} else {
 						showAdminBannerMessage("Failed: " + (this.responseText || ("Status " + this.status)));
 					}
@@ -2806,56 +2889,65 @@
 				showAdminBannerMessage("Network error.");
 			};
 			xhrRequest.open("POST", path, true);
+			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send();
 		}
 
-		function loadCurrentOtaPassword() {
-			var displayEl = document.getElementById("currentOtaPasswordDisplay");
+		//CODE_REVIEW.md #29: the device never sends the password itself back (removed both the old
+		//GET /api/ota-password and the otaPassword field on GET /api/settings) - only whether one
+		//is currently set. This just reflects that status; the actual value lives only in
+		//whatever the admin currently has typed/cached, see getAdminPassword() below.
+		function setAccessControlStatusDisplay(passwordSet) {
+			var el = document.getElementById("accessControlPasswordStatus");
+			el.innerText = passwordSet ? "aktiv" : "deaktiviert (alles im Netzwerk frei erreichbar)";
+			el.className = passwordSet ? "status-online-ready" : "status-offline";
+		}
 
-			if (localDevelopment) {
-				displayEl.innerText = "splitflap (simuliert)";
-				return;
+		//Single source of truth for the admin password used on every protected request below
+		//(firmware upload/push, and whichever categories aren't opted into the public allowlist).
+		//Cached in sessionStorage (not localStorage - gone once the tab closes, doesn't linger on
+		//a shared/public browser) so the admin isn't re-prompted for every single action in one
+		//sitting. Prompts on first use per tab/session; a wrong/stale cached value is cleared by
+		//clearAdminPassword() (called from every protected request's 401 handler) so the very next
+		//attempt re-prompts instead of silently failing forever.
+		function getAdminPassword() {
+			if (sessionStorage.getItem("splitflapAdminPasswordKnown") === "1") {
+				return sessionStorage.getItem("splitflapAdminPassword") || "";
 			}
-
-			var xhrRequest = new XMLHttpRequest();
-			xhrRequest.onreadystatechange = function () {
-				if (this.readyState == 4) {
-					if (this.status == 200) {
-						try {
-							var responseObject = JSON.parse(this.responseText);
-							displayEl.innerText = responseObject.otaPassword || "(leer)";
-						} catch (e) {
-							displayEl.innerText = "(konnte nicht geladen werden)";
-						}
-					} else {
-						displayEl.innerText = "(konnte nicht geladen werden)";
-					}
-				}
-			};
-			xhrRequest.open("GET", "/api/ota-password", true);
-			xhrRequest.send();
+			var entered = prompt("Administrator-Passwort (leer lassen, falls keines gesetzt ist):", "");
+			if (entered === null) {
+				return ""; //user cancelled - try unauthenticated, most likely to just fail with 401 again
+			}
+			sessionStorage.setItem("splitflapAdminPassword", entered);
+			sessionStorage.setItem("splitflapAdminPasswordKnown", "1");
+			return entered;
 		}
 
-		//Changes the OTA password - requires the current password (read from the same "OTA-Passwort"
-		//field used elsewhere on this page) for confirmation, same as every other admin action here.
+		function clearAdminPassword() {
+			sessionStorage.removeItem("splitflapAdminPassword");
+			sessionStorage.removeItem("splitflapAdminPasswordKnown");
+		}
+
+		//Changes the OTA password and/or updates the access-control toggles together - both require
+		//re-entering the CURRENT password (never auto-filled/remembered for this specific form, on
+		//purpose - this is the one action that can reopen every other category, see the note in
+		//ESPMaster.ino). Leaving "newPassword" empty here means "don't touch the password, just
+		//update the checkboxes below" - use disablePasswordProtection() to actually clear it.
 		function changeOtaPassword() {
-			//No separate confirmation field anymore - the current password is already shown in
-			//plaintext right below (currentOtaPasswordDisplay), so reuse that instead of making the
-			//user retype something already visible on the page.
-			var currentPassword = document.getElementById("currentOtaPasswordDisplay").innerText;
-			var newPasswordInput = document.getElementById("newOtaPassword");
+			var currentPasswordInput = document.getElementById("accessControlCurrentPassword");
+			var newPasswordInput = document.getElementById("accessControlNewPassword");
 			var statusEl = document.getElementById("otaPasswordChangeStatus");
 
 			var newPassword = newPasswordInput.value;
 			if (!newPassword) {
-				alert("Bitte ein neues Passwort eingeben.");
+				alert("Bitte ein neues Passwort eingeben (oder \"Passwortschutz komplett deaktivieren\" für ein leeres Passwort).");
 				return;
 			}
 
 			if (localDevelopment) {
 				statusEl.innerHTML = '<span class="status-online-ready">Passwort geändert (simuliert).</span>';
-				document.getElementById("currentOtaPasswordDisplay").innerText = newPassword;
 				newPasswordInput.value = "";
+				setAccessControlStatusDisplay(true);
 				return;
 			}
 
@@ -2867,9 +2959,14 @@
 					if (this.status == 200) {
 						statusEl.innerHTML = '<span class="status-online-ready">Passwort geändert.</span>';
 						newPasswordInput.value = "";
-						loadCurrentOtaPassword();
+						currentPasswordInput.value = "";
+						//The just-entered new password becomes the cached one, so subsequent protected
+						//actions in this same session keep working without an extra prompt.
+						sessionStorage.setItem("splitflapAdminPassword", newPassword);
+						sessionStorage.setItem("splitflapAdminPasswordKnown", "1");
+						setAccessControlStatusDisplay(true);
 					} else if (this.status == 401) {
-						statusEl.innerHTML = '<span class="status-offline">Falsches aktuelles Passwort - bitte Modal neu öffnen und erneut versuchen.</span>';
+						statusEl.innerHTML = '<span class="status-offline">Falsches aktuelles Passwort.</span>';
 					} else {
 						statusEl.innerHTML = '<span class="status-offline">Fehlgeschlagen: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
 					}
@@ -2882,7 +2979,96 @@
 
 			xhrRequest.open("POST", "/api/ota-password", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			xhrRequest.send("currentPassword=" + encodeURIComponent(currentPassword) + "&newPassword=" + encodeURIComponent(newPassword));
+			xhrRequest.send("currentPassword=" + encodeURIComponent(currentPasswordInput.value) + "&newPassword=" + encodeURIComponent(newPassword));
+		}
+
+		//Explicit, separate action (own confirm() dialog) for clearing the password entirely -
+		//deliberately not just "submit the change form with an empty field", so an accidental
+		//blank submission can't silently disable protection (CODE_REVIEW.md #29's "muss komplett
+		//deaktivierbar sein" requirement, but opt-in on purpose).
+		function disablePasswordProtection() {
+			var currentPasswordInput = document.getElementById("accessControlCurrentPassword");
+			var statusEl = document.getElementById("otaPasswordChangeStatus");
+
+			if (!confirm("Passwortschutz wirklich komplett deaktivieren? Danach ist JEDE Aktion - auch Firmware-Updates und WLAN-Verwaltung - ohne Passwort im Netzwerk erreichbar.")) {
+				return;
+			}
+
+			if (localDevelopment) {
+				statusEl.innerHTML = '<span class="status-online-ready">Passwortschutz deaktiviert (simuliert).</span>';
+				setAccessControlStatusDisplay(false);
+				return;
+			}
+
+			statusEl.innerHTML = "";
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						statusEl.innerHTML = '<span class="status-online-ready">Passwortschutz deaktiviert.</span>';
+						currentPasswordInput.value = "";
+						clearAdminPassword(); //nothing to remember anymore, every request is unauthenticated now
+						setAccessControlStatusDisplay(false);
+					} else if (this.status == 401) {
+						statusEl.innerHTML = '<span class="status-offline">Falsches aktuelles Passwort.</span>';
+					} else {
+						statusEl.innerHTML = '<span class="status-offline">Fehlgeschlagen: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
+					}
+				}
+			};
+
+			xhrRequest.onerror = function () {
+				statusEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
+			};
+
+			xhrRequest.open("POST", "/api/ota-password", true);
+			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.send("currentPassword=" + encodeURIComponent(currentPasswordInput.value) + "&newPassword=");
+		}
+
+		//Saves just the 6 category toggles, without touching the password - still requires the
+		//current password field above (empty is fine if no password is set yet).
+		function saveAccessControl() {
+			var currentPasswordInput = document.getElementById("accessControlCurrentPassword");
+			var statusEl = document.getElementById("accessControlStatus");
+
+			var body = "currentPassword=" + encodeURIComponent(currentPasswordInput.value);
+			var categories = ["Text", "Settings", "Units", "Wifi", "Timezone", "System"];
+			categories.forEach(function (category) {
+				if (document.getElementById("accessControl" + category).checked) {
+					body += "&accessControl" + category + "=on";
+				}
+			});
+
+			if (localDevelopment) {
+				statusEl.innerHTML = '<span class="status-online-ready">Gespeichert (simuliert).</span>';
+				return;
+			}
+
+			statusEl.innerHTML = "";
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						statusEl.innerHTML = '<span class="status-online-ready">Zugriffskontrolle gespeichert.</span>';
+						currentPasswordInput.value = "";
+					} else if (this.status == 401) {
+						statusEl.innerHTML = '<span class="status-offline">Falsches aktuelles Passwort.</span>';
+					} else {
+						statusEl.innerHTML = '<span class="status-offline">Fehlgeschlagen: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
+					}
+				}
+			};
+
+			xhrRequest.onerror = function () {
+				statusEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
+			};
+
+			xhrRequest.open("POST", "/api/ota-password", true);
+			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.send(body);
 		}
 
 		function loadCurrentTimezone() {
@@ -2940,6 +3126,9 @@
 						statusEl.innerHTML = '<span class="status-online-ready">Zeitzone geändert.</span>';
 						newTimezoneInput.value = "";
 						loadCurrentTimezone();
+					} else if (this.status == 401) {
+						clearAdminPassword();
+						statusEl.innerHTML = '<span class="status-offline">Falsches Administrator-Passwort.</span>';
 					} else {
 						statusEl.innerHTML = '<span class="status-offline">Fehlgeschlagen: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
 					}
@@ -2952,6 +3141,7 @@
 
 			xhrRequest.open("POST", "/api/timezone", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("timezone=" + encodeURIComponent(newTimezone));
 		}
 
@@ -3008,6 +3198,9 @@
 					if (this.status == 200) {
 						statusEl.innerHTML = '<span class="status-online-ready">Ruhezeiten gespeichert.</span>';
 						loadCurrentQuietHours();
+					} else if (this.status == 401) {
+						clearAdminPassword();
+						statusEl.innerHTML = '<span class="status-offline">Falsches Administrator-Passwort.</span>';
 					} else {
 						statusEl.innerHTML = '<span class="status-offline">Fehlgeschlagen: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
 					}
@@ -3020,6 +3213,7 @@
 
 			xhrRequest.open("POST", "/api/quiet-hours", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("enabled=" + (enabled ? "true" : "false") + "&start=" + encodeURIComponent(start) + "&end=" + encodeURIComponent(end));
 		}
 
@@ -3246,6 +3440,11 @@
 						setAllUnitButtonsDisabled(true);
 						showAdminBannerMessage("Unit " + unitIndex + " is recalibrating with the new offset, this can take a few seconds...");
 						pollUntilReady(unitIndex, button);
+					} else if (this.status == 401) {
+						clearAdminPassword();
+						button.disabled = false;
+						button.innerText = "Save & Recalibrate";
+						showAdminBannerMessage("Falsches Administrator-Passwort.");
 					} else {
 						button.disabled = false;
 						button.innerText = "Save & Recalibrate";
@@ -3262,6 +3461,7 @@
 
 			xhrRequest.open("POST", "/api/units?action=offset", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("id=" + encodeURIComponent(unitIndex) + "&offset=" + encodeURIComponent(offsetValue));
 		}
 
@@ -3358,9 +3558,7 @@
 				return;
 			}
 
-			//No separate input anymore - reuse the already-displayed current password (see
-			//changeOtaPassword()'s same reasoning) instead of a field the user has to retype.
-			var password = document.getElementById("currentOtaPasswordDisplay").innerText;
+			var password = getAdminPassword();
 			var CHUNK_SIZE = 4096; //must match OTA_CHUNK_SIZE in ESPMaster.ino
 
 			button.disabled = true;
@@ -3380,6 +3578,7 @@
 					body: "size=" + file.size
 				});
 				if (!startResponse.ok) {
+					if (startResponse.status == 401) clearAdminPassword();
 					throw new Error(await startResponse.text());
 				}
 
@@ -3396,6 +3595,7 @@
 						body: chunk
 					});
 					if (!chunkResponse.ok) {
+						if (chunkResponse.status == 401) clearAdminPassword();
 						throw new Error(await chunkResponse.text());
 					}
 					offset = end;
@@ -3409,6 +3609,7 @@
 					headers: { "X-OTA-Password": password }
 				});
 				if (!finishResponse.ok) {
+					if (finishResponse.status == 401) clearAdminPassword();
 					throw new Error(await finishResponse.text());
 				}
 
@@ -3460,7 +3661,8 @@
 						statusEl.innerText = "Firmware '" + file.name + "' hochgeladen und bereit zum Übertragen.";
 						statusEl.className = "status-online-ready";
 					} else if (this.status == 401) {
-						statusEl.innerText = "Upload abgelehnt: falsches OTA-Passwort (siehe Feld oben beim ESPMaster-Update).";
+						clearAdminPassword();
+						statusEl.innerText = "Upload abgelehnt: falsches Administrator-Passwort.";
 						statusEl.className = "status-offline";
 					} else {
 						statusEl.innerText = "Upload fehlgeschlagen: " + (this.responseText || ("Status " + this.status));
@@ -3476,10 +3678,7 @@
 			};
 
 			xhr.open("POST", "/api/units/firmware", true);
-			//Reuses the OTA password shown in the Firmware Update (ESPMaster) modal - see
-			//uploadFirmware()/changeOtaPassword() for the same reasoning.
-			var currentOtaPassword = document.getElementById("currentOtaPasswordDisplay").innerText;
-			xhr.setRequestHeader("X-OTA-Password", currentOtaPassword);
+			xhr.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhr.send(formData);
 		}
 
@@ -3527,7 +3726,8 @@
 					button.disabled = false;
 
 					if (this.status == 401) {
-						resultEl.innerHTML = '<p class="status-offline">Abgelehnt: falsches OTA-Passwort (siehe Feld oben beim ESPMaster-Update).</p>';
+						clearAdminPassword();
+						resultEl.innerHTML = '<p class="status-offline">Abgelehnt: falsches Administrator-Passwort.</p>';
 						return;
 					}
 
@@ -3549,10 +3749,7 @@
 
 			xhr.open("POST", "/api/units/firmware-push", true);
 			xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			//Reuses the OTA password shown in the Firmware Update (ESPMaster) modal - see
-			//uploadFirmware()/changeOtaPassword() for the same reasoning.
-			var currentOtaPassword = document.getElementById("currentOtaPasswordDisplay").innerText;
-			xhr.setRequestHeader("X-OTA-Password", currentOtaPassword);
+			xhr.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhr.send("action=push&id=" + encodeURIComponent(select.value));
 		}
 
@@ -3614,7 +3811,8 @@
 			xhr.onreadystatechange = function () {
 				if (this.readyState == 4) {
 					if (this.status == 401) {
-						row.innerText = "Unit " + unitIndex + ": abgelehnt - falsches OTA-Passwort.";
+						clearAdminPassword();
+						row.innerText = "Unit " + unitIndex + ": abgelehnt - falsches Administrator-Passwort.";
 						row.className = "status-offline";
 						button.disabled = false;
 						return; //Wrong password won't work for any other unit either - stop the batch here.
@@ -3654,10 +3852,7 @@
 
 			xhr.open("POST", "/api/units/firmware-push", true);
 			xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			//Reuses the OTA password shown in the Firmware Update (ESPMaster) modal - see
-			//uploadFirmware()/changeOtaPassword() for the same reasoning.
-			var currentOtaPassword = document.getElementById("currentOtaPasswordDisplay").innerText;
-			xhr.setRequestHeader("X-OTA-Password", currentOtaPassword);
+			xhr.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhr.send("action=push&id=" + encodeURIComponent(unitIndex));
 		}
 

@@ -7,9 +7,10 @@ endpoint layout.
 
 - **Base URL**: `http://<device-ip>/` (mDNS/hostname not currently configured - find the IP via
   your router's DHCP client list, or the serial log at boot).
-- **Auth**: most endpoints are open on the local network (no login system on this device). A
-  handful of state-changing endpoints require the OTA password via an `X-OTA-Password` header,
-  noted individually below - see [Authentication](#authentication).
+- **Auth**: a single password protects state-changing endpoints, via an `X-OTA-Password` header.
+  It can be turned off entirely (empty password - every endpoint below, including firmware/flash,
+  becomes unauthenticated) or scoped down category-by-category while still set - see
+  [Authentication](#authentication).
 - **Request bodies**: `POST` endpoints take `application/x-www-form-urlencoded` bodies (i.e.
   `key=value&key2=value2`, the same as an HTML form submit) unless noted as multipart file upload.
 - **Responses**: format varies per endpoint (JSON, plain text, or HTML) - called out individually.
@@ -25,20 +26,39 @@ endpoint layout.
 
 ## Authentication
 
-If an OTA password is set (see [`GET/POST /api/ota-password`](#get-apiota-password)), these
-endpoints require it via an `X-OTA-Password: <password>` request header:
+CODE_REVIEW.md #29 (local, see `../CODE_REVIEW.md` if present) found the original OTA-password
+design ineffective: it only guarded 4 firmware endpoints, and the password itself was readable by
+anyone unauthenticated (both via a dedicated endpoint and via the filesystem-wide static file
+route, which also exposed every other config file directly). Both are fixed now: **the password
+is never sent back by the device** - only whether one is currently set (`otaPasswordSet` on
+`GET /api/settings`), and the static route now serves only the actual web UI file, nothing else.
 
-- `POST /api/web-file`
-- `POST /api/units/firmware`
-- `POST /api/units/firmware-push` with `action=push` (`action=probe` needs no password)
-- `POST /api/firmware-start`
-- `POST /api/firmware-chunk`
-- `POST /api/firmware-finish`
+**Global on/off switch**: an empty password (the default before you set one) means every endpoint
+below is unauthenticated, no exceptions - including firmware/flash. Set one via
+[`POST /api/ota-password`](#post-apiota-password) to turn protection on.
 
-If no password is set (empty string), these endpoints accept requests unauthenticated. Every
-other endpoint below has no auth check at all, including `GET /api/ota-password` itself
-(deliberate design choice - this device has no separate login system, see the comment in
-`ESPMaster.ino` on that endpoint).
+**Per-category toggles**: once a password is set, these categories are still reachable *without*
+it if their toggle is explicitly turned on (also via `POST /api/ota-password`, all default off -
+a newly-added category always starts protected):
+
+| Toggle param | Covers |
+| --- | --- |
+| `accessControlText` | `POST /api/text` |
+| `accessControlSettings` | `POST /api/settings`, `POST /api/quiet-hours`, `DELETE /api/scheduled-messages` |
+| `accessControlUnits` | `POST /api/units` with `action=offset` or `action=reset` (`action=rescan` never needs a password) |
+| `accessControlWifi` | `POST /api/wifi` (all actions) |
+| `accessControlTimezone` | `POST /api/timezone` |
+| `accessControlSystem` | `POST /api/reboot`, `POST /api/debug-mode` |
+
+**Never toggleable - always protected whenever a password is set**, no matter what any category
+toggle says: `POST /api/web-file`, `POST /api/units/firmware`, `POST /api/units/firmware-push`
+with `action=push` (`action=probe` needs no password), `POST /api/firmware-start`,
+`POST /api/firmware-chunk`, `POST /api/firmware-finish`, and `POST /api/ota-password` itself
+(changing the password or any toggle always requires the *current* password - otherwise a
+category opened via one toggle could reopen every other one through this same endpoint).
+
+Every other endpoint (all plain `GET`s, plus `GET /api/i2c-scan`) has no auth check at all - none
+of them reveal a secret or change device state.
 
 ## Endpoint index
 
@@ -66,8 +86,7 @@ other endpoint below has no auth check at all, including `GET /api/ota-password`
 | DELETE | [`/api/scheduled-messages`](#delete-apischeduled-messages) | Remove a scheduled message |
 | POST | [`/api/wifi?action=`](#post-apiwifi) | WiFi actions: `reset`\|`scan`\|`connect` |
 | GET | [`/api/wifi?type=`](#get-apiwifi) | WiFi queries: `scan-result`\|`connect-status` |
-| GET | [`/api/ota-password`](#get-apiota-password) | Read the current OTA password |
-| POST | [`/api/ota-password`](#post-apiota-password) | Change the OTA password |
+| POST | [`/api/ota-password`](#post-apiota-password) | Change the password and/or the access-control toggles |
 | GET | [`/api/timezone`](#get-apitimezone) | Read the current timezone |
 | POST | [`/api/timezone`](#post-apitimezone) | Change the timezone |
 
@@ -112,14 +131,24 @@ speed, mode, WiFi status, etc.
   "scheduledMessageCount": 1,
   "rotationItemCount": 0,
   "wifiSettingsResettable": true,
-  "otaPassword": "splitflap",
+  "otaPasswordSet": true,
+  "accessControlTextPublic": false,
+  "accessControlSettingsPublic": false,
+  "accessControlUnitsPublic": false,
+  "accessControlWifiPublic": false,
+  "accessControlTimezonePublic": false,
+  "accessControlSystemPublic": false,
   "timezone": "Europe/Berlin"
 }
 ```
-`otaPassword`/`timezone` duplicate `GET /api/ota-password`/`GET /api/timezone` (same values, same
-unauthenticated-by-design reasoning) - folded in here so the Administration view can populate its
-displays from this one already-fetched response instead of two more separate requests.
-`wifiSettingsResettable` reflects `WIFI_USE_DIRECT` being off (AP-config mode).
+`timezone` duplicates `GET /api/timezone` (same value) - folded in here so the Administration view
+can populate its display from this one already-fetched response instead of a separate request.
+`otaPasswordSet`/`accessControl*Public` are the access-control state (CODE_REVIEW.md #29, see
+[Authentication](#authentication)) - `otaPasswordSet` is whether a password is currently
+configured at all (the password itself is never sent back, unlike the field this replaced), and
+each `accessControl*Public` is that category's own toggle. Both are safe to expose
+unauthenticated - neither is a secret. `wifiSettingsResettable` reflects `WIFI_USE_DIRECT` being
+off (AP-config mode).
 
 `scheduledMessageCount` is just the count (cheap) - same reasoning as `rotationItemCount`: the
 client fetches the full list from [`GET /api/scheduled-messages`](#get-apischeduled-messages) only
@@ -137,7 +166,9 @@ curl http://192.168.1.50/api/settings
 ### `POST /api/settings`
 
 Updates one or more device settings in a single request - this is what the main page's form
-submits. Same resource as the `GET` above, different method.
+submits. Same resource as the `GET` above, different method. `accessControlSettings` category -
+see [Authentication](#authentication); `401 text/plain` if a password is required and
+missing/wrong.
 
 **Body params** (all optional - only send what changed):
 
@@ -174,7 +205,9 @@ curl -X POST http://192.168.1.50/api/settings \
 
 Lightweight alternative to `POST /api/settings` for automations (webhooks, Home Assistant, phone
 shortcuts, ...) that just want to show a message - one required param, one optional param, instead
-of the full settings form. Same unauthenticated design as `/api/settings` above.
+of the full settings form. Its own `accessControlText` category, separate from `/api/settings`'s
+own toggle - see [Authentication](#authentication); `401 text/plain` if a password is required and
+missing/wrong.
 
 **Body params:**
 
@@ -355,7 +388,10 @@ curl "http://192.168.1.50/api/units?detail=1"
 ### `POST /api/units`
 
 Three unit write-actions sharing one registered route, picked via `?action=` (same
-route-registration-costs-heap reasoning as `GET /api/diag`).
+route-registration-costs-heap reasoning as `GET /api/diag`). `offset`/`reset` are the
+`accessControlUnits` category; `rescan` never needs a password - see
+[Authentication](#authentication). `401 text/plain` on `offset`/`reset` if a password is required
+and missing/wrong.
 
 **Query param** `action` (required): `rescan` | `offset` | `reset`.
 
@@ -613,6 +649,8 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 Enables or disables debug mode (startup debug page, error status panel, page-load debug log,
 serial debug log at the bottom of the main page). Persisted across reboots.
+`accessControlSystem` category - see [Authentication](#authentication); `401 text/plain` if a
+password is required and missing/wrong.
 
 **Body params:**
 
@@ -635,14 +673,14 @@ curl -X POST http://192.168.1.50/api/debug-mode --data "enabled=true"
 ### `POST /api/reboot`
 
 Reboots the device (actual reboot happens on the next `loop()` iteration, ~a few hundred ms
-later).
+later). `accessControlSystem` category - see [Authentication](#authentication).
 
 **Response** `200 text/html` - a small human-readable "rebooting..." page with a link back home
-(meant for a real browser form submission, not programmatic use, though the body content doesn't
-matter if you only care about the reboot itself).
+(the body content doesn't matter if you only care about the reboot itself).
+- `401 text/plain` if a password is required and missing/wrong.
 
 ```bash
-curl -X POST http://192.168.1.50/api/reboot
+curl -X POST http://192.168.1.50/api/reboot -H "X-OTA-Password: splitflap"
 ```
 
 ---
@@ -671,7 +709,8 @@ curl http://192.168.1.50/api/scheduled-messages
 
 ### `DELETE /api/scheduled-messages`
 
-Removes one scheduled message.
+Removes one scheduled message. `accessControlSettings` category - see
+[Authentication](#authentication); `401 text/plain` if a password is required and missing/wrong.
 
 **Query param:**
 
@@ -694,7 +733,9 @@ curl -X DELETE "http://192.168.1.50/api/scheduled-messages?id=1755331200"
 ### `POST /api/wifi`
 
 Three WiFi write-actions sharing one registered route, picked via `?action=` (same
-route-registration-costs-heap reasoning as `GET /api/diag` and `POST /api/units`). Only present if
+route-registration-costs-heap reasoning as `GET /api/diag` and `POST /api/units`).
+`accessControlWifi` category for all three actions - see [Authentication](#authentication);
+`401 text/plain` if a password is required and missing/wrong. Only present if
 `WIFI_USE_DIRECT` is `false` (it is, by default - this device uses WiFiManager's AP-config flow
 rather than hardcoded credentials).
 
@@ -760,42 +801,44 @@ curl "http://192.168.1.50/api/wifi?type=connect-status"
 
 ---
 
-### `GET /api/ota-password`
-
-Returns the currently-configured OTA password. **Unauthenticated by design** - this device has no
-separate login system, and every other admin action already checks this same shared password
-per-request, so hiding it behind itself wouldn't add real protection.
-
-**Response** `200 application/json`:
-```json
-{ "otaPassword": "splitflap" }
-```
-
-```bash
-curl http://192.168.1.50/api/ota-password
-```
-
----
-
 ### `POST /api/ota-password`
 
-Changes the OTA password. Same resource as the `GET` above.
+Changes the password and/or the per-category access-control toggles (see
+[Authentication](#authentication)) together, in one request. There is no `GET` on this resource
+any more - the password itself is never sent back by the device (CODE_REVIEW.md #29); read
+`otaPasswordSet`/`accessControl*Public` from [`GET /api/settings`](#get-apisettings) instead,
+which expose the non-secret state only.
+
+Always requires `currentPassword` to match, even if you're only changing the toggles and not the
+password - this is the one endpoint that is never itself toggleable-public while a password is
+set, since a category opened via a toggle could otherwise reopen every other one (including this
+endpoint) through here.
 
 **Body params:**
 
 | Param | Notes |
 | --- | --- |
-| `currentPassword` | Must match the current password |
-| `newPassword` | Must be non-empty |
+| `currentPassword` | Required. Must match the current password (empty string matches if none is set yet). |
+| `newPassword` | Optional. Omit entirely to leave the password unchanged. An **empty value** (`newPassword=`) deliberately disables password protection globally - every endpoint in this API, including firmware/flash, becomes unauthenticated. Not the same as omitting the param. |
+| `accessControlText`, `accessControlSettings`, `accessControlUnits`, `accessControlWifi`, `accessControlTimezone`, `accessControlSystem` | Optional, standard HTML checkbox semantics: present (any value, e.g. `on`) = that category is public; **absent = that category is protected**. Send the full set you want every time - an absent one is not "leave unchanged", it's "turn off". |
 
 **Response:**
-- `200 text/plain`: `"OTA password changed"`
-- `400 text/plain` if either param is missing or `newPassword` is empty.
+- `200 text/plain`: `"Security settings updated"`
+- `400 text/plain` if `currentPassword` is missing.
 - `401 text/plain` if `currentPassword` doesn't match.
 
 ```bash
+# Change the password only, leave toggles untouched:
 curl -X POST http://192.168.1.50/api/ota-password \
   --data "currentPassword=splitflap&newPassword=newSecret123"
+
+# Disable password protection globally:
+curl -X POST http://192.168.1.50/api/ota-password \
+  --data "currentPassword=splitflap&newPassword="
+
+# Make /api/text public, everything else stays protected:
+curl -X POST http://192.168.1.50/api/ota-password \
+  --data "currentPassword=splitflap&accessControlText=on"
 ```
 
 ---
@@ -817,7 +860,8 @@ curl http://192.168.1.50/api/timezone
 
 ### `POST /api/timezone`
 
-Changes the timezone. Same resource as the `GET` above.
+Changes the timezone. Same resource as the `GET` above. `accessControlTimezone` category - see
+[Authentication](#authentication); `401 text/plain` if a password is required and missing/wrong.
 
 **Body params:**
 

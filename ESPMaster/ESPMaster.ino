@@ -88,8 +88,36 @@ const char* wifiDirectSsid = "";
 const char* wifiDirectPassword = "";
 
 //Runtime-changeable OTA password, persisted to LittleFS (see /api/ota-password). Default "splitflap".
+//Empty string = password protection globally OFF - every endpoint below (including firmware/
+//flash ones) is then unauthenticated, no exceptions, regardless of the toggles below (found
+//2026-09-09, CODE_REVIEW.md #29 - the previous design applied this check to only 4 firmware-
+//related endpoints, left the password itself readable unauthenticated via this same field over
+//GET /api/settings and a dedicated GET /api/ota-password [both removed], AND separately exposed
+//every persisted config file - including this very password - directly via serveStatic()'s
+//filesystem-wide static route [also fixed, see the comment there]).
 String otaPassword = "";
 const char* otaPasswordPath = "/otapassword.txt";
+
+//Per-category "reachable without the password" toggles - only consulted when otaPassword is
+//non-empty (an empty password already means everything is open, see its own comment). Each
+//gates a specific, named group of state-changing endpoints - see isRequestAllowedWithoutPassword()
+//(ServiceAccessControlFunctions.ino) for exactly which. Firmware/flash endpoints
+//(/api/web-file, /api/units/firmware*, /api/firmware-*) and this access-control configuration
+//itself deliberately have NO toggle - always protected whenever a password is set, per explicit
+//user requirement. Default false (protected) for every toggle - a newly-added category defaults
+//to the safe state, not accidentally-public.
+bool accessControlTextPublic = false;      //POST /api/text
+bool accessControlSettingsPublic = false;  //POST /api/settings
+bool accessControlUnitsPublic = false;     //POST /api/units?action=offset|reset
+bool accessControlWifiPublic = false;      //POST /api/wifi
+bool accessControlTimezonePublic = false;  //POST /api/timezone
+bool accessControlSystemPublic = false;    //POST /api/reboot, POST /api/debug-mode
+const char* accessControlTextPublicPath = "/accesscontrol-text.txt";
+const char* accessControlSettingsPublicPath = "/accesscontrol-settings.txt";
+const char* accessControlUnitsPublicPath = "/accesscontrol-units.txt";
+const char* accessControlWifiPublicPath = "/accesscontrol-wifi.txt";
+const char* accessControlTimezonePublicPath = "/accesscontrol-timezone.txt";
+const char* accessControlSystemPublicPath = "/accesscontrol-system.txt";
 
 //Runtime-changeable timezone, persisted to LittleFS (see /api/timezone). Default "Europe/Berlin".
 //Use a TZ database name: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
@@ -588,17 +616,14 @@ void setup() {
     SerialPrintln(F("DEBUG: Status = ") + debugStatus);
     blinkLed(7, 200, 100); // 7 blinks = Web server starting
     
-    //No .setCacheControl() - drove heap fragmentation up fast on repeated requests when tried.
-    //Hard-refresh needed after updating a web file.
-    //Defensive heap guard (BUGFIX_LOG #51/#44 pattern): LittleFSImpl::open() -> operator new()
-    //is one of two confirmed abort() sites under low heap (the other, header assembly deep inside
-    //this library, isn't guardable from here). Pure boolean check, no response sent from the
-    //filter itself - a false here falls through to onNotFound below, which decides 503 vs 404.
-    //Threshold has real margin above what a single static file response needs, current normal
-    //free heap on this build is >20000 bytes, so this should never trigger in normal operation.
-    webServer.serveStatic("/", LittleFS, "/").setFilter([](AsyncWebServerRequest * request) {
-      return ESP.getFreeHeap() >= 6000;
-    });
+    //Was `webServer.serveStatic("/", LittleFS, "/")` - a filesystem-wide static route. The only
+    //real static asset is index.html(.gz), already served explicitly below (GET "/") - the
+    //favicon is an embedded base64 data URI in that same HTML, no separate file. This catch-all
+    //route served NO legitimate purpose beyond that: it exposed every runtime config file in
+    //LittleFS root directly and unauthenticated, INCLUDING the OTA password itself
+    //(GET /otapassword.txt returned it in plaintext, completely bypassing every password check
+    //in this file - found 2026-09-09, CODE_REVIEW.md #29). Removed entirely rather than adding an
+    //allowlist filter - there was nothing legitimate left to allow through it.
 
     //All API routes below live under a single "/api/" prefix - full endpoint reference in API.md.
     webServer.on("/", HTTP_GET, [](AsyncWebServerRequest * request) {
@@ -690,14 +715,33 @@ void setup() {
         html += "  return text.replace(/[&<>\"']/g, function(m) { return map[m]; });";
         html += "}";
         html += "function continueToNormal() {";
+        //Same sessionStorage keys as index.html's getAdminPassword() (CODE_REVIEW.md #29) - this
+        //page is served from the same origin, so a password already entered on the main page this
+        //browser tab's session is reused here without asking again, and vice versa.
+        html += "  var password = '';";
+        html += "  if (sessionStorage.getItem('splitflapAdminPasswordKnown') === '1') {";
+        html += "    password = sessionStorage.getItem('splitflapAdminPassword') || '';";
+        html += "  } else {";
+        html += "    var entered = prompt('Administrator-Passwort (leer lassen, falls keines gesetzt ist):', '');";
+        html += "    if (entered !== null) {";
+        html += "      password = entered;";
+        html += "      sessionStorage.setItem('splitflapAdminPassword', entered);";
+        html += "      sessionStorage.setItem('splitflapAdminPasswordKnown', '1');";
+        html += "    }";
+        html += "  }";
         html += "  var xhr = new XMLHttpRequest();";
         html += "  xhr.onreadystatechange = function() {";
         html += "    if (this.readyState == 4 && this.status == 200) {";
         html += "      window.location.href = '/';";
+        html += "    } else if (this.readyState == 4 && this.status == 401) {";
+        html += "      sessionStorage.removeItem('splitflapAdminPassword');";
+        html += "      sessionStorage.removeItem('splitflapAdminPasswordKnown');";
+        html += "      alert('Falsches Administrator-Passwort.');";
         html += "    }";
         html += "  };";
         html += "  xhr.open('POST', '/api/debug-mode', true);";
         html += "  xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');";
+        html += "  xhr.setRequestHeader('X-OTA-Password', password);";
         html += "  xhr.send('enabled=false');";
         html += "}";
         html += "loadDiag();";
@@ -708,6 +752,14 @@ void setup() {
         return;
       }
 #endif
+      //Defensive heap guard (BUGFIX_LOG #51/#44 pattern, moved here from the now-removed
+      //serveStatic() filter that used to cover this same LittleFSImpl::open() call - see its own
+      //comment): a low-heap open() is one of two confirmed abort() sites on this device.
+      if (ESP.getFreeHeap() < 6000) {
+        request->send(503, "text/plain", "Low memory, try again shortly");
+        return;
+      }
+
       //Actually stored gzip-compressed as "/index.html.gz" - AsyncFileResponse falls back to that
       //automatically and adds Content-Encoding: gzip itself.
       unsigned long beforeSend = millis();
@@ -739,9 +791,17 @@ void setup() {
       minimalDoc["wifiRssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
       minimalDoc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
       minimalDoc["wifiSettingsResettable"] = true;
-      //otaPassword/timezone included so Administration can populate from this one fetch, given
-      //this device's hard 5-connection TCP limit.
-      minimalDoc["otaPassword"] = otaPassword;
+      //timezone included so Administration can populate from this one fetch, given this device's
+      //hard 5-connection TCP limit. The password itself is NEVER sent back (CODE_REVIEW.md #29) -
+      //only whether one is currently set, plus the (non-secret) per-category toggle states, both
+      //safe to expose unauthenticated same as everything else on this GET.
+      minimalDoc["otaPasswordSet"] = otaPassword != "";
+      minimalDoc["accessControlTextPublic"] = accessControlTextPublic;
+      minimalDoc["accessControlSettingsPublic"] = accessControlSettingsPublic;
+      minimalDoc["accessControlUnitsPublic"] = accessControlUnitsPublic;
+      minimalDoc["accessControlWifiPublic"] = accessControlWifiPublic;
+      minimalDoc["accessControlTimezonePublic"] = accessControlTimezonePublic;
+      minimalDoc["accessControlSystemPublic"] = accessControlSystemPublic;
       minimalDoc["timezone"] = timezoneSetting;
       minimalDoc["clockFormat"] = clockFormat;
       minimalDoc["dateFormat"] = dateFormat;
@@ -794,6 +854,8 @@ void setup() {
     //is far larger than every other successfully-merged pair - likely relevant, but unconfirmed);
     //reverted to two separate registrations, verified working again. See BUGFIX_LOG #121.
     webServer.on("/api/settings", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
+
       SerialPrintln(F("DEBUG: Request Post of Form Received"));
 
       bool submissionError = false;
@@ -1463,6 +1525,8 @@ void setup() {
       }
 
       if (action == "offset") {
+        if (rejectIfPasswordRequired(request, accessControlUnitsPublic)) return;
+
         if (!request->hasParam(PARAM_ID, true) || !request->hasParam(PARAM_UNIT_OFFSET, true)) {
           SerialPrintln(F("Admin unit-offset request missing parameters"));
           request->send(400, "text/plain", "Both 'id' and 'offset' are required");
@@ -1507,6 +1571,8 @@ void setup() {
       }
 
       if (action == "reset") {
+        if (rejectIfPasswordRequired(request, accessControlUnitsPublic)) return;
+
         SerialPrintln(F("Request to Reset Units Received"));
         isPendingUnitsReset = true; //picked up in loop()
         //updateUnitsResetSequence() writes its own blank1/pause/blank2 sequence directly, bypassing
@@ -1743,6 +1809,8 @@ void setup() {
 
 #if DEBUG_ENABLE == true
     webServer.on("/api/debug-mode", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return;
+
       if (!request->hasParam("enabled", true)) {
         request->send(400, "text/plain", "'enabled' is required (true/false)");
         return;
@@ -1765,6 +1833,8 @@ void setup() {
     //This and reset-units/ota/reset-wifi below are POST, not GET - a GET link is triggerable
     //cross-site (e.g. an <img> tag on any page) without user interaction (CSRF-via-GET).
     webServer.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return;
+
       SerialPrintln(F("Request to Reboot Received"));
       
       //Create HTML page to explain the system is rebooting
@@ -1807,6 +1877,8 @@ void setup() {
     });
 
     webServer.on("/api/scheduled-messages", HTTP_DELETE, [](AsyncWebServerRequest * request) {
+      if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
+
       SerialPrintln(F("Request to Remove Scheduled Message Received"));
       
       if (request->hasParam(PARAM_ID)) {
@@ -1839,6 +1911,8 @@ void setup() {
     //just a message and an optional hold time, instead of the full /api/settings form. Same
     //unauthenticated design as /api/settings (this device has no separate login system).
     webServer.on("/api/text", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (rejectIfPasswordRequired(request, accessControlTextPublic)) return;
+
       String newText = "";
       bool hasText = false;
       long durationSeconds = 0;
@@ -1996,6 +2070,8 @@ void setup() {
       }
 
       // request->method() == HTTP_POST
+      if (rejectIfPasswordRequired(request, accessControlWifiPublic)) return;
+
       String action = request->hasParam("action") ? request->getParam("action")->value() : "";
 
       if (action == "reset") {
@@ -2060,43 +2136,56 @@ void setup() {
     });
 #endif
 
-    //Freely readable without auth (this device has no separate login) - changing it still
-    //requires the current password. GET+POST merged into one registration (heap-saving pattern
-    //established for /api/wifi - also sidesteps the unresolved separate-GET/POST routing quirk
-    //found there, see BUGFIX_LOG #120).
-    webServer.on("/api/ota-password", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
-      if (request->method() == HTTP_GET) {
-        JsonDocument doc;
-        doc["otaPassword"] = otaPassword;
-        AsyncResponseStream *response = request->beginResponseStream("application/json");
-        serializeJson(doc, *response);
-        request->send(response);
-        return;
-      }
-
-      // request->method() == HTTP_POST
-      if (!request->hasParam("currentPassword", true) || !request->hasParam("newPassword", true)) {
-        request->send(400, "text/plain", "'currentPassword' and 'newPassword' are required");
+    //CODE_REVIEW.md #29: this endpoint used to also have a GET returning the password itself in
+    //plaintext, unauthenticated "by design" (this device has no separate login) - removed
+    //entirely. The per-category access-control toggle STATES (not the password) are public,
+    //non-secret info and are read via GET /api/settings instead (see minimalDoc there).
+    //
+    //POST changes the password and/or the access-control toggles together, always gated behind
+    //the CURRENT password matching - this is the one place in the whole access-control system
+    //that is never itself toggleable-public (see accessControlTextPublic's comment in
+    //ESPMaster.ino), otherwise a category opened via "settings public" could reopen every other
+    //category including firmware/flash through this same endpoint.
+    webServer.on("/api/ota-password", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (!request->hasParam("currentPassword", true)) {
+        request->send(400, "text/plain", "'currentPassword' is required");
         return;
       }
 
       String currentPasswordValue = request->getParam("currentPassword", true)->value();
       if (currentPasswordValue != otaPassword) {
-        SerialPrintln(F("OTA password change rejected: current password incorrect"));
+        SerialPrintln(F("OTA password/access-control change rejected: current password incorrect"));
         request->send(401, "text/plain", "Current password is incorrect");
         return;
       }
 
-      String newPasswordValue = request->getParam("newPassword", true)->value();
-      if (newPasswordValue.length() == 0) {
-        request->send(400, "text/plain", "New password cannot be empty");
-        return;
+      //newPassword is optional and MAY be empty - an empty value deliberately disables password
+      //protection globally (CODE_REVIEW.md #29's "muss komplett deaktivierbar sein" requirement).
+      //Omitting the param entirely (not present at all) leaves the password unchanged, so a
+      //request that only wants to update the access-control toggles doesn't have to resend it.
+      if (request->hasParam("newPassword", true)) {
+        otaPassword = request->getParam("newPassword", true)->value();
+        writeFile(LittleFS, otaPasswordPath, otaPassword.c_str());
+        SerialPrintln(otaPassword == "" ? F("OTA password cleared - protection now globally OFF") : F("OTA password changed"));
       }
 
-      otaPassword = newPasswordValue;
-      writeFile(LittleFS, otaPasswordPath, otaPassword.c_str());
-      SerialPrintln(F("OTA password changed"));
-      request->send(200, "text/plain", "OTA password changed");
+      //Every accessControl* toggle is optional per-request (a plain checkbox form only submits
+      //checked boxes) - an ABSENT param means "unchecked"/false, matching normal HTML form
+      //semantics, not "leave unchanged". The frontend always sends the full set together.
+      accessControlTextPublic = request->hasParam("accessControlText", true);
+      accessControlSettingsPublic = request->hasParam("accessControlSettings", true);
+      accessControlUnitsPublic = request->hasParam("accessControlUnits", true);
+      accessControlWifiPublic = request->hasParam("accessControlWifi", true);
+      accessControlTimezonePublic = request->hasParam("accessControlTimezone", true);
+      accessControlSystemPublic = request->hasParam("accessControlSystem", true);
+      writeFile(LittleFS, accessControlTextPublicPath, accessControlTextPublic ? "true" : "false");
+      writeFile(LittleFS, accessControlSettingsPublicPath, accessControlSettingsPublic ? "true" : "false");
+      writeFile(LittleFS, accessControlUnitsPublicPath, accessControlUnitsPublic ? "true" : "false");
+      writeFile(LittleFS, accessControlWifiPublicPath, accessControlWifiPublic ? "true" : "false");
+      writeFile(LittleFS, accessControlTimezonePublicPath, accessControlTimezonePublic ? "true" : "false");
+      writeFile(LittleFS, accessControlSystemPublicPath, accessControlSystemPublic ? "true" : "false");
+
+      request->send(200, "text/plain", "Security settings updated");
     });
 
     webServer.on("/api/timezone", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
@@ -2110,6 +2199,8 @@ void setup() {
       }
 
       // request->method() == HTTP_POST
+      if (rejectIfPasswordRequired(request, accessControlTimezonePublic)) return;
+
       if (!request->hasParam("timezone", true)) {
         request->send(400, "text/plain", "'timezone' is required");
         return;
@@ -2141,6 +2232,8 @@ void setup() {
     //handler costs a small permanent heap allocation that's never freed, and there's very little
     //room to spare.
     webServer.on("/api/quiet-hours", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
+
       if (!request->hasParam("enabled", true) || !request->hasParam("start", true) || !request->hasParam("end", true)) {
         request->send(400, "text/plain", "'enabled', 'start', and 'end' are all required");
         return;
@@ -2168,9 +2261,8 @@ void setup() {
     });
 
     //Without this, ESPAsyncWebSrv's catch-all handler returns 500 instead of 404 for unknown routes.
-    //Also the fallback for the static-file heap filter above: a request that was declined there
-    //(free heap too low to safely open+serve a file) lands here too - tell the caller to retry
-    //shortly instead of a plain, misleading 404.
+    //Same low-heap guard as GET "/"'s index.html serving (see its own comment) for consistency,
+    //though nothing else in this file serves a LittleFS file from a route that could land here.
     webServer.onNotFound([](AsyncWebServerRequest * request) {
       if (ESP.getFreeHeap() < 6000) {
         request->send(503, "text/plain", "Low memory, try again shortly");

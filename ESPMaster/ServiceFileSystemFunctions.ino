@@ -30,6 +30,13 @@ void loadValuesFromFileSystem() {
   quietHoursEnd = readFile(LittleFS, quietHoursEndPath, quietHoursEnd);
   recomputeQuietHoursMinutes();
 
+  accessControlTextPublic = readFile(LittleFS, accessControlTextPublicPath, "false") == "true";
+  accessControlSettingsPublic = readFile(LittleFS, accessControlSettingsPublicPath, "false") == "true";
+  accessControlUnitsPublic = readFile(LittleFS, accessControlUnitsPublicPath, "false") == "true";
+  accessControlWifiPublic = readFile(LittleFS, accessControlWifiPublicPath, "false") == "true";
+  accessControlTimezonePublic = readFile(LittleFS, accessControlTimezonePublicPath, "false") == "true";
+  accessControlSystemPublic = readFile(LittleFS, accessControlSystemPublicPath, "false") == "true";
+
   String scheduledMessagesJson = readFile(LittleFS, scheduledMessagesPath, "");
   if (scheduledMessagesJson != "") {
     SerialPrintln(F("Loading Scheduled Messages"));
