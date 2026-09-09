@@ -25,6 +25,11 @@ bool showText(String message, int delayMillis, String alignmentOverride) {
     return false;
   }
 
+  //Centralized here, not at each individual input path - see normalizeUmlautsForDisplay()'s own
+  //comment (CODE_REVIEW.md #21) for why that matters. Must run before anything below measures
+  //length/position, including the lastWrittenText cache comparison.
+  message = normalizeUmlautsForDisplay(message);
+
   //Quiet Hours override whatever was actually requested - checked here, not at each call site, so
   //every path (mode dispatch, Rotation, scheduled messages, the /api/text push endpoint, ...)
   //parks the display uniformly without needing its own check. Deliberate, not a failure - the

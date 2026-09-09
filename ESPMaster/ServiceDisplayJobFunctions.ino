@@ -299,6 +299,13 @@ void updateDisplayJob() {
       for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
         char currentLetter = aligned[unitIndex];
         int currentLetterPosition = translateLettertoInt(currentLetter);
+        if (currentLetterPosition == -1) {
+          //Unsupported character - previously skipped entirely, silently leaving whatever this
+          //unit was PREVIOUSLY showing in place with no indication anything's wrong (found
+          //2026-09-09, CODE_REVIEW.md #21 - e.g. "AB" followed by "A/" could keep showing "AB").
+          //Fall back to a defined replacement instead of doing nothing.
+          currentLetterPosition = translateLettertoInt('?');
+        }
 
         SerialPrint(F("Unit Nr.: "));
         SerialPrint(unitIndex);

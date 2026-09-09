@@ -1,3 +1,37 @@
+//Converts UTF-8 ä/ö/ü/Ä/Ö/Ü byte sequences to the internal single-byte placeholder codes ($/&/#)
+//that the physical letters[] array (ESPMaster.ino) actually has flaps for - centralizes what was
+//previously only done client-side, and only in the main text form's own onsubmit handler (found
+//2026-09-09, CODE_REVIEW.md #21): Rotation item text, scheduled messages, and direct /api/text
+//calls all bypassed that JS-side substitution entirely, arriving here as raw 2-byte UTF-8
+//sequences that translateLettertoInt() can't match at all - not just failing to show the umlaut,
+//but ALSO shifting every later character's flap position by one extra slot per umlaut, since the
+//line-splitting/alignment logic downstream counts raw bytes, not real characters. Runs once,
+//centrally, in showText() before any of that - so every input path gets the same, correct
+//handling regardless of where the text came from.
+String normalizeUmlautsForDisplay(String text) {
+  String result = "";
+  result.reserve(text.length());
+  for (int i = 0; i < (int)text.length(); i++) {
+    uint8_t currentByte = (uint8_t)text.charAt(i);
+    if (currentByte == 0xC3 && i + 1 < (int)text.length()) {
+      uint8_t nextByte = (uint8_t)text.charAt(i + 1);
+      char replacement = 0;
+      switch (nextByte) {
+        case 0xA4: case 0x84: replacement = '$'; break; //ä / Ä
+        case 0xB6: case 0x96: replacement = '&'; break; //ö / Ö
+        case 0xBC: case 0x9C: replacement = '#'; break; //ü / Ü
+      }
+      if (replacement != 0) {
+        result += replacement;
+        i++; //consumed both bytes of this sequence - skip the second one
+        continue;
+      }
+    }
+    result += (char)currentByte;
+  }
+  return result;
+}
+
 //Aligns string on center of array and fills empty chars with spaces
 String centerString(String message) {
   //message.length() is unsigned - cast to int first, or a too-long message wraps the subtraction
