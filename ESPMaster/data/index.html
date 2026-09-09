@@ -2278,6 +2278,14 @@
 			var elementMessageCount = document.getElementById("spanScheduledMessageCount");
 			elementMessageCount.innerText = scheduledMessages.length;
 
+			//Bug found 2026-09-09: this container was never cleared before appending, unlike every
+			//other list-render function in this file (renderRotationItems() etc.) - loadPage() calls
+			//this again after every settings submit (not just on a hard reload), so rows duplicated
+			//on top of each other every time the user submitted any settings form while a message
+			//was scheduled.
+			var container = document.getElementById("containerScheduledMessages");
+			container.innerHTML = "";
+
 			//Closest to being shown first
 			scheduledMessages = scheduledMessages.sort((a, b) => a.scheduledDateTimeUnix - b.scheduledDateTimeUnix);
 
@@ -2312,7 +2320,6 @@
 				messageElement.appendChild(textElement);
 				messageElement.appendChild(actionButtonElement);
 
-				var container = document.getElementById("containerScheduledMessages");
 				container.appendChild(messageElement);
 			}
 		}
