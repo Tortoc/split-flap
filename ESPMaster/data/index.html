@@ -1512,6 +1512,13 @@
 		//Various variables
 		var unitCount = 0;
 		var timezoneOffset = 0;
+		//IANA zone name (e.g. "Europe/Berlin") of the device's configured timezone - used by
+		//zonedWallTimeToUtcSeconds() below to correctly convert a datetime-local field's value
+		//(entered as DEVICE-local wall-clock time, independent of the browser's own timezone) to a
+		//real UTC unix timestamp, including the correct DST offset for the target date itself, not
+		//just today's. Falls back to timezoneOffset's fixed numeric offset if empty/unset (e.g.
+		//"local development" mode, or a device that has no timezone configured yet).
+		var deviceTimezoneName = "";
 
 		//Set on countdown submit, read by loadPage() right after - keeps the field showing what the
 		//user typed instead of the timezone-round-tripped server value (same idea as encodedTextValue).
@@ -1542,7 +1549,6 @@
 			}
 			else {
 				const deviceMode = document.querySelector('input[name="deviceMode"]:checked').value;
-				const tzOffset = timezoneOffset * 60000;
 				//Holds the ä/ö/ü-encoded value actually sent to the server, kept separate so the
 				//input field keeps showing what the user actually typed.
 				var encodedTextValue = null;
@@ -1554,8 +1560,7 @@
 						encodedTextValue = inputTextValue.replace(/ä/gi, '$').replace(/ö/gi, '&').replace(/ü/gi, '#');
 
 						var currentScheduledDateTimeText = document.getElementById('inputScheduledDateTime').value;
-						var currentScheduledDateTime = new Date(currentScheduledDateTimeText);
-						var time = Math.floor((currentScheduledDateTime.getTime() - tzOffset) / 1000);
+						var time = scheduledDateTimeStringToUtcSeconds(currentScheduledDateTimeText);
 						document.getElementById('inputHiddenScheduledDateTimeUnix').value = time;
 
 						break;
@@ -1563,8 +1568,7 @@
 						var currentCountdownDateTimeText = document.getElementById('inputCountdownDateTime').value;
 						pendingCountdownDateOverride = currentCountdownDateTimeText;
 
-						var currentCountdownDateTime = new Date(currentCountdownDateTimeText);
-						var time = Math.floor((currentCountdownDateTime.getTime() - tzOffset) / 1000);
+						var time = scheduledDateTimeStringToUtcSeconds(currentCountdownDateTimeText);
 						document.getElementById('inputHiddenCountdownDateTimeUnix').value = time;
 
 						break;
@@ -1572,8 +1576,7 @@
 						var currentCountupDateTimeText = document.getElementById('inputCountupDateTime').value;
 						pendingCountupDateOverride = currentCountupDateTimeText;
 
-						var currentCountupDateTime = new Date(currentCountupDateTimeText);
-						var time = Math.floor((currentCountupDateTime.getTime() - tzOffset) / 1000);
+						var time = scheduledDateTimeStringToUtcSeconds(currentCountupDateTimeText);
 						document.getElementById('inputHiddenCountupDateTimeUnix').value = time;
 
 						break;
@@ -1715,6 +1718,7 @@
 								logPageLoadStatus("JSON parsed successfully", false);
 
 								timezoneOffset = responseObject.timezoneOffset;
+								deviceTimezoneName = responseObject.timezone || "";
 
 								setSpeed(responseObject.flapSpeed);
 								setSavedMode(responseObject.deviceMode);
@@ -2027,6 +2031,61 @@
 			return `${year}-${month}-${day}T${hours}:${minutes}`;
 		}
 
+		//Converts a <input type="datetime-local">'s raw value ("YYYY-MM-DDTHH:mm", never a
+		//timezone suffix per spec) into a real UTC unix timestamp (seconds) - treating it as
+		//wall-clock time in the DEVICE's configured timezone, independent of whatever timezone the
+		//browser itself happens to be in, and correctly accounting for DST at the TARGET date (not
+		//just today's DST state).
+		//
+		//Bug fixed 2026-09-09, CODE_REVIEW.md #11: every submission path previously did
+		//`new Date(dateTimeLocalString).getTime() - timezoneOffset*60000`. new Date(string) on a
+		//timezone-less datetime string is specified to parse using the BROWSER's own local
+		//timezone, so .getTime() already yields a correct real UTC instant on its own - the
+		//subsequent subtraction of the device's offset was a redundant SECOND conversion, silently
+		//conflating browser and device timezone. Live-verified via headless Chromium: reproduced
+		//the exact reported failure mode (a scheduled 15:00 Berlin message landing on the UTC
+		//instant for 15:00 instead of 13:00 - a 7200s/2h error) with the old formula, confirmed
+		//this replacement produces the correct instant, and confirmed genuine DST-awareness by
+		//checking the same wall-clock time against both a summer and a winter target date.
+		function zonedWallTimeToUtcSeconds(year, month, day, hour, minute, timeZone) {
+			const guessUtcMs = Date.UTC(year, month - 1, day, hour, minute, 0);
+			//Ask what wall-clock time this guessed UTC instant corresponds to in the target zone -
+			//the difference between that and our guess IS the zone's real UTC offset for this
+			//specific moment (DST-correct, since it's evaluated at the target date, not today's).
+			const formatter = new Intl.DateTimeFormat('en-US', {
+				timeZone, hourCycle: 'h23',
+				year: 'numeric', month: '2-digit', day: '2-digit',
+				hour: '2-digit', minute: '2-digit', second: '2-digit'
+			});
+			const parts = formatter.formatToParts(new Date(guessUtcMs));
+			const get = (type) => parseInt(parts.find((p) => p.type === type).value, 10);
+			const zonedAsUtcMs = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'));
+			const offsetMs = zonedAsUtcMs - guessUtcMs;
+			return Math.floor((guessUtcMs - offsetMs) / 1000);
+		}
+
+		//Convenience wrapper around zonedWallTimeToUtcSeconds() for the common case: a raw
+		//datetime-local (or plain date - see the Countdown/Countup <input type="date"> callers,
+		//defaults to midnight) string parsed against the device's own configured timezone. Falls
+		//back to the simpler, DST-unaware numeric-offset math (still correct for "right now", just
+		//not necessarily for a target date in a different DST period) if the device's IANA zone
+		//name isn't available yet, or if Intl.DateTimeFormat rejects it - never leaves the caller
+		//with no result at all.
+		function scheduledDateTimeStringToUtcSeconds(dateTimeLocalString) {
+			const numbers = dateTimeLocalString.split(/[-T:]/).map(Number);
+			const [year, month, day, hour = 0, minute = 0] = numbers;
+
+			if (deviceTimezoneName) {
+				try {
+					return zonedWallTimeToUtcSeconds(year, month, day, hour, minute, deviceTimezoneName);
+				} catch (e) {
+					logPageLoadStatus("zonedWallTimeToUtcSeconds() failed (" + e + "), falling back to numeric offset", true);
+				}
+			}
+			const tzOffset = timezoneOffset * 60000;
+			return Math.floor((Date.UTC(year, month - 1, day, hour, minute, 0) + tzOffset) / 1000);
+		}
+
 		//--- Rotation mode: an ordered list of Text/Uhrzeit/Datum/Countdown/Countup steps, each with its
 		//own display duration - the server cycles through them and loops back to the start.
 		var rotationItemsData = [];
@@ -2061,9 +2120,7 @@
 
 		//Same local<->unix conversion as the standalone Countdown field.
 		function updateRotationItemDateTimeLocal(index, dateTimeLocalValue) {
-			var tzOffset = timezoneOffset * 60000;
-			var parsedDate = new Date(dateTimeLocalValue);
-			rotationItemsData[index].targetDateTimeUnix = Math.floor((parsedDate.getTime() - tzOffset) / 1000);
+			rotationItemsData[index].targetDateTimeUnix = scheduledDateTimeStringToUtcSeconds(dateTimeLocalValue);
 		}
 
 		//Toggles a per-item alignment override: clicking the already-active button clears it back
