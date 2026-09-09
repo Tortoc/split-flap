@@ -77,6 +77,8 @@
 //twi.h's raw twi_writeTo() is used for twiboot flash-page writes instead of Wire - a page write is
 //132 bytes, which exceeds Wire's 128-byte TX buffer and silently drops the tail.
 #include <twi.h>
+#include <memory> //std::shared_ptr - PendingRequestSlot's per-generation disconnect flag, CODE_REVIEW_V2.md #1
+#include <atomic> //std::atomic<bool> - same reason
 #include <user_interface.h> //struct rst_info, for the crash reporter
 #include <lwip/priv/tcp_priv.h> //exposes tcp_active_pcbs/etc. for /api/tcp-status
 #include "Classes.h"
@@ -190,15 +192,30 @@ int unitsAmount = 0; //auto-detected via I2C scan, sequential from 0 - see scanI
 struct PendingRequestSlot {
   AsyncWebServerRequest* request = nullptr;
   uint32_t generation = 0;             //bumped every time a new request is accepted into this slot
-  uint32_t disconnectedGeneration = 0; //which generation (if any) has disconnected; 0 = none yet (generations start at 1)
+
+  //Per-generation disconnect flag, NOT a single "last disconnected generation" field like before
+  //(found 2026-09-09, CODE_REVIEW_V2.md #1, live-reproducible with the extracted struct): a single
+  //shared "disconnectedGeneration" field only remembers the MOST RECENT disconnect - if generation
+  //N disconnects (disconnectedGeneration=N), then a NEWER generation M gets accepted into the
+  //now-freed slot and ALSO disconnects (disconnectedGeneration=M) BEFORE N's own
+  //stillConnected(N) check ever runs, that check would wrongly see "last disconnected was M, not
+  //N" and report N as still connected - a stale, already-deleted request pointer then gets used.
+  //Each accept() now creates its own dedicated flag instead, captured by that generation's own
+  //onDisconnect closure AND handed out by take() to the caller - kept alive via shared_ptr
+  //reference counting independent of whatever the slot itself does afterward (a newer accept()
+  //replaces the slot's own copy in disconnectedFlag below, but a caller who already took() an
+  //older generation is holding its own reference to the OLD flag, unaffected by that).
+  std::shared_ptr<std::atomic<bool>> disconnectedFlag;
 
   //Call from the HTTP request handler when accepting a new request into this (assumed-empty) slot.
-  //Registers the disconnect callback itself, correctly scoped to this specific generation.
+  //Registers the disconnect callback itself, correctly scoped to this specific generation's own flag.
   void accept(AsyncWebServerRequest* newRequest) {
     uint32_t myGeneration = ++generation;
     request = newRequest;
-    newRequest->onDisconnect([this, myGeneration]() {
-      disconnectedGeneration = myGeneration;
+    auto myFlag = std::make_shared<std::atomic<bool>>(false);
+    disconnectedFlag = myFlag;
+    newRequest->onDisconnect([this, myGeneration, myFlag]() {
+      myFlag->store(true);
       if (generation == myGeneration) { //still the current occupant - safe to clear the slot too
         request = nullptr;
       }
@@ -207,18 +224,21 @@ struct PendingRequestSlot {
 
   //Call from loop() when starting to process this slot - returns the request to use and frees the
   //slot immediately so a new request can be accepted while this one's work is still in progress.
-  //generationOut identifies this specific request for the stillConnected() check below.
-  AsyncWebServerRequest* take(uint32_t &generationOut) {
+  //flagOut is this specific request's own disconnect flag, for the stillConnected() check below -
+  //hold onto it (it's a shared_ptr, safe to keep past this call) until that check is done.
+  AsyncWebServerRequest* take(std::shared_ptr<std::atomic<bool>> &flagOut) {
     AsyncWebServerRequest* result = request;
-    generationOut = generation;
+    flagOut = disconnectedFlag;
     request = nullptr;
     return result;
   }
 
   //Call from loop() right before using the request returned by take() (e.g. ->send()) - false
   //means that specific request's connection is gone and the pointer is no longer safe to touch.
-  bool stillConnected(uint32_t generation) {
-    return disconnectedGeneration != generation;
+  //Pass the exact flag take() gave you for this same request, not the slot's current one (which
+  //may since belong to a different, newer generation).
+  static bool stillConnected(const std::shared_ptr<std::atomic<bool>> &flag) {
+    return flag && !flag->load();
   }
 };
 
@@ -247,7 +267,15 @@ String pendingTimezoneValue = "";
 //pendingTimezoneSlot - these hold the deferred request across that whole span. See the loop()
 //block that processes them for the full explanation.
 AsyncWebServerRequest* timezoneLookupDeferredRequest = nullptr;
-uint32_t timezoneLookupDeferredGeneration = 0;
+std::shared_ptr<std::atomic<bool>> timezoneLookupDeferredFlag;
+//Snapshot of pendingTimezoneValue taken at kickoff time, NOT re-read from that shared global at
+//finish time (found 2026-09-09, CODE_REVIEW_V2.md #14/Nachtrag: pendingTimezoneValue is a single
+//global - a second request accepted into the slot while the first's async lookup is still running
+//would overwrite it before the first one's result gets persisted, saving the SECOND request's
+//value under the FIRST request's successful lookup). The lookup itself (startTimezoneLookup())
+//already took its own internal copy correctly; this is specifically for what gets written to
+//timezoneSetting/the settings file once the lookup completes.
+String timezoneLookupDeferredValue = "";
 //Declared here (not in ServiceAsyncTimeSyncFunctions.ino, where they're actually driven from) -
 //ESPMaster.ino is concatenated/compiled before that file in the sketch, and loop() above
 //references them directly; global variables (unlike functions) aren't auto-forward-declared
@@ -1348,20 +1376,13 @@ void setup() {
         static File unitFirmwareFile;
 
         if (index == 0) {
-          //If a previous upload's connection just vanished mid-transfer, "final" never fired for
-          //it and this handle was never closed - found live 2026-09-09 while testing the fix
-          //below (a dangling handle measurably cost heap/fragmentation across the next upload).
-          //Close it defensively before reusing the static variable for this new attempt.
-          if (unitFirmwareFile) {
-            unitFirmwareFile.close();
-          }
-          //Same reasoning for a leftover temp file from that vanished upload - LittleFS.open(...,
-          //"w") below truncates it anyway, but remove it explicitly so a request that fails before
-          //ever opening the new file (e.g. a rejected password) doesn't leave stale bytes behind.
-          if (LittleFS.exists(unitFirmwareTmpPath)) {
-            LittleFS.remove(unitFirmwareTmpPath);
-          }
-
+          //Check the password FIRST, before touching any previous-upload state at all. Found
+          //2026-09-09, CODE_REVIEW_V2.md #3: this used to close the previous upload's (possibly
+          //still-legitimately-in-progress) file handle and delete its temp file BEFORE checking
+          //this new request's own password - an unauthenticated POST here could already interrupt
+          //and corrupt a different, correctly-authenticated upload that was still streaming in,
+          //purely by virtue of also hitting index==0 on the shared static state. The failure
+          //response for a bad password is unaffected either way.
           unitFirmwareUploadAuthFailed = false;
           unitFirmwareUploadWriteFailed = false;
           if (String(otaPassword) != "") {
@@ -1371,6 +1392,21 @@ void setup() {
               unitFirmwareUploadAuthFailed = true;
               return;
             }
+          }
+
+          //Only now, with this request's own credentials confirmed, touch the shared static
+          //upload state. If a previous upload's connection just vanished mid-transfer, "final"
+          //never fired for it and this handle was never closed - found live 2026-09-09 while
+          //testing the fix below (a dangling handle measurably cost heap/fragmentation across the
+          //next upload). Close it defensively before reusing the static variable for this attempt.
+          if (unitFirmwareFile) {
+            unitFirmwareFile.close();
+          }
+          //Same reasoning for a leftover temp file from that vanished upload - LittleFS.open(...,
+          //"w") below truncates it anyway, but remove it explicitly so a request that fails later
+          //(e.g. a write error) doesn't leave stale bytes behind from an even earlier attempt.
+          if (LittleFS.exists(unitFirmwareTmpPath)) {
+            LittleFS.remove(unitFirmwareTmpPath);
           }
 
           SerialPrintln(F("DEBUG: Unit firmware upload starting: ") + filename);
@@ -1609,16 +1645,10 @@ void setup() {
         static String webUploadTmpPath;
 
         if (index == 0) {
-          //Same defensive cleanup as /api/units/firmware above, for a previous upload whose
-          //connection vanished mid-transfer ("final" never fired, so this never ran) - see that
-          //handler's comment.
-          if (webUploadFile) {
-            webUploadFile.close();
-          }
-          if (webUploadTmpPath != "" && LittleFS.exists(webUploadTmpPath)) {
-            LittleFS.remove(webUploadTmpPath);
-          }
-
+          //Check the password FIRST, before touching any previous-upload state at all - same
+          //reasoning as /api/units/firmware above (found 2026-09-09, CODE_REVIEW_V2.md #3): an
+          //unauthenticated POST hitting index==0 must not be able to close/delete a different,
+          //still-legitimately-in-progress upload's file just by arriving first.
           webFileUploadAuthFailed = false;
           webFileUploadWriteFailed = false;
           if (String(otaPassword) != "") {
@@ -1628,6 +1658,17 @@ void setup() {
               webFileUploadAuthFailed = true;
               return;
             }
+          }
+
+          //Only now, with this request's own credentials confirmed, touch the shared static
+          //upload state. Same defensive cleanup as /api/units/firmware above, for a previous
+          //upload whose connection vanished mid-transfer ("final" never fired, so this never ran)
+          //- see that handler's comment.
+          if (webUploadFile) {
+            webUploadFile.close();
+          }
+          if (webUploadTmpPath != "" && LittleFS.exists(webUploadTmpPath)) {
+            LittleFS.remove(webUploadTmpPath);
           }
 
           //"index.html.gz" is the only valid target - the whole UI is one gzip-compressed file,
@@ -1771,10 +1812,36 @@ void setup() {
             otaChunkRejected = true;
             return;
           }
+          //Reject an overlapping chunk's body HERE too, before touching otaChunkLen/otaChunkBuffer
+          //at all - not just in the outer request handler above, which only runs once this ENTIRE
+          //body has already streamed in and overwritten them. Found 2026-09-09,
+          //CODE_REVIEW_V2.md #2, live-reproduced with the extracted body handler: a buffer holding
+          //"AAAA" contained "BBBB" after a second body ran while the first chunk was still
+          //pending (loop() hadn't called Update.write() for it yet). Must come before the
+          //otaChunkLen=0 reset below, too - otherwise even a correctly-REJECTED overlapping body
+          //would still wipe the still-pending previous chunk's length, corrupting it a different
+          //way (loop() would then Update.write() zero bytes instead of the real chunk).
+          if (otaPendingPhase != OTA_PHASE_NONE) {
+            otaChunkRejected = true;
+            return;
+          }
           otaChunkLen = 0;
           otaChunkRejected = (otaChunkBuffer == nullptr) || (total > OTA_CHUNK_SIZE);
         }
         if (otaChunkRejected) {
+          return;
+        }
+        //Re-check on EVERY fragment, not just index==0 (found 2026-09-09, CODE_REVIEW_V2.md #4,
+        //statically traced): the abandoned-upload watchdog (loop(), see otaLastActivityAt below)
+        //could previously free/null otaChunkBuffer mid-transfer, between two fragments of one
+        //slow-arriving body, since otaLastActivityAt was only updated once the FULL chunk (and
+        //its outer handler) had completed - a later fragment's memcpy would then write through a
+        //dangling/null pointer. Updating otaLastActivityAt on every fragment (not just at the
+        //end) additionally means a genuinely still-arriving, slow-but-active body no longer looks
+        //"abandoned" to that same watchdog in the first place.
+        otaLastActivityAt = millis();
+        if (otaChunkBuffer == nullptr) {
+          otaChunkRejected = true;
           return;
         }
         if (otaChunkLen + len > OTA_CHUNK_SIZE) {
@@ -2212,10 +2279,17 @@ void setup() {
         return;
       }
 
-      //isTimezoneLookupBusy() also covers a PREVIOUS request whose slot was already taken but
-      //whose async lookup (checkTimezoneLookup(), ServiceAsyncTimeSyncFunctions.ino) hasn't
-      //finished yet - pendingTimezoneSlot.request alone would miss that window.
-      if (pendingTimezoneSlot.request != nullptr || isTimezoneLookupBusy()) {
+      //isTimezoneLookupBusy() covers a PREVIOUS request whose slot was already taken but whose
+      //async lookup (checkTimezoneLookup(), ServiceAsyncTimeSyncFunctions.ino) hasn't finished
+      //yet - pendingTimezoneSlot.request alone would miss that window. timezoneLookupDeferredRequest
+      //additionally covers the narrow gap AFTER the lookup finishes (tzLookupState already back to
+      //IDLE, so isTimezoneLookupBusy() alone would already say "no") but BEFORE loop()'s own finish
+      //block below has actually persisted the result and responded - found 2026-09-09,
+      //CODE_REVIEW_V2.md #14/Nachtrag: without this, a request accepted during exactly that gap
+      //could overwrite pendingTimezoneValue before the first request's own result is saved under
+      //it. (timezoneLookupDeferredValue's own snapshot, taken at kickoff below, closes the second
+      //half of that same finding - even if a new request somehow still slipped in here.)
+      if (pendingTimezoneSlot.request != nullptr || isTimezoneLookupBusy() || timezoneLookupDeferredRequest != nullptr) {
         request->send(503, "text/plain", "Another timezone change is already in progress, try again shortly");
         return;
       }
@@ -2325,13 +2399,13 @@ void loop() {
   //I2C admin requests deferred here by the web handlers (see pendingRescanSlot's comment near
   //unitsAmount) - checked first so a pending request gets served as soon as possible.
   if (pendingRescanSlot.request != nullptr) {
-    uint32_t generation;
-    AsyncWebServerRequest* deferredRequest = pendingRescanSlot.take(generation);
+    std::shared_ptr<std::atomic<bool>> disconnected;
+    AsyncWebServerRequest* deferredRequest = pendingRescanSlot.take(disconnected);
 
     int detectedAmount = scanI2CBus();
 
     //Client may have disconnected while scanI2CBus() ran, making deferredRequest a dangling pointer.
-    if (pendingRescanSlot.stillConnected(generation)) {
+    if (PendingRequestSlot::stillConnected(disconnected)) {
       JsonDocument doc;
       doc["unitsAmount"] = detectedAmount;
       AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
@@ -2341,8 +2415,8 @@ void loop() {
   }
 
   if (pendingUnitOffsetSlot.request != nullptr) {
-    uint32_t generation;
-    AsyncWebServerRequest* deferredRequest = pendingUnitOffsetSlot.take(generation);
+    std::shared_ptr<std::atomic<bool>> disconnected;
+    AsyncWebServerRequest* deferredRequest = pendingUnitOffsetSlot.take(disconnected);
 
     bool writeOk = writeOffsetToUnit(pendingUnitOffsetUnitId, pendingUnitOffsetValue);
     //Recalibration re-homes the unit - its previously-displayed letter is no longer
@@ -2350,7 +2424,7 @@ void loop() {
     //displayRenderGeneration's comment - CODE_REVIEW.md #14.
     displayRenderGeneration++;
 
-    if (pendingUnitOffsetSlot.stillConnected(generation)) {
+    if (PendingRequestSlot::stillConnected(disconnected)) {
       if (writeOk) {
         deferredRequest->send(202, "text/plain", "Offset sent. Unit is recalibrating now, this can take a few seconds.");
       } else {
@@ -2372,25 +2446,28 @@ void loop() {
   //the top, where events() used to be) - by the time control reaches here, tzLookupDone may
   //already be true for the SAME tick a lookup finishes on.
   if (pendingTimezoneSlot.request != nullptr && timezoneLookupDeferredRequest == nullptr && !isTimezoneLookupBusy()) {
-    timezoneLookupDeferredRequest = pendingTimezoneSlot.take(timezoneLookupDeferredGeneration);
-    startTimezoneLookup(pendingTimezoneValue);
+    timezoneLookupDeferredRequest = pendingTimezoneSlot.take(timezoneLookupDeferredFlag);
+    //Snapshot NOW, not re-read from the shared pendingTimezoneValue global at finish time below -
+    //see timezoneLookupDeferredValue's own comment (CODE_REVIEW_V2.md #14/Nachtrag).
+    timezoneLookupDeferredValue = pendingTimezoneValue;
+    startTimezoneLookup(timezoneLookupDeferredValue);
   }
 
   if (timezoneLookupDeferredRequest != nullptr && tzLookupDone) {
     AsyncWebServerRequest* deferredRequest = timezoneLookupDeferredRequest;
-    uint32_t generation = timezoneLookupDeferredGeneration;
+    std::shared_ptr<std::atomic<bool>> disconnectedFlag = timezoneLookupDeferredFlag;
     timezoneLookupDeferredRequest = nullptr;
 
     bool timezoneOk = tzLookupResult;
     if (timezoneOk) {
-      timezoneSetting = pendingTimezoneValue;
+      timezoneSetting = timezoneLookupDeferredValue;
       writeFile(LittleFS, timezonePath, timezoneSetting.c_str());
       SerialPrintln(F("Timezone changed to: ") + timezoneSetting);
     } else {
-      SerialPrintln(F("Timezone change rejected: '") + pendingTimezoneValue + F("' not recognized"));
+      SerialPrintln(F("Timezone change rejected: '") + timezoneLookupDeferredValue + F("' not recognized"));
     }
 
-    if (pendingTimezoneSlot.stillConnected(generation)) {
+    if (PendingRequestSlot::stillConnected(disconnectedFlag)) {
       if (timezoneOk) {
         deferredRequest->send(200, "text/plain", "Timezone changed");
       } else {
@@ -2400,8 +2477,8 @@ void loop() {
   }
 
   if (pendingUnitsInfoSlot.request != nullptr) {
-    uint32_t generation;
-    AsyncWebServerRequest* deferredRequest = pendingUnitsInfoSlot.take(generation);
+    std::shared_ptr<std::atomic<bool>> disconnected;
+    AsyncWebServerRequest* deferredRequest = pendingUnitsInfoSlot.take(disconnected);
 
     JsonDocument doc;
     doc["unitsAmount"] = unitsAmount;
@@ -2429,7 +2506,7 @@ void loop() {
       yield();
     }
 
-    if (pendingUnitsInfoSlot.stillConnected(generation)) {
+    if (PendingRequestSlot::stillConnected(disconnected)) {
       AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
       serializeJson(doc, *response);
       deferredRequest->send(response);
@@ -2437,8 +2514,8 @@ void loop() {
   }
 
   if (pendingLegacyI2CScanSlot.request != nullptr) {
-    uint32_t generation;
-    AsyncWebServerRequest* deferredRequest = pendingLegacyI2CScanSlot.take(generation);
+    std::shared_ptr<std::atomic<bool>> disconnected;
+    AsyncWebServerRequest* deferredRequest = pendingLegacyI2CScanSlot.take(disconnected);
 
     JsonDocument doc;
     doc["scanTime"] = millis();
@@ -2476,7 +2553,7 @@ void loop() {
     doc["foundCount"] = foundCount;
     doc["expectedCount"] = unitsAmount;
 
-    if (pendingLegacyI2CScanSlot.stillConnected(generation)) {
+    if (PendingRequestSlot::stillConnected(disconnected)) {
       AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
       serializeJson(doc, *response);
       deferredRequest->send(response);
@@ -2594,10 +2671,10 @@ void loop() {
   // Separate from the block above on purpose: the flash-side result and the deferred request can
   // become ready in either order.
   if (otaResultReady && pendingFirmwareUploadSlot.request != nullptr) {
-    uint32_t generation;
-    AsyncWebServerRequest* deferredRequest = pendingFirmwareUploadSlot.take(generation);
+    std::shared_ptr<std::atomic<bool>> disconnected;
+    AsyncWebServerRequest* deferredRequest = pendingFirmwareUploadSlot.take(disconnected);
 
-    if (pendingFirmwareUploadSlot.stillConnected(generation)) {
+    if (PendingRequestSlot::stillConnected(disconnected)) {
       AsyncWebServerResponse* response = deferredRequest->beginResponse(otaResultSuccess ? 200 : 500, "text/plain", otaResultMessage);
       response->addHeader("Connection", "close");
       deferredRequest->send(response);
@@ -2615,8 +2692,8 @@ void loop() {
 
 #if UNIT_BOOTLOADER_ENABLE == true
   if (pendingFirmwarePushSlot.request != nullptr) {
-    uint32_t generation;
-    AsyncWebServerRequest* deferredRequest = pendingFirmwarePushSlot.take(generation);
+    std::shared_ptr<std::atomic<bool>> disconnected;
+    AsyncWebServerRequest* deferredRequest = pendingFirmwarePushSlot.take(disconnected);
     int unitIndex = pendingFirmwarePushUnitIndex;
 
     SerialPrintln(F("Pushing firmware to Unit ") + String(unitIndex) + F("..."));
@@ -2625,14 +2702,14 @@ void loop() {
     //comment on the onDisconnect handler for /unit-firmware-push above.
     bool success = pushFirmwareToUnit(unitIndex, resultJson);
 
-    if (pendingFirmwarePushSlot.stillConnected(generation)) {
+    if (PendingRequestSlot::stillConnected(disconnected)) {
       deferredRequest->send(success ? 200 : 500, "application/json", resultJson);
     }
   }
 
   if (pendingBootloaderProbeSlot.request != nullptr) {
-    uint32_t generation;
-    AsyncWebServerRequest* deferredRequest = pendingBootloaderProbeSlot.take(generation);
+    std::shared_ptr<std::atomic<bool>> disconnected;
+    AsyncWebServerRequest* deferredRequest = pendingBootloaderProbeSlot.take(disconnected);
     int unitIndex = pendingBootloaderProbeUnitIndex;
 
     SerialPrintln(F("Bootloader probe: requesting Unit ") + String(unitIndex) + F(" to enter bootloader..."));
@@ -2690,7 +2767,7 @@ void loop() {
         : "Nothing was written, but the explicit return-to-app command failed - the unit may still be sitting in the bootloader. Check /admin/units, or power-cycle the unit if it doesn't come back on its own.";
     }
 
-    if (pendingBootloaderProbeSlot.stillConnected(generation)) {
+    if (PendingRequestSlot::stillConnected(disconnected)) {
       AsyncResponseStream *response = deferredRequest->beginResponseStream("application/json");
       serializeJson(doc, *response);
       deferredRequest->send(response);
