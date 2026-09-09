@@ -484,10 +484,14 @@ requires none (read-only, no write to flash).
 ```
 On failure, `success: false` and an `error` field instead of `message`/`started` (and possibly
 missing `bootAddress`/`pageSize`/`totalPages`/`pagesWritten` if the failure happened before the
-unit was even found, e.g. no unit answered in bootloader mode). The critical first flash page
-(interrupt vector table) is always written last and only after every other page is verified - a
-failed push leaves the old firmware fully intact. `400` if `no firmware has been uploaded yet;
-`503` if another push is already in progress.
+unit was even found, e.g. no unit answered in bootloader mode). Safety against an aborted push:
+an EEPROM "update in progress" marker is armed before any flash page is touched and only cleared
+after every page (including the vector table, written last) is confirmed byte-for-byte - twiboot
+itself refuses to boot into the app while that marker is armed, regardless of a subsequent reset,
+so an interrupted push leaves the unit safely parked in the bootloader rather than risking a boot
+into a mix of old and new code (writing flash pages 1..N-1 before page 0 alone does *not*
+guarantee this - the reset vector's jump target lands in page 1 on this MCU). `400` if no firmware
+has been uploaded yet; `503` if another push is already in progress.
 
 **`action=probe` response** `200 application/json` on success - diagnostic-only, sends a unit into
 bootloader mode and reports which I2C address it answers on and its chip info, **without writing

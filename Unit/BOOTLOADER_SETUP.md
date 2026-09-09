@@ -114,6 +114,12 @@ auf **1024 Words = 2048 Bytes** begrenzt (siehe oben, `hfuse=0xDA`).
 **Verifiziert (2026-08-10, `avr-gcc` 16.1.0 / `avr-libc` 2.3.2):** Flash-
 Verbrauch (text+data) **746 Bytes von 2048 Bytes** - komfortabel im Budget.
 
+**Nachtrag (2026-09-09):** EEPROM-Update-Marker ergänzt (siehe Change 2 im
+Datei-Kopfkommentar von `main.c` - verhindert, dass ein abgebrochenes Update
+nach einem erneuten Reset in inkonsistenten Alt-/Neu-Code-Mix bootet).
+Neu verifiziert: **790 Bytes von 2048 Bytes** (+44 Bytes) - weiterhin
+komfortabel im Budget (39%).
+
 ## Schritt 2: ISP-Flash - identisch für jede Unit
 
 **Nur mit der gerade angeschlossenen Unit**, ISP-Programmer entsprechend
@@ -143,6 +149,24 @@ Flash-Speicher, also auch eine eventuell schon vorhandene `Unit.ino`-App!
 Direkt danach die App erneut flashen (z.B. über die Arduino IDE per ISP,
 oder `avrdude ... -D -U flash:w:Unit.ino.hex:i` mit `-D`, um den gerade
 geschriebenen Bootloader dabei nicht wieder zu löschen).
+
+**Gilt genauso in die andere Richtung, nicht nur beim allerersten Setup**
+(live erlebt, 2026-09-09, siehe BUGFIX_LOG #138 - lokal): Wird später,
+NACHDEM Bootloader+App beide schon korrekt drauf sind, per ISP nur die App
+NOCHMAL neu geschrieben (z.B. um einen EEPROM-Wert/eine Fehlkalibrierung zu
+beheben), löscht `avrdude` ohne `-D` **wieder den kompletten Chip inklusive
+des bereits vorhandenen Bootloaders** - der Schreibvorgang selbst
+(nur die App betreffend) läuft dabei erfolgreich und verifiziert sauber,
+der Bootloader-Verlust fällt also nicht sofort auf. Ergebnis: die Unit
+läuft scheinbar normal weiter (bootet direkt in die App), aber
+I2C-Firmware-Updates schlagen ab sofort mit "Unit did not respond in
+bootloader mode" fehl, weil schlicht kein Bootloader mehr da ist.
+**Faustregel: Jeder ISP-Schreibvorgang, der NICHT explizit alle drei
+Bereiche (Bootloader + App + Fuses) neu setzen soll, braucht `-D`.** Nach
+jedem ISP-Zugriff, der nur einen Teil ändern sollte, den unberührt
+bleibenden Teil per `avrdude -c ... -p atmega328p -t` und
+`dump flash 0x7800 32` (Bootloader) bzw. `dump flash 0x0 16` (App-Vektortabelle)
+gegenprüfen - nicht nur den gerade geschriebenen Teil.
 
 ## Schritt 3: Smoke-Test (an der Ersatz-Unit, vor jeder verbauten Unit)
 

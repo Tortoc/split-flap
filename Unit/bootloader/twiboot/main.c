@@ -22,13 +22,27 @@
  * Based on unmodified upstream https://github.com/orempel/twiboot
  * commit 559a403836e8d91a2d5b962e9541af679150b7a9 (2021-02-20).
  *
- * Change: the TWI/I2C address is no longer a fixed compile-time value.
+ * Change 1: the TWI/I2C address is no longer a fixed compile-time value.
  * Instead, main() reads the same 6 DIP-switch address pins (A0-A3, D3-D4)
  * that Unit.ino's getaddress() already reads, and adds that to
  * TWI_ADDRESS_BASE. This keeps a single compiled bootloader image usable on
  * every unit, and makes DIP-switch/jumper changes take effect immediately
  * for firmware updates too, without needing a per-unit bootloader reflash.
  * See Unit/BOOTLOADER_SETUP.md for the full rationale.
+ *
+ * Change 2 (2026-09-09): an EEPROM byte at EEPROM_UPDATE_MARKER_ADDR now
+ * gates the app-boot decision (see the for(;;) wrapper around the main
+ * command loop below). Application pages are written 1..N-1 first, page 0
+ * (the reset vector) last - but that only protects the jump instruction
+ * itself, not its target: on the atmega328p the real entry point the reset
+ * vector jumps to already lands in page 1, i.e. exactly the pages rewritten
+ * FIRST. An update aborted partway through (e.g. a power loss between
+ * pages) followed by any reset would otherwise auto-boot the old (untouched)
+ * page 0 straight into a mix of old and new code once the idle timeout (or
+ * an explicit CMD_SWITCH_APPLICATION) fires. The marker makes twiboot stay
+ * resident instead - see ESPMaster/ServiceUnitFirmwareFunctions.ino's
+ * pushFirmwareToUnit(), which arms the marker before writing any page and
+ * only clears it after page 0 is written AND verified.
  *
  * Everything else in this file is unmodified upstream code. This file
  * remains licensed under GPL-2.0 (see LICENSE in this directory), as
@@ -159,6 +173,17 @@
 #define MEMTYPE_CHIPINFO        0x00
 #define MEMTYPE_FLASH           0x01
 #define MEMTYPE_EEPROM          0x02
+
+/* "Update complete" gate for the app-boot decision - see Change 2 in the file header comment
+ * above. E2END (not a hardcoded address) so this always matches whatever MCU this is built for.
+ * Deliberately the opposite end of the EEPROM from Unit.ino's own calOffset (address 0-1), to
+ * keep the two completely separate. 0xFF (the EEPROM-erased default) means "OK to boot" - no
+ * migration step needed for a unit that has never gone through an update with this mechanism, or
+ * right after a fresh ISP chip-erase. Only an explicit 0x00 (armed by pushFirmwareToUnit() before
+ * writing any flash page) blocks booting - EEPROM needs no separate erase cycle, so clearing it
+ * back to 0xFF after a verified-complete update is a perfectly ordinary write. */
+#define EEPROM_UPDATE_MARKER_ADDR      E2END
+#define EEPROM_UPDATE_MARKER_INPROGRESS 0x00
 
 /*
  * LED_GN flashes with 20Hz (while bootloader is running)
@@ -884,35 +909,59 @@ int main(void)
 #error "No TWI/USI peripheral found"
 #endif
 
-    while (cmd != CMD_BOOT_APPLICATION)
+    /* Outer loop, see Change 2 in the file header comment above: cmd can become
+     * CMD_BOOT_APPLICATION three different ways (the idle timeout in TIMER0_OVF_vect, an explicit
+     * CMD_SWITCH_APPLICATION/BOOTTYPE_APPLICATION, or the SLA+W-junk-byte shortcut in
+     * TWI_data_write) - gating all of them at once, right here at the only place that actually
+     * calls jump_to_app() below, is simpler and provably complete rather than tracking three
+     * separate call sites. Read fresh from EEPROM every time (never cached in a variable) - a
+     * push that clears the marker during THIS same bootloader session (recovering from an earlier
+     * aborted one) must be able to boot immediately once it does, without needing a second reset. */
+    for (;;)
     {
+        while (cmd != CMD_BOOT_APPLICATION)
+        {
 #if defined (TWCR)
-        if (TWCR & (1<<TWINT))
-        {
-            TWI_vect();
-        }
+            if (TWCR & (1<<TWINT))
+            {
+                TWI_vect();
+            }
 #elif defined (USICR)
-        if (USISR & ((1<<USISIF) | (1<<USIOIF) | (1<<USIPF)))
-        {
-            usi_statemachine(USISR);
-        }
+            if (USISR & ((1<<USISIF) | (1<<USIOIF) | (1<<USIPF)))
+            {
+                usi_statemachine(USISR);
+            }
 #endif
 
 #if defined (TIFR)
-        if (TIFR & (1<<TOV0))
-        {
-            TIMER0_OVF_vect();
-            TIFR = (1<<TOV0);
-        }
+            if (TIFR & (1<<TOV0))
+            {
+                TIMER0_OVF_vect();
+                TIFR = (1<<TOV0);
+            }
 #elif defined (TIFR0)
-        if (TIFR0 & (1<<TOV0))
-        {
-            TIMER0_OVF_vect();
-            TIFR0 = (1<<TOV0);
-        }
+            if (TIFR0 & (1<<TOV0))
+            {
+                TIMER0_OVF_vect();
+                TIFR0 = (1<<TOV0);
+            }
 #else
 #error "TIFR(0) not defined"
 #endif
+        }
+
+#if (EEPROM_SUPPORT)
+        /* Refuse to boot into a possibly-inconsistent app while an update is armed/in-progress
+         * (see EEPROM_UPDATE_MARKER_ADDR's comment and Change 2 above) - go back to waiting for
+         * I2C instead of falling through to jump_to_app() below. */
+        if (read_eeprom_byte(EEPROM_UPDATE_MARKER_ADDR) == EEPROM_UPDATE_MARKER_INPROGRESS)
+        {
+            cmd = CMD_WAIT;
+            continue;
+        }
+#endif /* (EEPROM_SUPPORT) */
+
+        break;
     }
 
 #if defined (TWCR)

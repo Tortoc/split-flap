@@ -2228,16 +2228,22 @@ void loop() {
     pendingBootloaderProbeRequestDisconnected = false;
 
     SerialPrintln(F("Bootloader probe: requesting Unit ") + String(unitIndex) + F(" to enter bootloader..."));
-    requestUnitEnterBootloader(unitIndex);
+    unsigned long bootloaderSearchStart = millis();
+    uint8_t enterBootloaderResult = requestUnitEnterBootloader(unitIndex);
+    SerialPrintln(F("  requestUnitEnterBootloader() Wire.endTransmission() = ") + String(enterBootloaderResult) + F(" (0 = success)"));
 
     //Same retry/backoff as pushFirmwareToUnit() - give the watchdog reset + twiboot startup
-    //time to happen.
+    //time to happen. Timed - see scanForBootloaderAddress()'s comment (ServiceUnitFirmwareFunctions.ino).
     TwibootChipInfo chipInfo;
     int bootAddress = -1;
     for (int attempt = 0; attempt < 5 && bootAddress == -1; attempt++) {
       delay(attempt == 0 ? 300 : 150);
       yield();
+      unsigned long scanStart = millis();
       bootAddress = scanForBootloaderAddress(chipInfo);
+      SerialPrintln(F("Bootloader scan attempt ") + String(attempt) + F(": ") + String(millis() - scanStart) +
+        F("ms for this scan, ") + String(millis() - bootloaderSearchStart) + F("ms total since requesting bootloader mode, found=") +
+        String(bootAddress));
     }
 
     JsonDocument doc;

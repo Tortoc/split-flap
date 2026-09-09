@@ -9,6 +9,8 @@
 //  - write flash page:   SLA+W, 0x02, 0x01, addrH, addrL, {pageSize bytes}, STOP
 //    (read vs write differ only in whether a repeated-start read follows; a page only commits if
 //    exactly pageSize bytes were sent)
+//  - read eeprom byte:   SLA+W, 0x02, 0x02, addrH, addrL, SLA+R, {N bytes}, STOP
+//  - write eeprom byte:  SLA+W, 0x02, 0x02, addrH, addrL, {N bytes}, STOP
 #if UNIT_BOOTLOADER_ENABLE == true
 
 #include <string.h>
@@ -19,13 +21,29 @@
 #define TWIBOOT_BOOTTYPE_APPLICATION  0x80
 #define TWIBOOT_MEMTYPE_CHIPINFO      0x00
 #define TWIBOOT_MEMTYPE_FLASH         0x01
+#define TWIBOOT_MEMTYPE_EEPROM        0x02
 #define UNIT_BOOTLOADER_MAX_PAGE_SIZE 256 //comfortably covers the ATmega328p's actual 128-byte page size
+
+//"Update complete" gate the bootloader checks before ever booting into the app - see Change 2 in
+//Unit/bootloader/twiboot/main.c's file header comment. Must exactly match that file's
+//EEPROM_UPDATE_MARKER_ADDR (E2END, i.e. the last EEPROM byte on whatever MCU twiboot is built
+//for - 1023 on the atmega328p this project uses) and EEPROM_UPDATE_MARKER_INPROGRESS. Also the
+//opposite end of the EEPROM from Unit.ino's own calOffset (address 0-1) - kept deliberately far
+//apart. pushFirmwareToUnit() double-checks this against the unit's own reported EEPROM size
+//before trusting it, in case a future MCU port ever changes it.
+#define UNIT_BOOTLOADER_UPDATE_MARKER_ADDR         1023
+#define UNIT_BOOTLOADER_UPDATE_MARKER_INPROGRESS   0x00
+#define UNIT_BOOTLOADER_UPDATE_MARKER_COMPLETE     0xFF
 
 //TwibootChipInfo struct is defined in Classes.h (must be a real header, see comment there)
 
 //Tells the unit's running app (not the bootloader) to reboot into twiboot - see Unit.ino's
 //receiveLetter()/CMD_ENTER_BOOTLOADER handling. Sent to the unit's normal app address.
-void requestUnitEnterBootloader(int unitIndex) {
+//Returns Wire.endTransmission()'s result (0 = success) - previously discarded entirely, added
+//2026-09-09 while diagnosing repeated "unit did not respond in bootloader mode" failures: if this
+//write itself silently fails, the whole retry loop that follows is racing a bootloader window
+//that was never opened in the first place, and the old code had no way to tell the two apart.
+uint8_t requestUnitEnterBootloader(int unitIndex) {
   //Checksum byte appended, same as every other write path - this command reboots the unit, so
   //it's important it isn't triggered by a spurious/misread byte sequence.
   uint8_t sendArray[2] = {UNIT_BOOTLOADER_CMD, 0}; //speed byte - unused for this command, but the unit always reads 2 bytes
@@ -33,7 +51,7 @@ void requestUnitEnterBootloader(int unitIndex) {
   Wire.write(sendArray[0]);
   Wire.write(sendArray[1]);
   Wire.write(i2cChecksum(sendArray, sizeof sendArray / sizeof sendArray[0]));
-  Wire.endTransmission();
+  return Wire.endTransmission();
 }
 
 //Scans UNIT_BOOTLOADER_BASE_ADDRESS..+63 for a unit sitting in twiboot, rather than assuming
@@ -43,6 +61,16 @@ void requestUnitEnterBootloader(int unitIndex) {
 //Two passes, not one repeated-start read per address: a repeated-start read against an address
 //with nothing listening leaves the ESP8266's software I2C state stuck (esp8266/Arduino #5718). So:
 //a cheap presence check against every address first, then one real chip-info read.
+//
+//Bug found 2026-09-09: a bare address-only probe (no data bytes) never reaches twiboot's
+//TWI_data_write() (see main.c's TWI_vect(), case 0x60/0xA0) - only a real data-carrying
+//transaction (like twibootReadChipInfo() below) resets its boot_timeout. So this whole 64-address
+//sweep races the SAME un-extended ~1000ms window from the original reset, and yield()ing after
+//EVERY address (64 calls) turned out to no longer reliably fit in that window now that yield()
+//has more WiFi/AsyncWebServer background work to do than when this was last verified working
+//(2026-08-15) - live-reproduced as 3 consecutive "unit did not respond in bootloader mode"
+//failures against a real unit. Calling yield() only every 8th address cuts that overhead ~8x
+//while still keeping the WiFi stack reasonably serviced.
 int scanForBootloaderAddress(TwibootChipInfo &infoOut) {
   int foundAddress = -1;
   int foundCount = 0;
@@ -53,7 +81,9 @@ int scanForBootloaderAddress(TwibootChipInfo &infoOut) {
       foundCount++;
       foundAddress = address;
     }
-    yield();
+    if ((address - UNIT_BOOTLOADER_BASE_ADDRESS) % 8 == 7) {
+      yield();
+    }
   }
 
   if (foundCount == 0) {
@@ -132,6 +162,66 @@ bool twibootReadFlash(int bootAddress, uint16_t flashAddress, uint8_t* bufferOut
   return true;
 }
 
+//Reads one EEPROM byte - used to verify the update-marker writes below. Same repeated-start ->
+//STOP change as twibootReadChipInfo()/twibootReadFlash() above, same reason.
+bool twibootReadEepromByte(int bootAddress, uint16_t eepromAddress, uint8_t* byteOut) {
+  Wire.beginTransmission(bootAddress);
+  Wire.write(TWIBOOT_CMD_ACCESS_MEMORY);
+  Wire.write(TWIBOOT_MEMTYPE_EEPROM);
+  Wire.write((uint8_t)(eepromAddress >> 8));
+  Wire.write((uint8_t)(eepromAddress & 0xFF));
+  if (Wire.endTransmission(true) != 0) {
+    return false;
+  }
+  delayMicroseconds(500);
+
+  if (Wire.requestFrom(bootAddress, 1) != 1) {
+    return false;
+  }
+  *byteOut = Wire.read();
+  return true;
+}
+
+//Writes one EEPROM byte and reads it back to confirm - used for the update-in-progress/complete
+//marker (see UNIT_BOOTLOADER_UPDATE_MARKER_ADDR's comment). Always verifies: a silently-dropped
+//write of the in-progress marker would defeat the whole point of arming it before touching flash.
+//Same retry pattern as writeAndVerifyPage() - a bus hiccup here is exactly as recoverable as one
+//during a flash-page write.
+bool twibootWriteAndVerifyEepromByte(int bootAddress, uint16_t eepromAddress, uint8_t value, String &failureReasonOut) {
+  const int maxAttempts = 3;
+  for (int attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) {
+      recoverI2CBus();
+      delay(20);
+    }
+
+    //Single byte, well under Wire's 128-byte TX buffer - no need for twi_writeTo() here, unlike
+    //the full-page flash write.
+    Wire.beginTransmission(bootAddress);
+    Wire.write(TWIBOOT_CMD_ACCESS_MEMORY);
+    Wire.write(TWIBOOT_MEMTYPE_EEPROM);
+    Wire.write((uint8_t)(eepromAddress >> 8));
+    Wire.write((uint8_t)(eepromAddress & 0xFF));
+    Wire.write(value);
+    if (Wire.endTransmission(true) != 0) {
+      failureReasonOut = "I2C write failed on EEPROM byte at address " + String(eepromAddress);
+      continue;
+    }
+
+    uint8_t readBack = 0;
+    if (!twibootReadEepromByte(bootAddress, eepromAddress, &readBack)) {
+      failureReasonOut = "I2C verify-read failed on EEPROM byte at address " + String(eepromAddress);
+      continue;
+    }
+    if (readBack != value) {
+      failureReasonOut = "Verification mismatch on EEPROM byte at address " + String(eepromAddress);
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 //Writes one full flash page. `data` must be exactly `pageSize` bytes (pad the final partial page
 //with 0xFF) - a short write is silently ignored. Uses twi_writeTo() (raw I2C), not Wire - this
 //transaction is 132 bytes, over Wire's 128-byte TX buffer, which would silently drop the tail.
@@ -161,9 +251,17 @@ bool twibootStartApplication(int bootAddress) {
 
 //Pushes the firmware currently stored at unitFirmwarePath to the given unit over I2C.
 //
-//Safety: every page except page 0 (the vector table) is written and verified FIRST - page 0 only
-//after everything else is confirmed byte-for-byte, so a failed push never leaves a half-written
-//app. The bootloader itself is never touched, so a stuck unit isn't bricked.
+//Safety (corrected 2026-09-09 - the original version of this comment was wrong, see
+//UNIT_BOOTLOADER_UPDATE_MARKER_ADDR's comment for the full story): every page except page 0 (the
+//vector table) is written and verified FIRST, page 0 only after everything else is confirmed
+//byte-for-byte - but on the atmega328p this project uses, the reset vector's actual jump TARGET
+//already lands in page 1, not page 0, so "page 0 last" alone does NOT make an aborted update
+//safe to boot from after a reset. The real safety net is the EEPROM update-marker, armed via
+//twibootWriteAndVerifyEepromByte() before any page is touched and cleared only after page 0 is
+//confirmed - twiboot itself refuses to boot into the app while the marker says "in progress" (see
+//Unit/bootloader/twiboot/main.c's Change 2), regardless of what state the app pages are actually
+//in. The bootloader itself is never touched, so a stuck unit isn't bricked - it just stays
+//resident until a successful push clears the marker.
 //
 //writeAndVerifyPage() retries with a bus-recovery pass in between - a repeated-start read can
 //occasionally corrupt just the read-back (not the actual write), and a retry clears that.
@@ -241,16 +339,25 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   }
 
   SerialPrintln(F("Requesting Unit ") + String(unitIndex) + F(" to enter bootloader mode..."));
-  requestUnitEnterBootloader(unitIndex);
+  unsigned long bootloaderSearchStart = millis();
+  uint8_t enterBootloaderResult = requestUnitEnterBootloader(unitIndex);
+  SerialPrintln(F("  requestUnitEnterBootloader() Wire.endTransmission() = ") + String(enterBootloaderResult) + F(" (0 = success)"));
 
   //Give the watchdog reset + twiboot startup time to happen, then retry a few times in case
   //the exact timing needs more slack than expected - tune on the bench per BOOTLOADER_SETUP.md.
+  //Timed (2026-09-09, see scanForBootloaderAddress()'s comment) - this races a fixed ~1000ms
+  //window from the reset, so logging exactly where the time goes matters more here than for a
+  //normal, non-time-critical operation.
   TwibootChipInfo chipInfo;
   int bootAddress = -1;
   for (int attempt = 0; attempt < 5 && bootAddress == -1; attempt++) {
     delay(attempt == 0 ? 300 : 150);
     yield();
+    unsigned long scanStart = millis();
     bootAddress = scanForBootloaderAddress(chipInfo);
+    SerialPrintln(F("Bootloader scan attempt ") + String(attempt) + F(": ") + String(millis() - scanStart) +
+      F("ms for this scan, ") + String(millis() - bootloaderSearchStart) + F("ms total since requesting bootloader mode, found=") +
+      String(bootAddress));
   }
 
   if (bootAddress == -2) {
@@ -291,6 +398,31 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
     return false;
   }
 
+  //Defends against UNIT_BOOTLOADER_UPDATE_MARKER_ADDR (here) and EEPROM_UPDATE_MARKER_ADDR
+  //(Unit/bootloader/twiboot/main.c) ever falling out of sync with each other or with a future
+  //MCU's actual EEPROM size - chipInfo.eepromSize comes from the unit itself, not a hardcoded
+  //assumption.
+  if (UNIT_BOOTLOADER_UPDATE_MARKER_ADDR >= chipInfo.eepromSize) {
+    firmwareFile.close();
+    result["success"] = false;
+    result["error"] = F("Update-marker address doesn't fit this unit's reported EEPROM size - refusing to proceed without the safety net. Nothing was written.");
+    serializeJson(result, resultJsonOut);
+    return false;
+  }
+
+  //Arm the "update in progress" marker BEFORE touching any flash page - see
+  //UNIT_BOOTLOADER_UPDATE_MARKER_ADDR's comment. If this can't be confirmed written, don't take
+  //any destructive action at all: the whole point is to never write flash without a proven-armed
+  //safety net first.
+  String markerFailureReason;
+  if (!twibootWriteAndVerifyEepromByte(bootAddress, UNIT_BOOTLOADER_UPDATE_MARKER_ADDR, UNIT_BOOTLOADER_UPDATE_MARKER_INPROGRESS, markerFailureReason)) {
+    firmwareFile.close();
+    result["success"] = false;
+    result["error"] = "Could not arm the update-in-progress marker (" + markerFailureReason + "). Nothing was written - old firmware should still be running normally.";
+    serializeJson(result, resultJsonOut);
+    return false;
+  }
+
   int pageCount = (firmwareSize + pageSize - 1) / pageSize;
   int pagesWritten = 0;
   bool allOk = true;
@@ -319,7 +451,7 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
     if (!writeAndVerifyPage(bootAddress, flashAddress, writeBuffer, verifyBuffer, pageSize, failureReason)) {
       allOk = false;
       failureReason += " (page " + String(page) + " of " + String(pageCount - 1) +
-        " - page 0 was never touched, the old firmware's vector table is intact.)";
+        " - the update-in-progress marker is still armed, so the unit will stay in the bootloader instead of trying to run this partial update.)";
     } else {
       pagesWritten++;
     }
@@ -327,7 +459,9 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
     yield();
   }
 
-  //Only now write page 0 (the vector table) - this is the point of no return for the old firmware
+  //Only now write page 0 (the vector table) - not "the point of no return" anymore (see
+  //UNIT_BOOTLOADER_UPDATE_MARKER_ADDR's comment), just the last page written before the marker
+  //itself gets cleared below.
   if (allOk && !firmwareFile.seek(0)) {
     allOk = false;
     failureReason = "Failed to seek to offset 0 in the stored firmware file (page 0)";
@@ -340,9 +474,22 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
 
     if (!writeAndVerifyPage(bootAddress, 0, writeBuffer, verifyBuffer, pageSize, failureReason)) {
       allOk = false;
-      failureReason += " (page 0, vector table)";
+      failureReason += " (page 0, vector table - the update-in-progress marker is still armed, so the unit will stay in the bootloader.)";
     } else {
       pagesWritten++;
+    }
+  }
+
+  //Every page (including 0) is now written and verified - clear the marker so twiboot will
+  //actually boot into it. If THIS specific write fails, the firmware itself is fine, but don't
+  //call twibootStartApplication() below regardless - leave the unit safely in the bootloader
+  //rather than guess.
+  if (allOk) {
+    String markerClearFailureReason;
+    if (!twibootWriteAndVerifyEepromByte(bootAddress, UNIT_BOOTLOADER_UPDATE_MARKER_ADDR, UNIT_BOOTLOADER_UPDATE_MARKER_COMPLETE, markerClearFailureReason)) {
+      allOk = false;
+      failureReason = "Firmware written and verified successfully, but clearing the update-in-progress marker failed (" + markerClearFailureReason +
+        "). The unit will stay in the bootloader - a retry should be fast, since every page will already verify-match.";
     }
   }
 
