@@ -1195,9 +1195,16 @@ void setup() {
         return;
       }
 
+      //Bounds against UNITS_AMOUNT_MAX (the structural 6-bit-DIP address ceiling), not the
+      //cached unitsAmount - unlike every other unit-id check in this file, this endpoint's whole
+      //point is to reach a unit that's already stuck in the bootloader (BUGFIX_LOG #139, local),
+      //which by definition doesn't answer at its app address and therefore drops out of
+      //unitsAmount on the next scan. Checking against unitsAmount here would block exactly the
+      //recovery this endpoint exists for. scanForBootloaderAddress() below is the real safety
+      //net regardless (refuses to proceed unless exactly one unit answers as a bootloader).
       int unitId = idValue.toInt();
-      if (unitId < 0 || unitId >= unitsAmount) {
-        request->send(400, "text/plain", "Unit id out of range. Valid range: 0 to " + String(unitsAmount - 1));
+      if (unitId < 0 || unitId >= UNITS_AMOUNT_MAX) {
+        request->send(400, "text/plain", "Unit id out of range. Valid range: 0 to " + String(UNITS_AMOUNT_MAX - 1));
         return;
       }
 
