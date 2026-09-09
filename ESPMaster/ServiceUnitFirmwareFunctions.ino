@@ -35,6 +35,14 @@
 #define UNIT_BOOTLOADER_UPDATE_MARKER_INPROGRESS   0x00
 #define UNIT_BOOTLOADER_UPDATE_MARKER_COMPLETE     0xFF
 
+//Expected AVR chip signature for the ATmega328p this project targets - used by
+//scanForBootloaderAddress() to tell a genuine twiboot reply apart from a live Unit.ino app's
+//reply to the same read (see the comment there; found+verified live 2026-09-09, CODE_REVIEW.md
+//#7). If a future hardware revision changes the MCU, this needs updating alongside it.
+#define UNIT_EXPECTED_CHIP_SIGNATURE_0 0x1E
+#define UNIT_EXPECTED_CHIP_SIGNATURE_1 0x95
+#define UNIT_EXPECTED_CHIP_SIGNATURE_2 0x0F
+
 //TwibootChipInfo struct is defined in Classes.h (must be a real header, see comment there)
 
 //Tells the unit's running app (not the bootloader) to reboot into twiboot - see Unit.ino's
@@ -60,7 +68,8 @@ uint8_t requestUnitEnterBootloader(int unitIndex) {
 //
 //Two passes, not one repeated-start read per address: a repeated-start read against an address
 //with nothing listening leaves the ESP8266's software I2C state stuck (esp8266/Arduino #5718). So:
-//a cheap presence check against every address first, then one real chip-info read.
+//a cheap presence check against every address first, then a real chip-info read for every
+//candidate that ACKs it.
 //
 //Bug found 2026-09-09: a bare address-only probe (no data bytes) never reaches twiboot's
 //TWI_data_write() (see main.c's TWI_vect(), case 0x60/0xA0) - only a real data-carrying
@@ -71,6 +80,37 @@ uint8_t requestUnitEnterBootloader(int unitIndex) {
 //(2026-08-15) - live-reproduced as 3 consecutive "unit did not respond in bootloader mode"
 //failures against a real unit. Calling yield() only every 8th address cuts that overhead ~8x
 //while still keeping the WiFi stack reasonably serviced.
+//
+//Second bug found 2026-09-09 (CODE_REVIEW.md #7): the bootloader address range (base 0x29=41,
+//so 41-104) and the application address range (0-63) structurally overlap from 41 units upward -
+//a running app at address 41+ ACKs the bare presence check below just as readily as a real
+//bootloader does, and the old code counted every such ACK as a hit. At 42+ installed units this
+//permanently wedges every scan into the foundCount>1 "ambiguous" rejection, since the genuine
+//bootloader candidate is never alone. Not reachable on this project's current 10-unit install
+//(app addresses 0-9 don't reach into 41-104 yet), but a real, structural bug for any future
+//scale-up - fixed now rather than left for whoever hits it. A bare ACK only proves *something*
+//is listening, not that it's actually twiboot.
+//
+//A real chip-info read alone does NOT reliably distinguish them, contrary to the first
+//assumption here - live-tested 2026-09-09 against real running app addresses and
+//twibootReadChipInfo() returned SUCCESS every time, just with garbage content: the chip-info
+//write's 4 bytes fail the app's own checksum validation harmlessly (see receiveLetter()), but the
+//following 8-byte read then hits the app's requestEvent(), which always replies with its own,
+//different fixed 6-byte status packet (currentlyrotating, calOffset lo/hi, currentPhase,
+//currentPhaseProgress lo/hi) - the ESP8266 Wire master library happily accepts this as a
+//"successful" 8-byte transaction, silently padding the missing 2 bytes. The result lands in
+//TwibootChipInfo's fields at their normal byte offsets, so it's fully deterministic garbage, not
+//random: signature[0]=currentlyrotating (always 0 or 1), signature[2]=currentPhase (always
+//0/1/2 - PHASE_IDLE/CALIBRATING/ROTATING), pageSize=currentPhaseProgress's low byte (often 0),
+//eepromSize=0xFFFF (the 2 phantom padding bytes). Confirmed against 4 different live units'
+//real app addresses - signature[1] varied (it's each unit's own calOffset low byte - matched
+//exactly), but signature[0]/[2]/pageSize were 0 every time, structurally incapable of matching a
+//real AVR signature (currentlyrotating/currentPhase can never reach 0x1E/0x0F). So: verify the
+//exact expected signature, not just read success.
+#define UNIT_IS_EXPECTED_CHIP_SIGNATURE(info) \
+  ((info).signature[0] == UNIT_EXPECTED_CHIP_SIGNATURE_0 && \
+   (info).signature[1] == UNIT_EXPECTED_CHIP_SIGNATURE_1 && \
+   (info).signature[2] == UNIT_EXPECTED_CHIP_SIGNATURE_2)
 int scanForBootloaderAddress(TwibootChipInfo &infoOut) {
   int foundAddress = -1;
   int foundCount = 0;
@@ -78,8 +118,15 @@ int scanForBootloaderAddress(TwibootChipInfo &infoOut) {
   for (int address = UNIT_BOOTLOADER_BASE_ADDRESS; address < UNIT_BOOTLOADER_BASE_ADDRESS + 64; address++) {
     Wire.beginTransmission(address);
     if (Wire.endTransmission() == 0) {
-      foundCount++;
-      foundAddress = address;
+      //Verify every candidate that ACKs, not just the (assumed-unique) survivor - see the second
+      //comment above this function. Read success alone isn't enough (a live app "succeeds" too,
+      //with garbage) - the signature must actually match.
+      TwibootChipInfo candidateInfo;
+      if (twibootReadChipInfo(address, candidateInfo) && UNIT_IS_EXPECTED_CHIP_SIGNATURE(candidateInfo)) {
+        foundCount++;
+        foundAddress = address;
+        infoOut = candidateInfo; //avoids a redundant final read for the common single-hit case
+      }
     }
     if ((address - UNIT_BOOTLOADER_BASE_ADDRESS) % 8 == 7) {
       yield();
@@ -93,11 +140,6 @@ int scanForBootloaderAddress(TwibootChipInfo &infoOut) {
     return -2;
   }
 
-  if (!twibootReadChipInfo(foundAddress, infoOut)) {
-    //Answered the cheap presence check a moment ago but not the real chip-info read now -
-    //treat as not-found rather than returning a stale/empty infoOut.
-    return -1;
-  }
   return foundAddress;
 }
 
