@@ -1561,6 +1561,15 @@ void setup() {
           request->send(400, "text/plain", "No firmware upload in progress - call /api/firmware-start first");
           return;
         }
+        //Reject an overlapping request outright rather than silently overwriting the still-pending
+        //one's state - same "already busy" pattern used for every other pending-request slot in
+        //this file (found 2026-09-09, CODE_REVIEW.md #3: nothing previously stopped a second chunk
+        //or a finish from clobbering pendingFirmwareUploadRequest/otaPendingPhase while loop()
+        //hadn't finished processing an earlier one yet).
+        if (otaPendingPhase != OTA_PHASE_NONE) {
+          request->send(503, "text/plain", "Still processing the previous chunk, try again shortly");
+          return;
+        }
         otaLastActivityAt = millis();
         pendingFirmwareUploadRequestDisconnected = false;
         pendingFirmwareUploadRequest = request;
@@ -1571,8 +1580,19 @@ void setup() {
         otaPendingPhase = OTA_PHASE_WRITE; //loop() calls Update.write()
       },
       nullptr, //no multipart upload needed - this is a plain raw-body request
-      [](AsyncWebServerRequest * request, uint8_t *data, size_t len, size_t index, size_t total) {
+      [checkOtaPassword](AsyncWebServerRequest * request, uint8_t *data, size_t len, size_t index, size_t total) {
         if (index == 0) {
+          //Check auth HERE too, not just in the request handler above - that one only runs once
+          //the ENTIRE body has already streamed in, but this body handler runs incrementally AS
+          //each piece of the raw POST body arrives, writing straight into the shared, global
+          //otaChunkBuffer. Found 2026-09-09, CODE_REVIEW.md #3: without this, an unauthenticated
+          //POST here could already corrupt an in-progress, correctly-authenticated upload's
+          //buffered data before its own password is ever checked (which only happens afterward,
+          //in the request handler above, by which point the damage is already done).
+          if (!checkOtaPassword(request)) {
+            otaChunkRejected = true;
+            return;
+          }
           otaChunkLen = 0;
           otaChunkRejected = (otaChunkBuffer == nullptr) || (total > OTA_CHUNK_SIZE);
         }
@@ -1596,6 +1616,11 @@ void setup() {
       }
       if (otaChunkBuffer == nullptr) {
         request->send(400, "text/plain", "No firmware upload in progress");
+        return;
+      }
+      //Same "already busy" guard as /api/firmware-chunk above (CODE_REVIEW.md #3).
+      if (otaPendingPhase != OTA_PHASE_NONE) {
+        request->send(503, "text/plain", "Still processing a previous chunk, try again shortly");
         return;
       }
       otaLastActivityAt = millis();
@@ -2249,16 +2274,36 @@ void loop() {
     otaPendingPhase = OTA_PHASE_NONE;
 
   } else if (otaPendingPhase == OTA_PHASE_FINISH) {
-    bool ok = Update.end(true);
-    if (!ok) {
-      SerialPrintln(F("Firmware upload: Update.end() failed"));
-      Update.printError(Serial);
+    //Verify every declared byte actually arrived before accepting this as a complete update -
+    //Update.end(true)'s evenIfRemaining=true deliberately skips the library's own isFinished()
+    //check (see Updater.cpp), which alone would let /api/firmware-finish activate a truncated
+    //image if called early (found 2026-09-09, CODE_REVIEW.md #2). evenIfRemaining still has to
+    //stay true for the real end() call below, though - Update.begin() rounds its internal target
+    //size UP to the next flash sector, always larger than the exact byte count actually
+    //transferred, so the library's own isFinished() would never be satisfied even for a genuinely
+    //complete, correctly-sized upload. Update.progress() (bytes actually written) against the
+    //exact size declared by /api/firmware-start is the right comparison instead.
+    size_t received = Update.progress();
+    bool sizeMatches = (received == otaBeginSize);
+    bool ok = false;
+    if (!sizeMatches) {
+      SerialPrintln(F("Firmware upload: size mismatch at finish (received ") + String(received) +
+        F(" of ") + String(otaBeginSize) + F(" declared bytes) - refusing to activate a truncated image"));
+      Update.end(false); //release the "running" lock without activating anything
+    } else {
+      ok = Update.end(true);
+      if (!ok) {
+        SerialPrintln(F("Firmware upload: Update.end() failed"));
+        Update.printError(Serial);
+      }
     }
     delete[] otaChunkBuffer;
     otaChunkBuffer = nullptr;
 
     otaResultSuccess = ok;
-    otaResultMessage = ok ? "OK - Firmware written, rebooting now" : "Update failed, check the serial log for details";
+    otaResultMessage = ok ? "OK - Firmware written, rebooting now"
+      : (sizeMatches ? "Update failed, check the serial log for details"
+        : "Firmware upload incomplete (" + String(received) + " of " + String(otaBeginSize) + " bytes received) - refusing to activate a truncated image");
     otaCompletedPhase = OTA_PHASE_FINISH;
     otaResultReady = true;
     otaPendingPhase = OTA_PHASE_NONE;
