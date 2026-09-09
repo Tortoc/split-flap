@@ -297,8 +297,21 @@ void checkNtpSync() {
         }
         return;
       }
-      byte buffer[NTP_SYNC_PACKET_SIZE];
-      ntpSyncUdp.read(buffer, NTP_SYNC_PACKET_SIZE);
+      byte buffer[NTP_SYNC_PACKET_SIZE]; //deliberately NOT pre-zeroed - see the length check below
+      int bytesRead = ntpSyncUdp.read(buffer, NTP_SYNC_PACKET_SIZE);
+      //A short/malformed datagram must be dropped, not parsed - found 2026-09-09,
+      //CODE_REVIEW_V2.md N1: only packetSize==0 ("nothing arrived yet") was checked before; any
+      //OTHER nonzero-but-short packetSize still fell through to read()/parse buffer, which only
+      //fills the first `packetSize` bytes of `buffer` - the rest stayed uninitialized stack
+      //garbage, read from anyway at fixed offsets up to byte 43 below. The plausibility check
+      //further down (buffer[1] range, timestamps nonzero/ordered) validates NTP semantics, not
+      //structural completeness, so garbage could plausibly pass it by chance and get accepted as
+      //a real time sync. Ignore this one datagram and keep waiting (don't stop() the socket) - the
+      //existing step-timeout above already covers "nothing USEFUL ever arrives".
+      if (packetSize < NTP_SYNC_PACKET_SIZE || bytesRead < NTP_SYNC_PACKET_SIZE) {
+        SerialPrintln(F("NTP sync: ignoring short/malformed packet (") + String(packetSize) + F(" bytes)"));
+        return;
+      }
       ntpSyncUdp.stop();
 
       //Identical parsing/validation to ezTime's own queryNTP() - see its comment for the byte

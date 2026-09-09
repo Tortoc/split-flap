@@ -8,27 +8,24 @@ void checkRotation() {
 
   if (rotationCurrentIndex >= rotationItemCount) {
     rotationCurrentIndex = 0; //list shrank since the last advance - fall back to the start
+    rotationItemAcceptedSeconds = 0;
   }
 
   //Bug (found while fixing #117): timezone.now() doesn't return real UTC (see getRealUtcNow()'s
   //comment), but Countdown/Countup rotation items' TargetDateTimeUnix is real UTC seconds from the
-  //client - see the matching comment in checkCountdown() (ServiceCountdownFunctions.ino). Safe for
-  //the item-switch timing below too: rotationItemStartedAtSeconds is itself always set from
-  //nowSeconds, so that comparison stays internally consistent regardless of which time base
-  //nowSeconds uses.
+  //client - see the matching comment in checkCountdown() (ServiceCountdownFunctions.ino). Only
+  //used below for the item CONTENT (clock/date/countdown/countup text), not for timing the
+  //item's turn - see rotationItemAcceptedSeconds' own comment for that.
   unsigned long nowSeconds = getRealUtcNow();
-  if (rotationItemStartedAtSeconds == 0) {
-    rotationItemStartedAtSeconds = nowSeconds; //first tick after switching into rotation mode
-  }
 
   //Direct array indexing - see the comment on rotationItems' declaration (ESPMaster.ino) for why
   //this is a fixed array rather than an LList.
   RotationItem &item = rotationItems[rotationCurrentIndex];
   int durationSeconds = item.DurationSeconds > 0 ? item.DurationSeconds : 5;
 
-  if ((long)(nowSeconds - rotationItemStartedAtSeconds) >= durationSeconds) {
+  if (rotationItemAcceptedSeconds >= (unsigned long)durationSeconds) {
     rotationCurrentIndex = (rotationCurrentIndex + 1) % rotationItemCount;
-    rotationItemStartedAtSeconds = nowSeconds;
+    rotationItemAcceptedSeconds = 0;
   }
 
   RotationItem &currentItem = rotationItems[rotationCurrentIndex];
@@ -110,7 +107,7 @@ bool replaceRotationItemsFromJson(String rotationItemsJson) {
 
   //Always start a freshly-submitted sequence from the beginning.
   rotationCurrentIndex = 0;
-  rotationItemStartedAtSeconds = 0;
+  rotationItemAcceptedSeconds = 0;
 
   writeRotationItemsToFile();
   return true;

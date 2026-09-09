@@ -385,7 +385,15 @@ LList<ScheduledMessage> scheduledMessages;
 RotationItem rotationItems[ROTATION_ITEMS_MAX];
 int rotationItemCount = 0;
 int rotationCurrentIndex = 0;
-unsigned long rotationItemStartedAtSeconds = 0; //0 = not started yet (real timestamps are never 0)
+//Counts seconds the CURRENT rotation item was actually accepted by showText() (loop()'s
+//mode-dispatch block increments this after a successful call), not wall-clock seconds since its
+//turn started - found 2026-09-09, CODE_REVIEW_V2.md #13: a pure wall-clock timer kept
+//advancing/wrapping the index every item's durationSeconds regardless of whether the display was
+//even free to actually show it (a busy multi-line job or a temporary /api/text push both silently
+//swallow showText() calls made while they're running), so a slow-to-render or often-blocked item
+//could get skipped almost entirely while later items absorbed all the real visible time. Reset to
+//0 whenever the current item changes (checkRotation() below) or rotation restarts.
+unsigned long rotationItemAcceptedSeconds = 0;
 //Set by checkRotation() from the current item's Alignment field ("" = inherit the default) and
 //threaded through to showText() as an override.
 String rotationCurrentAlignment = "";
@@ -892,6 +900,11 @@ void setup() {
       //with 400 before touching anything), the rest of this request still gets processed
       //normally either way - only the final response wording changes.
       bool rotationItemsUpdateRejected = false;
+      //Set if a submitted scheduled message needs more lines than fit and could therefore never
+      //actually be shown - checked at acceptance time now, not just discovered (and then stuck
+      //forever) once due (found 2026-09-09, CODE_REVIEW_V2.md #10). Same "reject, don't silently
+      //drop/accept" pattern as rotationItemsUpdateRejected above.
+      bool scheduledMessageRejected = false;
 
       //Separate declarations - `bool a, b = false;` only initializes b, not a.
       bool newMessageScheduleEnabledValue = false;
@@ -1200,8 +1213,13 @@ void setup() {
         //If its a new scheduled message, add it to the backlog and proceed, don't want to change device mode
         //Else, we do want to change the device mode and clear out the input text
         if (newMessageScheduleEnabledValue) {
-          addAndPersistScheduledMessage(newInputTextValue, newMessageScheduleDateTimeUnixValue, newMessageScheduleShowIndefinitely);
-          SerialPrintln(F("New Scheduled Message added"));
+          if (isMessageTooLongToRender(newInputTextValue)) {
+            SerialPrintln(F("Scheduled Message rejected: needs more lines than fit, would never actually show"));
+            scheduledMessageRejected = true;
+          } else {
+            addAndPersistScheduledMessage(newInputTextValue, newMessageScheduleDateTimeUnixValue, newMessageScheduleShowIndefinitely);
+            SerialPrintln(F("New Scheduled Message added"));
+          }
         }
         else {
           //Only if device mode has changed
@@ -1211,7 +1229,7 @@ void setup() {
             //Always (re-)start a sequence from the beginning when switching into Rotation mode.
             if (deviceMode == DEVICE_MODE_ROTATION) {
               rotationCurrentIndex = 0;
-              rotationItemStartedAtSeconds = 0;
+              rotationItemAcceptedSeconds = 0;
             }
 
             writeFile(LittleFS, deviceModePath, deviceMode.c_str());
@@ -1224,8 +1242,12 @@ void setup() {
           }
         }
 
-        if (rotationItemsUpdateRejected) {
+        if (rotationItemsUpdateRejected && scheduledMessageRejected) {
+          request->send(400, "text/plain", "OK, but the submitted rotation items were invalid JSON AND the scheduled message needs more lines than fit - neither was applied.");
+        } else if (rotationItemsUpdateRejected) {
           request->send(400, "text/plain", "OK, but the submitted rotation items were invalid JSON and were NOT applied - the existing rotation list is unchanged.");
+        } else if (scheduledMessageRejected) {
+          request->send(400, "text/plain", "OK, but the scheduled message needs more lines than fit and was NOT scheduled - it would never actually show.");
         } else {
           request->send(200, "text/plain", "OK");
         }
@@ -2012,6 +2034,16 @@ void setup() {
         return;
       }
 
+      //Checked up front, before either branch below, not just discovered via showText()'s bool
+      //return value (found 2026-09-09, CODE_REVIEW_V2.md #10): the permanent branch below never
+      //even looked at showText()'s result at all, so a too-long text silently got "OK" back and
+      //was then retried forever, uselessly, by the normal 1s mode-dispatch loop. A clear, honest
+      //400 here is strictly better than that for both branches.
+      if (isMessageTooLongToRender(newText)) {
+        request->send(400, "text/plain", "text needs more lines than fit to display - shorten it or add fewer line breaks");
+        return;
+      }
+
       if (durationSeconds > 0) {
         //Temporary: deviceMode/inputText are deliberately left untouched, same pattern
         //checkScheduledMessages() already uses for a non-indefinite scheduled message - once the
@@ -2020,11 +2052,10 @@ void setup() {
         //other code path that will ever retry this specific call - unlike the permanent branch
         //below, a busy display here means the message is genuinely lost, not just delayed. Report
         //that honestly instead of claiming success (found 2026-09-09, CODE_REVIEW.md #10).
-        //showText() returning false doesn't distinguish WHY - busy display (CODE_REVIEW.md #10)
-        //or a message needing more lines than fit (CODE_REVIEW.md #23) both look the same here -
-        //worded generically rather than assuming "busy" for a reason that might not be it.
+        //The "too many lines" reason is already ruled out above (CODE_REVIEW_V2.md #10) - a false
+        //here can now only mean a busy display.
         if (!showText(newText, (int)(durationSeconds * 1000))) {
-          request->send(503, "text/plain", "Nothing was displayed - either the display is busy right now, or the message needs more lines than fit. Try again or shorten the message.");
+          request->send(503, "text/plain", "Nothing was displayed - the display is busy right now. Try again shortly.");
           return;
         }
       } else {
@@ -2711,35 +2742,39 @@ void loop() {
     std::shared_ptr<std::atomic<bool>> disconnected;
     AsyncWebServerRequest* deferredRequest = pendingBootloaderProbeSlot.take(disconnected);
     int unitIndex = pendingBootloaderProbeUnitIndex;
-
-    SerialPrintln(F("Bootloader probe: requesting Unit ") + String(unitIndex) + F(" to enter bootloader..."));
-    unsigned long bootloaderSearchStart = millis();
-    uint8_t enterBootloaderResult = requestUnitEnterBootloader(unitIndex);
-    SerialPrintln(F("  requestUnitEnterBootloader() Wire.endTransmission() = ") + String(enterBootloaderResult) + F(" (0 = success)"));
-
-    //Same retry/backoff as pushFirmwareToUnit() - give the watchdog reset + twiboot startup
-    //time to happen. Timed - see scanForBootloaderAddress()'s comment (ServiceUnitFirmwareFunctions.ino).
-    TwibootChipInfo chipInfo;
-    int bootAddress = -1;
-    for (int attempt = 0; attempt < 5 && bootAddress == -1; attempt++) {
-      delay(attempt == 0 ? 300 : 150);
-      yield();
-      unsigned long scanStart = millis();
-      bootAddress = scanForBootloaderAddress(chipInfo);
-      SerialPrintln(F("Bootloader scan attempt ") + String(attempt) + F(": ") + String(millis() - scanStart) +
-        F("ms for this scan, ") + String(millis() - bootloaderSearchStart) + F("ms total since requesting bootloader mode, found=") +
-        String(bootAddress));
-    }
+    int expectedBootAddress = UNIT_BOOTLOADER_BASE_ADDRESS + unitIndex;
 
     JsonDocument doc;
     doc["unitIndex"] = unitIndex;
-    if (bootAddress == -2) {
+
+    //Same structural-collision guard as pushFirmwareToUnit() - see its comment
+    //(ServiceUnitFirmwareFunctions.ino, CODE_REVIEW_V2.md #16). This probe is read-only so a
+    //collision here can't corrupt anything, but a "successful" read against a colliding address
+    //could still be silently-wrong garbage from whichever unit happens to win the bus - reject
+    //clearly instead, without ever sending the enter-bootloader command.
+    bool collisionRisk = expectedBootAddress < unitsAmount;
+
+    if (collisionRisk) {
       doc["success"] = false;
-      doc["error"] = F("More than one unit answered as a bootloader right now - refusing to guess which one.");
-    } else if (bootAddress < 0) {
-      doc["success"] = false;
-      doc["error"] = F("No unit responded in bootloader mode. Nothing was written.");
+      doc["error"] = F("Refusing to probe Unit ") + String(unitIndex) + F(": its bootloader address would collide with "
+        "another unit's live app address at this installation's current size. See CODE_REVIEW_V2.md #16.");
     } else {
+      SerialPrintln(F("Bootloader probe: requesting Unit ") + String(unitIndex) + F(" to enter bootloader..."));
+      unsigned long bootloaderSearchStart = millis();
+      uint8_t enterBootloaderResult = requestUnitEnterBootloader(unitIndex);
+      SerialPrintln(F("  requestUnitEnterBootloader() Wire.endTransmission() = ") + String(enterBootloaderResult) + F(" (0 = success)"));
+
+      //Same retry/backoff as pushFirmwareToUnit() - give the watchdog reset + twiboot startup
+      //time to happen. Probes ONLY unitIndex's own expected address, not a full scan of the whole
+      //bootloader address range - see findExpectedBootloaderAddress()'s comment
+      //(ServiceUnitFirmwareFunctions.ino, CODE_REVIEW_V2.md #15).
+      TwibootChipInfo chipInfo;
+      int bootAddress = findExpectedBootloaderAddress(unitIndex, chipInfo, bootloaderSearchStart) ? expectedBootAddress : -1;
+
+      if (bootAddress < 0) {
+        doc["success"] = false;
+        doc["error"] = F("No unit responded in bootloader mode. Nothing was written.");
+      } else {
       doc["success"] = true;
       doc["bootAddress"] = bootAddress;
       doc["bootAddressHex"] = F("0x") + String(bootAddress, HEX);
@@ -2765,6 +2800,7 @@ void loop() {
       doc["note"] = returnedToApp
         ? "Nothing was written. The unit was explicitly told to return to its app."
         : "Nothing was written, but the explicit return-to-app command failed - the unit may still be sitting in the bootloader. Check /admin/units, or power-cycle the unit if it doesn't come back on its own.";
+      }
     }
 
     if (PendingRequestSlot::stillConnected(disconnected)) {
@@ -2855,7 +2891,11 @@ void loop() {
       //Mode Selection
       if (deviceMode == DEVICE_MODE_ROTATION) {
         //rotationCurrentAlignment ("" = inherit the default) is set every tick by checkRotation().
-        showText(inputText, 0, rotationCurrentAlignment);
+        //Only count this second toward the current item's duration if it was actually accepted -
+        //see rotationItemAcceptedSeconds' own comment (CODE_REVIEW_V2.md #13).
+        if (showText(inputText, 0, rotationCurrentAlignment)) {
+          rotationItemAcceptedSeconds++;
+        }
       }
       else if (deviceMode == DEVICE_MODE_TEXT || deviceMode == DEVICE_MODE_COUNTDOWN || deviceMode == DEVICE_MODE_COUNTUP) {
         showText(inputText);

@@ -83,6 +83,20 @@ void checkScheduledMessages() {
       SerialPrint(F("Scheduled Message to be Shown Indefinitely: "));
       SerialPrintln(scheduledMessage.ShowIndefinitely ? F("Yes") : F("No"));
 
+      //A message that needs more lines than fit can NEVER be shown - unlike a busy display
+      //(transient, resolves on its own), leaving this queued would retry the exact same failing
+      //showText() call every tick forever, and the break below would then permanently block every
+      //OTHER due message queued behind it from ever being reached (found 2026-09-09,
+      //CODE_REVIEW_V2.md #10). New submissions are now rejected up front (see the /api/settings
+      //and /api/text handlers), but this stays as defense in depth for anything scheduled before
+      //that validation existed. Drop it here instead.
+      if (isMessageTooLongToRender(scheduledMessage.Message)) {
+        SerialPrintln(F("Scheduled Message needs more lines than fit and can never be shown - dropping it instead of blocking later messages"));
+        scheduledMessages.remove(scheduledMessageIndex);
+        writeScheduledMessagesToFile();
+        break;
+      }
+
       bool shown;
       if (scheduledMessage.ShowIndefinitely) {
         deviceMode = DEVICE_MODE_TEXT;

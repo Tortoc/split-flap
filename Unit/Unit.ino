@@ -80,6 +80,15 @@ boolean newData = false;
 //the risk here is real but narrow and non-destructive, not worth the added per-step overhead/risk
 //of wrapping the hot stepLetters()/calibrate() progress-counter loops too.
 volatile int displayedLetter = 0; //currently shown letter
+//Tracks whether displayedLetter is an actually-confirmed position (a calibrate() call reached the
+//marker) rather than just calibrate()'s own "give up, reset to 0" fallback on failure - found
+//2026-09-09, CODE_REVIEW_V2.md #5: previously a failed calibrate(false) inside rotateToLetter()
+//correctly aborted the CURRENT call (CODE_REVIEW.md #18's fix), but left displayedLetter at 0 with
+//nothing distinguishing "genuinely homed to 0" from "unknown, calibration never confirmed it" - the
+//NEXT call then trusted that 0 as real and could take the direct-move branch from a completely
+//wrong actual position. Set by calibrate() itself (true on success, false on its failure path) so
+//every call site is covered without needing to touch each one's own handling of the return value.
+volatile bool positionKnown = false; //starts false: no calibration has run yet
 int desiredLetter = 0; //letter to be shown
 const char letters[] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'Ä', 'Ö', 'Ü', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', '-', '?', '!'};
 Stepper stepper(STEPS, STEPPERPIN1, STEPPERPIN3, STEPPERPIN2, STEPPERPIN4); //stepper setup
@@ -313,8 +322,12 @@ void rotateToLetter(int toLetter) {
 #endif
     //go to letter, but only if available (>-1)
     if (posLetter > -1) { //check if letter exists
-      //check if letter is on higher index, then no full rotaion is needed
-      if (posLetter >= posCurrentLetter) {
+      //check if letter is on higher index, then no full rotaion is needed - but only if
+      //posCurrentLetter is actually a confirmed position (see positionKnown's comment above): an
+      //unconfirmed one (last calibration failed) must always force the full-rotation/calibrate()
+      //branch below, regardless of the index comparison, since a "direct" move counts steps
+      //relative to a position that's known to already be wrong.
+      if (positionKnown && posLetter >= posCurrentLetter) {
 #ifdef SERIAL_ENABLE
         Serial.println("direct");
 #endif
@@ -505,32 +518,37 @@ int calibrate(bool initialCalibration) {
   bool reachedMarker = false;
   stepper.setSpeed(stepperSpeed);
   int i = 0;
+  //Two-phase edge search (found 2026-09-09, CODE_REVIEW_V2.md #6, following on from
+  //CODE_REVIEW.md #19's i==0 special case below): that earlier fix only handled the drum already
+  //sitting inside the marker zone at the very START of calibration - it still accepted ANY LOW
+  //reading as "found" once past that one special case, without ever requiring a genuine
+  //HIGH-to-LOW entry edge. A permanently-LOW/stuck sensor, or a marker zone wider than the blind
+  //50-step jump below, was therefore accepted as a successful calibration (reproduced: sensor
+  //stuck LOW, offset 0 -> reports success after just 50 steps, having never actually seen HIGH).
+  //leavingZone tracks "we're still inside the zone we started in (or moved into) and haven't yet
+  //observed a genuine HIGH reading" - only once HIGH has actually been seen does the final `else`
+  //below get to declare the NEXT LOW a real, repeatable edge. If the sensor never goes HIGH at
+  //all, leavingZone simply never clears and the existing i > 3*STEPS cap below times this out as
+  //a failure, exactly like it already does for a sensor stuck HIGH.
+  bool leavingZone = (digitalRead(HALLPIN) == 0);
   while (!reachedMarker) {
     currentPhaseProgress = (uint16_t)i;
     int currentHallValue = digitalRead(HALLPIN);
-    //LOW is the detected marker (see the final `else` below - that's the only branch that ever
-    //declares success) - but this i==0 "already inside the marker, move out first" special case
-    //was checking HIGH instead (found 2026-09-09, CODE_REVIEW.md #19): if the drum happened to
-    //already be sitting inside the marker's active zone at the very start of calibration (a real,
-    //reachable case - e.g. left there by a previous calibration), the very FIRST reading (LOW)
-    //fell straight into the final `else` and was accepted as "found" immediately, without ever
-    //leaving the zone and searching for a genuine, repeatable entry edge - reproduced locally as
-    //literally zero motor movement when calOffset happens to be 0 (step(ROTATIONDIRECTION * 0)).
-    //The mechanical drift this causes (fully or partly stale/random reference point) scales with
-    //how wide the marker's physical zone is. Fixed: leave the zone first (this branch) whenever
-    //already inside it, THEN search for the defined HIGH-to-LOW entry edge (final `else`, now only
-    //reachable after having genuinely left and re-entered the zone).
-    if (currentHallValue == 0 && i == 0) { //already inside the marker zone - leave it before searching
-      //not reached yet
-      i = 50;
-      stepper.step(ROTATIONDIRECTION * 50); //move 50 steps to get out of scope of hall
+    if (leavingZone) {
+      if (currentHallValue == 1) {
+        leavingZone = false; //genuinely left the zone - now search for the real entry edge below
+      } else {
+        //not reached yet
+        stepper.step(ROTATIONDIRECTION * 1);
+      }
     }
     else if (currentHallValue == 1) {
       //not reached yet
       stepper.step(ROTATIONDIRECTION * 1);
     }
     else {
-      //reached marker, go to calibrated offset position
+      //reached marker (a confirmed HIGH-to-LOW edge, not just any LOW reading), go to calibrated
+      //offset position
       reachedMarker = true;
       //Snapshot atomically before use - a torn calOffset here would turn the motor by a wrong,
       //momentarily-garbled step count instead of just reporting a stale status value (see the
@@ -541,6 +559,7 @@ int calibrate(bool initialCalibration) {
       }
       stepper.step(ROTATIONDIRECTION * offsetSnapshot);
       displayedLetter = 0;
+      positionKnown = true; //see positionKnown's declaration comment - this 0 is now confirmed real
       missedSteps = 0;
 #ifdef SERIAL_ENABLE
       Serial.println(F("revolver calibrated"));
@@ -554,6 +573,7 @@ int calibrate(bool initialCalibration) {
     if (i > 3 * STEPS) {
       //seems that there is a problem with the marker or the sensor. turn of the motor to avoid overheating.
       displayedLetter = 0;
+      positionKnown = false; //see positionKnown's declaration comment - this 0 is NOT confirmed
       desiredLetter = 0;
       reachedMarker = true;
 #ifdef SERIAL_ENABLE

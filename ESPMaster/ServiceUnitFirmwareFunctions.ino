@@ -143,6 +143,38 @@ int scanForBootloaderAddress(TwibootChipInfo &infoOut) {
   return foundAddress;
 }
 
+//Directly probes ONLY the single I2C address expected for unitIndex - does not scan the whole
+//41-104 bootloader address range at all, unlike scanForBootloaderAddress() above. Used by both
+//pushFirmwareToUnit() and the bootloader-probe endpoint, which both already know exactly which
+//unit they're targeting before ever calling this.
+//
+//Found 2026-09-09, CODE_REVIEW_V2.md #15: both callers used to run the full ambiguity-checking
+//scan even though the target unit was already known - if a SECOND, unrelated unit also happened
+//to be sitting in the bootloader (e.g. its own earlier aborted update, now safely held there by
+//the EEPROM marker), the scan permanently reported "more than one found" and refused recovery of
+//EITHER unit, even though the specific address this call actually cares about can be computed
+//directly and checked entirely on its own - the marker that makes multi-unit-stuck-in-bootloader
+//a real, persistent (not just momentary) possibility in the first place didn't exist yet when the
+//original scanning approach was written. This also makes CODE_REVIEW.md #8's later "found address
+//matches the expected one" check trivially true by construction instead of a runtime check that
+//could still fail - the two fixes now reinforce each other instead of overlapping.
+bool findExpectedBootloaderAddress(int unitIndex, TwibootChipInfo &infoOut, unsigned long searchStartMs) {
+  int expectedBootAddress = UNIT_BOOTLOADER_BASE_ADDRESS + unitIndex;
+  for (int attempt = 0; attempt < 5; attempt++) {
+    delay(attempt == 0 ? 300 : 150);
+    yield();
+    unsigned long probeStart = millis();
+    bool found = twibootReadChipInfo(expectedBootAddress, infoOut) && UNIT_IS_EXPECTED_CHIP_SIGNATURE(infoOut);
+    SerialPrintln(F("Bootloader probe attempt ") + String(attempt) + F(": ") + String(millis() - probeStart) +
+      F("ms for this probe, ") + String(millis() - searchStartMs) + F("ms total since requesting bootloader mode, found=") +
+      (found ? F("yes") : F("no")));
+    if (found) {
+      return true;
+    }
+  }
+  return false;
+}
+
 //"Abort boot timeout" heartbeat - also resets twiboot's 1000ms auto-boot countdown.
 //In practice every read/write call below already resets it as a side effect, this is just
 //a cheap defensive extra between steps that might otherwise leave a longer gap.
@@ -380,6 +412,27 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
     return false;
   }
 
+  //App addresses (0-63) and bootloader addresses (UNIT_BOOTLOADER_BASE_ADDRESS=41..104)
+  //structurally overlap from 41 installed units upward - unitIndex's bootloader address
+  //(UNIT_BOOTLOADER_BASE_ADDRESS + unitIndex) would then be the SAME physical I2C address as
+  //another unit's already-running app, a real electrical bus conflict, not just a software
+  //ambiguity (found 2026-09-09, CODE_REVIEW_V2.md #16 - not reachable on this project's current
+  //10-unit install, but a real structural hazard for any future scale-up). unitsAmount (the live
+  //app-address scan result) is a best-effort proxy for "how many real units exist" - it can
+  //undercount while some are already sitting in a bootloader (see BUGFIX_LOG #139, an existing,
+  //separate, unrelated limitation), so this check is conservative in the SAFE direction (it can
+  //only ever reject a push that's actually fine, never silently allow a real collision).
+  int expectedBootAddressForCollisionCheck = UNIT_BOOTLOADER_BASE_ADDRESS + unitIndex;
+  if (expectedBootAddressForCollisionCheck < unitsAmount) {
+    firmwareFile.close();
+    result["success"] = false;
+    result["error"] = F("Refusing to update Unit ") + String(unitIndex) + F(": its bootloader address (0x") +
+      String(expectedBootAddressForCollisionCheck, HEX) + F(") would collide with another unit's live app address at "
+        "this installation's current size. Nothing was written - see CODE_REVIEW_V2.md #16.");
+    serializeJson(result, resultJsonOut);
+    return false;
+  }
+
   SerialPrintln(F("Requesting Unit ") + String(unitIndex) + F(" to enter bootloader mode..."));
   unsigned long bootloaderSearchStart = millis();
   uint8_t enterBootloaderResult = requestUnitEnterBootloader(unitIndex);
@@ -389,52 +442,18 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   //the exact timing needs more slack than expected - tune on the bench per BOOTLOADER_SETUP.md.
   //Timed (2026-09-09, see scanForBootloaderAddress()'s comment) - this races a fixed ~1000ms
   //window from the reset, so logging exactly where the time goes matters more here than for a
-  //normal, non-time-critical operation.
+  //normal, non-time-critical operation. Probes ONLY unitIndex's own expected address, not a full
+  //scan of the whole bootloader address range - see findExpectedBootloaderAddress()'s comment
+  //(CODE_REVIEW_V2.md #15, also folds in CODE_REVIEW.md #8's "bind to the right unit" check below,
+  //now structural instead of a separate runtime comparison).
   TwibootChipInfo chipInfo;
-  int bootAddress = -1;
-  for (int attempt = 0; attempt < 5 && bootAddress == -1; attempt++) {
-    delay(attempt == 0 ? 300 : 150);
-    yield();
-    unsigned long scanStart = millis();
-    bootAddress = scanForBootloaderAddress(chipInfo);
-    SerialPrintln(F("Bootloader scan attempt ") + String(attempt) + F(": ") + String(millis() - scanStart) +
-      F("ms for this scan, ") + String(millis() - bootloaderSearchStart) + F("ms total since requesting bootloader mode, found=") +
-      String(bootAddress));
-  }
-
-  if (bootAddress == -2) {
-    firmwareFile.close();
-    result["success"] = false;
-    result["error"] = F("More than one unit is answering as a bootloader right now - refusing to guess which one is the target. "
-      "Nothing was written. Make sure only this one update was triggered and no other unit was power-cycled at the same time, then retry.");
-    serializeJson(result, resultJsonOut);
-    return false;
-  }
+  int expectedBootAddress = UNIT_BOOTLOADER_BASE_ADDRESS + unitIndex;
+  int bootAddress = findExpectedBootloaderAddress(unitIndex, chipInfo, bootloaderSearchStart) ? expectedBootAddress : -1;
 
   if (bootAddress < 0) {
     firmwareFile.close();
     result["success"] = false;
     result["error"] = F("Unit did not respond in bootloader mode. Nothing was written - old firmware should still be running normally.");
-    serializeJson(result, resultJsonOut);
-    return false;
-  }
-
-  //Bind the found address to the unit we actually asked to enter the bootloader - found
-  //2026-09-09, CODE_REVIEW.md #8: scanForBootloaderAddress() only guards against MULTIPLE units
-  //answering at once, not against the single answerer being a DIFFERENT unit than unitIndex. If
-  //requestUnitEnterBootloader(unitIndex) above didn't actually reach its target (e.g. a dropped
-  //I2C write - its own result isn't checked against failure here) but some other unit happened to
-  //already be sitting in the bootloader for an unrelated reason (a previous aborted push, a stray
-  //reset), the scan would find that OTHER unit and this function would happily write unitIndex's
-  //firmware into it instead. Refuse rather than guess.
-  int expectedBootAddress = UNIT_BOOTLOADER_BASE_ADDRESS + unitIndex;
-  if (bootAddress != expectedBootAddress) {
-    firmwareFile.close();
-    result["success"] = false;
-    result["error"] = F("A unit answered in bootloader mode, but at a different I2C address than Unit ") + String(unitIndex) +
-      F(" is expected to use (found 0x") + String(bootAddress, HEX) + F(", expected 0x") + String(expectedBootAddress, HEX) +
-      F("). Refusing to guess - nothing was written. This usually means the requested unit never received the "
-        "enter-bootloader command while a different unit is already sitting in its bootloader for an unrelated reason.");
     serializeJson(result, resultJsonOut);
     return false;
   }
@@ -506,8 +525,24 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
       break;
     }
     size_t bytesRead = firmwareFile.read(writeBuffer, pageSize);
+    //Only the LAST page (known from firmwareSize, not just "whatever read() happened to return")
+    //is allowed to come back short - anything else is a genuine read error (found 2026-09-09,
+    //CODE_REVIEW_V2.md #17): the old code padded ANY short read with 0xFF unconditionally, so a
+    //filesystem read failure on a supposedly-FULL page would silently become a page mostly filled
+    //with 0xFF instead of the real firmware bytes - and the very next verify-read would then
+    //"successfully" match that same wrong content, since it's comparing against the same corrupted
+    //writeBuffer, not the actual intended firmware. The marker would then get cleared and the unit
+    //would boot into this corrupted image.
+    size_t expectedBytesThisPage = (size_t)pageSize < (firmwareSize - flashAddress) ? (size_t)pageSize : (firmwareSize - flashAddress);
+    if (bytesRead != expectedBytesThisPage) {
+      allOk = false;
+      failureReason = "Read " + String(bytesRead) + " of " + String(expectedBytesThisPage) +
+        " expected bytes from the stored firmware file at offset " + String(flashAddress) + " (page " + String(page) +
+        ") - the update-in-progress marker is still armed, so the unit will stay in the bootloader.";
+      break;
+    }
     for (size_t i = bytesRead; i < pageSize; i++) {
-      writeBuffer[i] = 0xFF; //pad the final, partial page with the erased-flash value
+      writeBuffer[i] = 0xFF; //pad the final, partial page (only reachable here) with the erased-flash value
     }
 
     if (!writeAndVerifyPage(bootAddress, flashAddress, writeBuffer, verifyBuffer, pageSize, failureReason)) {
@@ -530,15 +565,27 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   }
   if (allOk) {
     size_t bytesRead = firmwareFile.read(writeBuffer, pageSize);
-    for (size_t i = bytesRead; i < pageSize; i++) {
+    //Same "only the actual last page may come back short" reasoning as the loop above
+    //(CODE_REVIEW_V2.md #17) - page 0 is the last page written when firmwareSize <= pageSize
+    //(a one-page image), otherwise it must always come back full.
+    size_t expectedBytesThisPage = (size_t)pageSize < firmwareSize ? (size_t)pageSize : firmwareSize;
+    if (bytesRead != expectedBytesThisPage) {
+      allOk = false;
+      failureReason = "Read " + String(bytesRead) + " of " + String(expectedBytesThisPage) +
+        " expected bytes from the stored firmware file at offset 0 (page 0) - the update-in-progress marker is still armed, "
+        "so the unit will stay in the bootloader.";
+    }
+    for (size_t i = bytesRead; allOk && i < pageSize; i++) {
       writeBuffer[i] = 0xFF;
     }
 
-    if (!writeAndVerifyPage(bootAddress, 0, writeBuffer, verifyBuffer, pageSize, failureReason)) {
-      allOk = false;
-      failureReason += " (page 0, vector table - the update-in-progress marker is still armed, so the unit will stay in the bootloader.)";
-    } else {
-      pagesWritten++;
+    if (allOk) {
+      if (!writeAndVerifyPage(bootAddress, 0, writeBuffer, verifyBuffer, pageSize, failureReason)) {
+        allOk = false;
+        failureReason += " (page 0, vector table - the update-in-progress marker is still armed, so the unit will stay in the bootloader.)";
+      } else {
+        pagesWritten++;
+      }
     }
   }
 

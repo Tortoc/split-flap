@@ -2041,7 +2041,11 @@
 			if (dateUnix !== 0) {
 				var countdownDate = new Date(dateUnix * 1000);
 				if (countdownDate >= currentDate) {
-					currentCountdownDate.value = convertDateOnlyToString(countdownDate);
+					//Rendered in the DEVICE's timezone, not read back via the Date object's own
+					//browser-local getters (found 2026-09-09, CODE_REVIEW_V2.md #11 - reproduced:
+					//a midnight-Berlin target stored as 23:00 UTC the day before showed the wrong,
+					//earlier calendar day once read back with UTC-as-local getters).
+					currentCountdownDate.value = formatUnixSecondsForDeviceTimezone(dateUnix, true);
 
 					if (countdownDate - currentDate < 24000) {
 						currentCountdownDate.min = convertDateOnlyToString(nextDayDate);
@@ -2065,8 +2069,9 @@
 			var currentDate = (new Date(Date.now() - tzOffset));
 
 			if (dateUnix !== 0) {
-				var countupDate = new Date(dateUnix * 1000);
-				currentCountupDate.value = convertDateOnlyToString(countupDate);
+				//Rendered in the DEVICE's timezone - see setCountdownDate()'s identical comment
+				//above (CODE_REVIEW_V2.md #11).
+				currentCountupDate.value = formatUnixSecondsForDeviceTimezone(dateUnix, true);
 			}
 			else {
 				currentCountupDate.value = convertDateOnlyToString(currentDate);
@@ -2116,20 +2121,139 @@
 		//this replacement produces the correct instant, and confirmed genuine DST-awareness by
 		//checking the same wall-clock time against both a summer and a winter target date.
 		function zonedWallTimeToUtcSeconds(year, month, day, hour, minute, timeZone) {
-			const guessUtcMs = Date.UTC(year, month - 1, day, hour, minute, 0);
-			//Ask what wall-clock time this guessed UTC instant corresponds to in the target zone -
-			//the difference between that and our guess IS the zone's real UTC offset for this
-			//specific moment (DST-correct, since it's evaluated at the target date, not today's).
+			const naiveUtcMs = Date.UTC(year, month - 1, day, hour, minute, 0); //input read as if it were already UTC
 			const formatter = new Intl.DateTimeFormat('en-US', {
 				timeZone, hourCycle: 'h23',
 				year: 'numeric', month: '2-digit', day: '2-digit',
 				hour: '2-digit', minute: '2-digit', second: '2-digit'
 			});
-			const parts = formatter.formatToParts(new Date(guessUtcMs));
+			const get = (parts, type) => parseInt(parts.find((p) => p.type === type).value, 10);
+
+			//Ask what wall-clock time a guessed UTC instant corresponds to in the target zone - the
+			//difference between that and the guess IS the zone's real UTC offset for that specific
+			//moment (DST-correct, since it's evaluated at the target date, not today's). A SINGLE
+			//such guess-and-correct pass (candidate = naiveUtcMs first attempt only) used to be
+			//taken as final - correct away from a DST boundary, but near one the offset measured AT
+			//the guess can differ from the offset that actually applies at the corrected instant
+			//(the two sides of the transition), landing the result an hour off (found 2026-09-09,
+			//CODE_REVIEW_V2.md #12 - reproduced: 2026-03-29T01:30 Europe/Berlin, shortly before that
+			//year's spring-forward, resolved to 23:30 UTC the day before instead of the correct
+			//00:30). Fixed with a small fixed-point iteration instead: re-derive the offset AT each
+			//new candidate and stop once it reproduces the very same candidate (i.e. formatting the
+			//candidate back through the target zone reads back the original input exactly) - this
+			//converges immediately away from a boundary (first pass already matches) and picks up
+			//the correct side within one extra pass right at one.
+			let candidateUtcMs = naiveUtcMs;
+			for (let attempt = 0; attempt < 4; attempt++) {
+				const parts = formatter.formatToParts(new Date(candidateUtcMs));
+				const zonedAsUtcMs = Date.UTC(get(parts, 'year'), get(parts, 'month') - 1, get(parts, 'day'), get(parts, 'hour'), get(parts, 'minute'), get(parts, 'second'));
+				const offsetMs = zonedAsUtcMs - candidateUtcMs;
+				const correctedUtcMs = naiveUtcMs - offsetMs;
+				if (correctedUtcMs === candidateUtcMs) {
+					return Math.floor(correctedUtcMs / 1000); //converged - candidate reproduces the input exactly
+				}
+				candidateUtcMs = correctedUtcMs;
+			}
+			//Didn't converge within a few passes - almost certainly a local time that doesn't exist
+			//at all (the spring-forward gap itself, e.g. 02:30 on a day that skips 02:00-03:00: no
+			//real instant has that wall-clock reading in this zone). Resolving to the last candidate
+			//(built from the post-transition offset) rather than throwing or looping forever matches
+			//the common "spring forward" convention other libraries use for this same edge case.
+			return Math.floor(candidateUtcMs / 1000);
+		}
+
+		//Inverse of zonedWallTimeToUtcSeconds() above: given a real UTC unix timestamp (seconds),
+		//returns the wall-clock date/time components as they read in the given IANA timeZone -
+		//DST-correct for the instant itself, not just today's DST state.
+		function utcSecondsToZonedParts(unixSeconds, timeZone) {
+			const formatter = new Intl.DateTimeFormat('en-US', {
+				timeZone, hourCycle: 'h23',
+				year: 'numeric', month: '2-digit', day: '2-digit',
+				hour: '2-digit', minute: '2-digit', second: '2-digit'
+			});
+			const parts = formatter.formatToParts(new Date(unixSeconds * 1000));
 			const get = (type) => parseInt(parts.find((p) => p.type === type).value, 10);
-			const zonedAsUtcMs = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'));
-			const offsetMs = zonedAsUtcMs - guessUtcMs;
-			return Math.floor((guessUtcMs - offsetMs) / 1000);
+			return { year: get('year'), month: get('month'), day: get('day'), hour: get('hour'), minute: get('minute') };
+		}
+
+		//Convenience wrapper around utcSecondsToZonedParts() above - formats a real UTC unix
+		//timestamp (seconds) as a "YYYY-MM-DDTHH:mm" (or, with dateOnly, "YYYY-MM-DD") string in
+		//the device's configured timezone, for populating a datetime-local/date <input>'s value/
+		//min/max. Falls back to the simpler, DST-unaware numeric-offset math (formatted via the
+		//UTC getters, not the browser's own local ones, so it doesn't ALSO depend on the browser's
+		//timezone - see convertDateToString()/convertDateOnlyToString() below, which stay in
+		//existence only as internal helpers for this fallback path) if the device's IANA zone name
+		//isn't available yet, or if Intl.DateTimeFormat rejects it - mirrors
+		//scheduledDateTimeStringToUtcSeconds()'s own fallback below.
+		//
+		//Bug fixed 2026-09-09, CODE_REVIEW_V2.md #11: every LOAD-direction date field (Countdown/
+		//Countup date inputs, rotation item datetimes, the scheduled-message list) previously read
+		//the target Date object with the BROWSER's own local getters/toString() instead - correct
+		//only when the browser and device happen to be in the same timezone, and even then broken
+		//near a date boundary (e.g. a Berlin midnight target stored as 23:00 UTC the day before,
+		//read back with UTC-as-local getters, showed the wrong calendar day). The scheduled-message
+		//list additionally applied the device's numeric offset a SECOND time on top of that (once
+		//explicitly, once implicitly via .toString()'s own browser-local formatting) - the exact
+		//double-conversion CODE_REVIEW.md #11 had already fixed for the save direction.
+		function formatUnixSecondsForDeviceTimezone(unixSeconds, dateOnly) {
+			if (deviceTimezoneName) {
+				try {
+					const p = utcSecondsToZonedParts(unixSeconds, deviceTimezoneName);
+					const y = String(p.year).padStart(4, '0');
+					const mo = String(p.month).padStart(2, '0');
+					const d = String(p.day).padStart(2, '0');
+					if (dateOnly) return `${y}-${mo}-${d}`;
+					const h = String(p.hour).padStart(2, '0');
+					const mi = String(p.minute).padStart(2, '0');
+					return `${y}-${mo}-${d}T${h}:${mi}`;
+				} catch (e) {
+					logPageLoadStatus("utcSecondsToZonedParts() failed (" + e + "), falling back to numeric offset", true);
+				}
+			}
+			const shiftedMs = unixSeconds * 1000 + timezoneOffset * 60000;
+			return dateOnly ? convertDateOnlyToStringUTC(new Date(shiftedMs)) : convertDateToStringUTC(new Date(shiftedMs));
+		}
+
+		//Human-readable (not input-field-format) rendering of a UTC unix timestamp in the device's
+		//configured timezone - used by the scheduled-message list. Same fallback reasoning as
+		//formatUnixSecondsForDeviceTimezone() above (CODE_REVIEW_V2.md #11).
+		function formatUnixSecondsHumanReadable(unixSeconds) {
+			if (deviceTimezoneName) {
+				try {
+					return new Date(unixSeconds * 1000).toLocaleString('en-US', {
+						timeZone: deviceTimezoneName, hourCycle: 'h23',
+						weekday: 'short', year: 'numeric', month: 'short', day: '2-digit',
+						hour: '2-digit', minute: '2-digit', second: '2-digit'
+					});
+				} catch (e) {
+					logPageLoadStatus("toLocaleString() with device timezone failed (" + e + "), falling back to numeric offset", true);
+				}
+			}
+			//Fallback: shift by the numeric offset, then format with UTC getters (not the browser's
+			//own local ones) so this doesn't ALSO depend on the browser's timezone.
+			var shifted = new Date(unixSeconds * 1000 + timezoneOffset * 60000);
+			return shifted.toUTCString().replace(' GMT', '');
+		}
+
+		//UTC-getter equivalents of convertDateToString()/convertDateOnlyToString() below, used only
+		//by formatUnixSecondsForDeviceTimezone()'s numeric-offset fallback above - reading a
+		//manually-offset instant back with the browser's LOCAL getters (as the two functions below
+		//do, kept for their own remaining direct callers) would silently reintroduce a dependency
+		//on the browser's own timezone into what's supposed to be a browser-independent fallback.
+		function convertDateToStringUTC(dateTime) {
+			const year = dateTime.getUTCFullYear();
+			const month = String(dateTime.getUTCMonth() + 1).padStart(2, '0');
+			const day = String(dateTime.getUTCDate()).padStart(2, '0');
+			const hours = String(dateTime.getUTCHours()).padStart(2, '0');
+			const minutes = String(dateTime.getUTCMinutes()).padStart(2, '0');
+			return `${year}-${month}-${day}T${hours}:${minutes}`;
+		}
+
+		function convertDateOnlyToStringUTC(dateTime) {
+			const year = dateTime.getUTCFullYear();
+			const month = String(dateTime.getUTCMonth() + 1).padStart(2, '0');
+			const day = String(dateTime.getUTCDate()).padStart(2, '0');
+			return `${year}-${month}-${day}`;
 		}
 
 		//Convenience wrapper around zonedWallTimeToUtcSeconds() for the common case: a raw
@@ -2250,7 +2374,10 @@
 					var dateTimeInput = document.createElement("input");
 					dateTimeInput.type = "datetime-local";
 					if (item.targetDateTimeUnix > 0) {
-						dateTimeInput.value = convertDateToString(new Date(item.targetDateTimeUnix * 1000));
+						//Rendered in the DEVICE's timezone, not the browser's - see
+						//formatUnixSecondsForDeviceTimezone()'s own comment (found 2026-09-09,
+						//CODE_REVIEW_V2.md #11).
+						dateTimeInput.value = formatUnixSecondsForDeviceTimezone(item.targetDateTimeUnix, false);
 					}
 					dateTimeInput.onchange = (function (i) { return function () { updateRotationItemDateTimeLocal(i, this.value); }; })(index);
 					countFieldsWrapper.appendChild(dateTimeInput);
@@ -2422,7 +2549,11 @@
 
 				var timeElement = document.createElement("span");
 				timeElement.className = "ls-message-time";
-				timeElement.innerText = new Date((scheduledMessage.scheduledDateTimeUnix * 1000) + (timezoneOffset * 60000)).toString().slice(0, -34);
+				//Rendered in the DEVICE's timezone via Intl, not a manual numeric-offset shift fed
+				//into the browser's own .toString() (which formats in the BROWSER's timezone) - that
+				//combination silently double-converted (found 2026-09-09, CODE_REVIEW_V2.md #11,
+				//reproduced: a 15:00-Berlin scheduled message showed "11:00" in a UTC browser).
+				timeElement.innerText = formatUnixSecondsHumanReadable(scheduledMessage.scheduledDateTimeUnix);
 
 				//message is user-supplied - must stay escaped, this goes into innerHTML (XSS otherwise).
 				var message = `<b>Message:</b> ${scheduledMessage.message.trim() == "" ? "<Blank>" : escapeHtml(scheduledMessage.message)}`

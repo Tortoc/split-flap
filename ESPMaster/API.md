@@ -193,6 +193,10 @@ live display immediately - remove one later via
 - `400 text/plain` with a human-readable error on validation failure (e.g. an invalid
   `alignment`/`deviceMode` value, `flapSpeed` out of `1`-`100`, `inputText` over 500 chars, or a
   non-numeric date field).
+- `400 text/plain` `"OK, but ..."` if the rest of the request was otherwise accepted and applied,
+  but the rotation items and/or the scheduled message were rejected individually (invalid rotation
+  JSON, or a scheduled message split by line breaks into more lines than fit on the display and so
+  could never actually be shown) - everything else in the same request still took effect.
 
 ```bash
 curl -X POST http://192.168.1.50/api/settings \
@@ -225,8 +229,11 @@ missing/wrong.
 
 **Response:**
 - `200 text/plain` `"OK"` on success.
-- `400 text/plain` if `text` is missing/over 500 chars, or `duration` is missing a number, negative,
-  or over `3600`.
+- `400 text/plain` if `text` is missing/over 500 chars, `duration` is missing a number, negative,
+  or over `3600`, or `text` is split by line breaks into more lines than fit on the display (would
+  never actually show, checked up front - see `MAX_DISPLAY_LINES` in `ServiceDisplayJobFunctions.ino`).
+- `503 text/plain` (temporary/`duration>0` only) if the display is busy right now - the message is
+  genuinely lost, not queued; try again.
 
 ```bash
 # Permanent - switches into Text mode and stays

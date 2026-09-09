@@ -46,6 +46,17 @@ struct DisplayJob {
   //deriving it at completion time would silently attribute the job's LAST rendered line to
   //whatever alignment happens to be current NOW, not what was actually sent to the units).
   String lastUsedEffectiveAlignment = "";
+  //Set by DISPLAY_JOB_WRITE_LINE to whatever displayRenderGeneration actually WAS at the moment
+  //that line was sent - finishDisplayJob() records THIS into lastRenderedGeneration, not a fresh
+  //re-read of the (possibly-since-bumped) global at completion time (found 2026-09-09,
+  //CODE_REVIEW_V2.md #7: re-reading it at finish would silently credit a render for a generation
+  //bump that happened AFTER the last line was actually written but BEFORE the job finished - e.g.
+  //a rescan during a long final-pause hold - masking exactly the desync CODE_REVIEW.md #14's
+  //generation counter exists to catch, since the next showText() call for the same text+alignment
+  //would then see lastRenderedGeneration already matching and skip the redraw it should trigger).
+  //Defaults to the generation at job START (set in startDisplayJob()) as a sane fallback for the
+  //DISPLAY_JOB_DEBUG_PAUSE path, which never runs DISPLAY_JOB_WRITE_LINE at all.
+  unsigned long lastUsedRenderGeneration = 0;
   //Set true by DISPLAY_JOB_WRITE_LINE if any unit's I2C write failed (any line, not just the
   //last) - finishDisplayJob() uses this to force a retry on the very next showText() call for
   //the same text, even though the job otherwise completed and nothing else about the cache
@@ -79,6 +90,18 @@ void resetDisplayJobWaitSubstate() {
   displayJob.waitLastPhase = -1;
   displayJob.waitLastProgress = -1;
   displayJob.waitPollCount = 0;
+}
+
+//Whether a message needs more lines than MAX_DISPLAY_LINES to display (the same check
+//startDisplayJob() below does internally before ever touching displayJob state) - exposed
+//separately so callers can validate renderability UP FRONT, at acceptance time, rather than only
+//discovering it when the message is actually due/pushed (found 2026-09-09, CODE_REVIEW_V2.md #10:
+//a message that passes the 500-char API limit but is split into more than 50 lines by explicit
+//line breaks is a PERMANENT failure - unlike a busy display, retrying it later never helps, so
+//accepting it at all just defers an inevitable, silent failure to a worse moment - see
+//checkScheduledMessages() and the /api/text handler for the two places this matters).
+bool isMessageTooLongToRender(String message) {
+  return processSentenceToLines(message).size() > DisplayJob::MAX_DISPLAY_LINES;
 }
 
 //Starts a new display job. Returns false (does nothing) if one is already running - callers that
@@ -122,6 +145,7 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   displayJob.finalPauseMs = finalPauseMs;
   displayJob.alignmentOverride = alignmentOverride;
   displayJob.lastUsedEffectiveAlignment = ""; //defensive reset - see the field's own comment
+  displayJob.lastUsedRenderGeneration = displayRenderGeneration; //fallback for DEBUG_PAUSE - see the field's own comment
   displayJob.hadWriteFailure = false; //reset once per job, not per line - see the field's own comment
 
   SerialPrintln(displayJob.isMultiLine ? String(F("Showing a split down message")) : (F("Showing a simple message: ") + message));
@@ -227,7 +251,7 @@ void finishDisplayJob() {
   //"already handled". See displayRenderGeneration's own comment - CODE_REVIEW.md #14.
   lastWrittenAlignment = displayJob.lastUsedEffectiveAlignment != "" ? displayJob.lastUsedEffectiveAlignment :
     (displayJob.alignmentOverride != "" ? displayJob.alignmentOverride : alignment);
-  lastRenderedGeneration = displayRenderGeneration;
+  lastRenderedGeneration = displayJob.lastUsedRenderGeneration;
   //If any unit's write failed partway through this job, the physical display doesn't actually
   //match lastWrittenText even though everything above just claimed it does. Bump the generation
   //AFTER snapshotting lastRenderedGeneration (order matters - see CODE_REVIEW.md #14's identical
@@ -255,9 +279,15 @@ void updateDisplayJob() {
   //ESPMaster does next - aborting here just stops issuing FURTHER commands, it never interrupts
   //one already sent). Deliberately does NOT call finishDisplayJob() - that would mark
   //originalMessage as "lastWrittenText" even though only part of it (or none) was actually shown.
-  //Leaving lastWrittenText untouched (still whatever was last actually completed) guarantees the
-  //very next showText("") call - Quiet Hours forces message="" - sees a mismatch and starts a
-  //fresh job to actually blank the display, through the normal, already-proven job machinery.
+  //Leaving lastWrittenText untouched is not by itself enough to guarantee the very next
+  //showText("") call actually redraws, though (found 2026-09-09, CODE_REVIEW_V2.md #8): if the
+  //LAST job to actually finish (before this aborted one) had ALSO shown blank text, the cache
+  //already reads lastWrittenText=="" from that earlier completion - showText("")'s cache check
+  //would then see a coincidental match and return true without ever issuing a real write, even
+  //though the units may currently be sitting mid-way through this aborted job's real content.
+  //Bumping displayRenderGeneration forces a real redraw regardless of what lastWrittenText
+  //happens to already say - the same "cache no longer trustworthy" mechanism CODE_REVIEW.md #14
+  //already uses for every other case where the units' actual state can't be relied on.
   //
   //originalMessage != "" is required here (bug found live during this same fix's own testing,
   //2026-09-09): without it, the blank-out job itself - started by that very showText("") call
@@ -270,6 +300,7 @@ void updateDisplayJob() {
   if (displayJob.state != DISPLAY_JOB_IDLE && isQuietHoursActive() && displayJob.originalMessage != "") {
     SerialPrintln(F("Quiet Hours became active mid-job - aborting remaining lines"));
     displayJob.state = DISPLAY_JOB_IDLE;
+    displayRenderGeneration++; //see the comment above - CODE_REVIEW_V2.md #8
     return;
   }
 
@@ -302,6 +333,7 @@ void updateDisplayJob() {
       //showText()/startDisplayJob(). Only Rotation items ever set a non-empty override.
       String effectiveAlignment = displayJob.alignmentOverride != "" ? displayJob.alignmentOverride : alignment;
       displayJob.lastUsedEffectiveAlignment = effectiveAlignment; //see the field's own comment
+      displayJob.lastUsedRenderGeneration = displayRenderGeneration; //see the field's own comment
 
       String aligned = line;
       if (effectiveAlignment == ALIGNMENT_MODE_LEFT) {

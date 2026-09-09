@@ -42,16 +42,47 @@ bool showText(String message, int delayMillis, String alignmentOverride) {
   //DISPLAY_JOB_WRITE_LINE itself uses once the job actually runs.
   String effectiveAlignment = alignmentOverride != "" ? alignmentOverride : alignment;
 
+  //lastWrittenText/lastWrittenAlignment/lastRenderedGeneration only reflect the LAST COMPLETED
+  //job (set by finishDisplayJob()) - while a job is still running, they describe stale history,
+  //not what's actually on the display right now (found 2026-09-09, CODE_REVIEW_V2.md #9). A cache
+  //hit against them here could therefore report success for a request that has nothing to do with
+  //what's actually mid-flight - e.g. text A finished long ago (cache says A), B is now running;
+  //a fresh request for A would see the stale "A" cache entry and return true without A ever being
+  //shown again. While busy, only a genuine match against the job that's ACTUALLY running counts as
+  //already satisfied - anything else must go through startDisplayJob() like normal, which already
+  //correctly refuses (returns false) while busy, so callers retry once the display is free.
+  if (isDisplayJobBusy()) {
+    //Compare against the running job's own request, not resolved/global state that could have
+    //moved on independently (alignmentOverride raw, not effectiveAlignment - matches exactly what
+    //startDisplayJob() below would be called with). Also requires the hold time to match -
+    //see the delayMillis reasoning below, same principle applies while busy: a caller explicitly
+    //asking for a hold must not be silently folded into a coincidentally-matching running job that
+    //was never asked to hold that long.
+    bool matchesRunningJob = displayJob.originalMessage == message &&
+      displayJob.alignmentOverride == alignmentOverride &&
+      displayJob.finalPauseMs == (unsigned long)delayMillis;
+    if (matchesRunningJob) {
+      return true; //already in progress toward exactly this request
+    }
+    return startDisplayJob(message, convertSpeed(flapSpeed), (unsigned long)delayMillis, alignmentOverride); //correctly returns false: busy, try again next tick
+  }
+
   //Redraw if the text or effective alignment actually differs from what's really on the display,
   //OR if displayRenderGeneration has moved on since the last completed render even though neither
   //of those changed - see the comment on displayRenderGeneration (found 2026-09-09,
   //CODE_REVIEW.md #14: the old check only ever compared message text plus a single global
   //alignment-changed flag, missing per-item Rotation alignment changes and any hardware-side
-  //desync entirely).
-  if (lastWrittenText != message || lastWrittenAlignment != effectiveAlignment || lastRenderedGeneration != displayRenderGeneration) {
+  //desync entirely). Also redraw whenever an explicit hold time is freshly requested (delayMillis
+  //!= 0), even if the text/alignment/generation are all otherwise already correct - found
+  //2026-09-09, CODE_REVIEW_V2.md #8: without this, a caller asking to hold already-visible text
+  //for N ms (e.g. a temporary /api/text push repeating the current text) was silently ignored,
+  //since nothing about the cache comparison itself ever changes just because a hold was requested.
+  if (lastWrittenText != message || lastWrittenAlignment != effectiveAlignment || lastRenderedGeneration != displayRenderGeneration || delayMillis != 0) {
     //If a job is still running, this attempt is silently skipped - lastWrittenText hasn't updated
     //yet, so the next ~1s loop() tick naturally retries once the display is free. Propagate
-    //startDisplayJob()'s own result rather than assuming success.
+    //startDisplayJob()'s own result rather than assuming success. (isDisplayJobBusy() was already
+    //ruled out above, so this always actually starts here - kept as startDisplayJob()'s own return
+    //value regardless, rather than assuming true, in case that ever changes.)
     return startDisplayJob(message, convertSpeed(flapSpeed), (unsigned long)delayMillis, alignmentOverride);
   }
   return true; //already showing this - not a failure, nothing to do
