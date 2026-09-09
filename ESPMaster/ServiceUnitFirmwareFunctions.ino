@@ -419,6 +419,26 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
     return false;
   }
 
+  //Bind the found address to the unit we actually asked to enter the bootloader - found
+  //2026-09-09, CODE_REVIEW.md #8: scanForBootloaderAddress() only guards against MULTIPLE units
+  //answering at once, not against the single answerer being a DIFFERENT unit than unitIndex. If
+  //requestUnitEnterBootloader(unitIndex) above didn't actually reach its target (e.g. a dropped
+  //I2C write - its own result isn't checked against failure here) but some other unit happened to
+  //already be sitting in the bootloader for an unrelated reason (a previous aborted push, a stray
+  //reset), the scan would find that OTHER unit and this function would happily write unitIndex's
+  //firmware into it instead. Refuse rather than guess.
+  int expectedBootAddress = UNIT_BOOTLOADER_BASE_ADDRESS + unitIndex;
+  if (bootAddress != expectedBootAddress) {
+    firmwareFile.close();
+    result["success"] = false;
+    result["error"] = F("A unit answered in bootloader mode, but at a different I2C address than Unit ") + String(unitIndex) +
+      F(" is expected to use (found 0x") + String(bootAddress, HEX) + F(", expected 0x") + String(expectedBootAddress, HEX) +
+      F("). Refusing to guess - nothing was written. This usually means the requested unit never received the "
+        "enter-bootloader command while a different unit is already sitting in its bootloader for an unrelated reason.");
+    serializeJson(result, resultJsonOut);
+    return false;
+  }
+
   SerialPrintln(F("Unit ") + String(unitIndex) + F(" found in bootloader mode at I2C address 0x") + String(bootAddress, HEX));
   result["bootAddress"] = "0x" + String(bootAddress, HEX);
   twibootHeartbeat(bootAddress);
