@@ -957,8 +957,12 @@ void setup() {
         }
 
         //Rotation items are always submitted as the complete list (see index.html) - a full
-        //replace, not an incremental add.
-        if (hasNewRotationItems) {
+        //replace, not an incremental add. Gated to the rotation tab's own submission, same
+        //tab-gating reasoning as Countdown/Countup above (found 2026-09-09, CODE_REVIEW.md #6):
+        //the hidden field is only ever recomputed by collectRotationItemsForSubmit(), called only
+        //from the rotation tab's onsubmit case - submitting from any other tab resubmits its
+        //stale/default "[]" and would otherwise silently wipe an existing, loaded rotation list.
+        if (newDeviceModeValue == DEVICE_MODE_ROTATION && hasNewRotationItems) {
           replaceRotationItemsFromJson(newRotationItemsJson);
           SerialPrintln(F("Rotation Items Updated, count: ") + String(rotationItemCount));
         }
