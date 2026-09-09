@@ -214,6 +214,19 @@ uint16_t pendingUnitOffsetValue = 0;
 //pendingRescanSlot/pendingUnitOffsetSlot above.
 PendingRequestSlot pendingTimezoneSlot;
 String pendingTimezoneValue = "";
+//The actual lookup (checkTimezoneLookup(), ServiceAsyncTimeSyncFunctions.ino) now spans MULTIPLE
+//loop() ticks instead of completing within the one tick that takes the request out of
+//pendingTimezoneSlot - these hold the deferred request across that whole span. See the loop()
+//block that processes them for the full explanation.
+AsyncWebServerRequest* timezoneLookupDeferredRequest = nullptr;
+uint32_t timezoneLookupDeferredGeneration = 0;
+//Declared here (not in ServiceAsyncTimeSyncFunctions.ino, where they're actually driven from) -
+//ESPMaster.ino is concatenated/compiled before that file in the sketch, and loop() above
+//references them directly; global variables (unlike functions) aren't auto-forward-declared
+//across .ino files, only within the same one (same reasoning as debugSimulateWriteFailureForUnit
+//elsewhere in this file, from an earlier P2 fix).
+bool tzLookupDone = false;
+bool tzLookupResult = false;
 
 //Same reasoning, for the twiboot/bootloader endpoints (UNIT_BOOTLOADER_ENABLE).
 PendingRequestSlot pendingFirmwarePushSlot;
@@ -498,22 +511,31 @@ void setup() {
     debugStatus = "NTP Sync Starting";
     SerialPrintln(F("DEBUG: Status = ") + debugStatus);
     blinkLed(3, 200, 100); // 3 blinks = NTP syncing
-    
-    setInterval(21600); //sync every 6h - a wall clock doesn't need minute-level freshness
+
+    //ezTime's own auto-sync (events()-driven updateNTP()) is fully disabled - setInterval(0)
+    //makes events() a permanent no-op (see ezTime.cpp: "if (_ntp_interval) updateNTP();"). Our own
+    //ServiceAsyncTimeSyncFunctions.ino (checkNtpSync()) takes over that job instead, ticked from
+    //loop() further down - a genuinely non-blocking replacement, see that file's header comment
+    //for why (CODE_REVIEW.md #30 / BUGFIX_LOG #170 - the original blocking DNS+UDP calls could
+    //crash the device under network stress).
+    setInterval(0);
 
     //Not setDebug(INFO) - ezTime's own internal logging fires extremely often around WiFi
     //hiccups, wasting loop()/UART time. Our own SerialPrintln() logging is unaffected.
     setDebug(NONE);
-    
+
     // Try to sync with timeout (non-blocking)
     unsigned long ntpStartTime = millis();
     unsigned long ntpTimeout = 30000; // 30 second timeout
-    
+
     SerialPrintln(F("DEBUG: Starting NTP sync (non-blocking, 30s timeout)"));
-    
-    // Wait for sync with timeout and yield
+
+    // Wait for sync with timeout and yield - startNtpSync()/checkNtpSync() (see
+    // ServiceAsyncTimeSyncFunctions.ino) never block internally, so this loop's own delay(100)
+    // is the only wait happening here, same as before.
+    startNtpSync();
     while (timeStatus() == timeNotSet && (millis() - ntpStartTime) < ntpTimeout) {
-      events(); // Process ezTime events
+      checkNtpSync();
       yield();  // Allow other tasks to run
       delay(100);
     }
@@ -539,8 +561,21 @@ void setup() {
     checkAndPersistCrashLog(); // see ServiceCrashLogFunctions.ino - must run after LittleFS mounts
 
     // Must come after loadValuesFromFileSystem() - needs timezoneSetting, populated from there.
-    timezone.setLocation(timezoneSetting);
-    SerialPrintln(F("DEBUG: Timezone set to: ") + timezoneSetting);
+    // Was a blocking timezone.setLocation() call - missed in the first pass of the CODE_REVIEW.md
+    // #30 async rewrite (only the /api/timezone endpoint's own call was replaced at first; this
+    // separate boot-time one, setting the timezone RULE the persisted setting refers to rather
+    // than the current time-of-day, was still calling the blocking version and still showed up
+    // live as "DEBUG: Timezone set to: ..." printing only after the old synchronous network wait -
+    // found by checking the serial boot log for it, not by inspection alone). Fire-and-forget here
+    // instead of waiting for it: checkTimezoneLookup() (ticked every loop() tick, same as the
+    // endpoint's own lookups) picks it up and applies it (timezone.setPosix()) within the first
+    // couple of loop() iterations once the network's up - nothing meaningful is shown on the
+    // display before the 30s startup I2C scan delay anyway, so a brief window with the default
+    // (UTC, no offset) rule at the very start of boot is harmless, unlike blocking setup() on a
+    // network round-trip that can itself trip the software watchdog under network stress (see
+    // ServiceAsyncTimeSyncFunctions.ino's header comment, BUGFIX_LOG #170).
+    startTimezoneLookup(timezoneSetting);
+    SerialPrintln(F("DEBUG: Timezone lookup started (non-blocking) for: ") + timezoneSetting);
     
     // Debug mode was already loaded at the very top of setup(), before the earlier blinkLed()
     // calls - just log the already-known value here.
@@ -2086,13 +2121,16 @@ void setup() {
         return;
       }
 
-      if (pendingTimezoneSlot.request != nullptr) {
+      //isTimezoneLookupBusy() also covers a PREVIOUS request whose slot was already taken but
+      //whose async lookup (checkTimezoneLookup(), ServiceAsyncTimeSyncFunctions.ino) hasn't
+      //finished yet - pendingTimezoneSlot.request alone would miss that window.
+      if (pendingTimezoneSlot.request != nullptr || isTimezoneLookupBusy()) {
         request->send(503, "text/plain", "Another timezone change is already in progress, try again shortly");
         return;
       }
 
-      //setLocation() does a live lookup against ezTime's timezoned service - deferred to loop()
-      //(see pendingTimezoneSlot's comment), not run here directly.
+      //The actual lookup is deferred to loop() (see pendingTimezoneSlot's comment) via a
+      //genuinely non-blocking state machine (ServiceAsyncTimeSyncFunctions.ino), not run here.
       pendingTimezoneValue = newTimezoneValue;
       pendingTimezoneSlot.accept(request);
     });
@@ -2229,36 +2267,29 @@ void loop() {
     }
   }
 
-  if (pendingTimezoneSlot.request != nullptr) {
-    uint32_t generation;
-    AsyncWebServerRequest* deferredRequest = pendingTimezoneSlot.take(generation);
+  //Was a single-tick block calling timezone.setLocation() directly (a blocking DNS+UDP network
+  //call) - live-reproduced as a genuine software-watchdog crash under real network stress
+  //(2026-09-09, CODE_REVIEW.md #30/BUGFIX_LOG #170 - a wdtDisable()/wdtEnable() mitigation was
+  //tried and reverted after it caused an even WORSE crash type on this ESP8266 core/SDK version).
+  //Replaced with a genuinely non-blocking implementation (checkTimezoneLookup(),
+  //ServiceAsyncTimeSyncFunctions.ino) that never blocks loop() - which means the lookup now spans
+  //multiple loop() ticks instead of finishing within the one tick that takes the request out of
+  //pendingTimezoneSlot, so the deferred request has to be held across that whole span instead of
+  //just this one block (timezoneLookupDeferredRequest/_Generation, declared near
+  //pendingTimezoneSlot). checkTimezoneLookup() itself already ran earlier this loop() tick (near
+  //the top, where events() used to be) - by the time control reaches here, tzLookupDone may
+  //already be true for the SAME tick a lookup finishes on.
+  if (pendingTimezoneSlot.request != nullptr && timezoneLookupDeferredRequest == nullptr && !isTimezoneLookupBusy()) {
+    timezoneLookupDeferredRequest = pendingTimezoneSlot.take(timezoneLookupDeferredGeneration);
+    startTimezoneLookup(pendingTimezoneValue);
+  }
 
-    //Live network lookup against ezTime's timezoned service - an invalid/unknown TZ database name
-    //is rejected here instead of silently persisting garbage.
-    //
-    //KNOWN OPEN ISSUE, NOT FIXED (found + investigated 2026-09-09, CODE_REVIEW.md #30 - see
-    //BUGFIX_LOG, local, for the full writeup): setLocation() blocks for up to ezTime's own 2s
-    //TIMEZONED_TIMEOUT waiting on a UDP round-trip to an external service, plus whatever DNS
-    //resolution for that hostname takes first. Under real network stress (this project has an
-    //already-documented, router-level intermittent reachability gap, "WiFi ~30s cycle" - and a
-    //genuine WiFi AUTH_EXPIRE disconnect was newly confirmed live during this investigation) that
-    //wait can exceed the software watchdog's patience and reset the device. A wdtDisable()/
-    //wdtEnable() bracket around this call was tried as the ESP8266 core's own documented mitigation
-    //for a known-bounded blocking call - it was REVERTED after live-reproducing a WORSE failure
-    //mode with it in place: a genuine LoadStoreAlignment exception (invalid memory access,
-    //excvaddr=3) with its fault address landing inside the ROM's wdt_feed() routine, on this
-    //exact ESP8266 core/SDK version (3.1.2) - i.e. explicitly disabling the software watchdog
-    //around a multi-second blocking call apparently conflicts with something else in the SDK that
-    //expects it to stay active, corrupting internal state instead of just delaying a reset. This
-    //isn't specific to being called from loop() instead of the old AsyncWebServer callback - the
-    //exact same blocking call sat in the callback before this refactor and was equally exposed to
-    //the ORIGINAL (pre-wdtDisable) risk; moving it here just happened to be what got tested during
-    //a live network stress window and caught it. A real fix needs either a non-blocking rewrite of
-    //ezTime's timezoned UDP protocol (avoids the block entirely) or a version of this mitigation
-    //that doesn't touch the SDK's watchdog internals - both bigger undertakings than fits safely
-    //under time pressure against already-verified production hardware. Left as the original,
-    //unwrapped call, matching its behavior before this whole investigation.
-    bool timezoneOk = timezone.setLocation(pendingTimezoneValue);
+  if (timezoneLookupDeferredRequest != nullptr && tzLookupDone) {
+    AsyncWebServerRequest* deferredRequest = timezoneLookupDeferredRequest;
+    uint32_t generation = timezoneLookupDeferredGeneration;
+    timezoneLookupDeferredRequest = nullptr;
+
+    bool timezoneOk = tzLookupResult;
     if (timezoneOk) {
       timezoneSetting = pendingTimezoneValue;
       writeFile(LittleFS, timezonePath, timezoneSetting.c_str());
@@ -2623,27 +2654,17 @@ void loop() {
     isPendingUnitsReset = false; //nothing to reset, don't leave this stuck pending
   }
   
-  //ezTime library sync - events() can internally block for up to ~1.5s (ezTime's own NTP_TIMEOUT)
-  //plus DNS resolution time whenever a scheduled NTP resync happens to be due (every 6h per
-  //setInterval() above, or every 20s - ezTime's hardcoded, not-publicly-configurable NTP_RETRY -
-  //after ANY single failed attempt), but on every OTHER tick (the overwhelming majority) it's a
-  //cheap no-op that just checks whether anything is due yet.
-  //
-  //TRIED AND REVERTED (2026-09-09, CODE_REVIEW.md #30): wrapping this bare call in
-  //wdtDisable()/wdtEnable() unconditionally, on the reasoning that it shares the exact same
-  //blocking-network-call risk as /api/timezone's setLocation() (see that call site's own comment).
-  //That reasoning about the underlying risk was correct, but doing it HERE - on literally every
-  //single loop() tick, thousands of times per second, not just the rare tick where a sync is
-  //actually due - caused a NEW, worse, live-reproduced problem: a genuine LoadStoreAlignment
-  //exception (invalid unaligned memory access, excvaddr=3) with its fault address landing directly
-  //inside the ROM's wdt_feed() routine - i.e. rapidly toggling the software watchdog on/off at this
-  //frequency corrupts something in the SDK's own watchdog-adjacent state, a strictly worse failure
-  //mode (a real exception, not just an occasional clean self-recovering WDT reset) than the
-  //original risk being mitigated. Reverted to the plain, unwrapped call - the actual fix for THIS
-  //specific site's exposure (if pursued further) would need to gate the wdtDisable()/wdtEnable()
-  //bracket to only the rare tick where ezTime is actually about to attempt the network round-trip,
-  //not wrap the call unconditionally.
-  events();
+  //ezTime's own auto-sync is disabled (setInterval(0) in setup()) - events() is now a permanent
+  //no-op, not called here anymore. checkNtpSync() (ServiceAsyncTimeSyncFunctions.ino) replaces it
+  //with a genuinely non-blocking implementation instead of the wdtDisable()/wdtEnable() bracket
+  //tried and reverted earlier (2026-09-09, CODE_REVIEW.md #30/BUGFIX_LOG #170 - that bracket
+  //caused a NEW, worse crash type on this ESP8266 core/SDK version when applied to this
+  //every-tick call site). checkTimezoneLookup() is the equivalent replacement for the
+  ///api/timezone endpoint's own network lookup - see pendingTimezoneSlot's processing block
+  //further down for how it's driven. Neither call below ever blocks - both are cheap, immediate
+  //checks on every tick where nothing is in flight.
+  checkNtpSync();
+  checkTimezoneLookup();
 
   //Process every second
   unsigned long currentMillis = millis();
