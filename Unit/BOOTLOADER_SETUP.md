@@ -120,6 +120,16 @@ nach einem erneuten Reset in inkonsistenten Alt-/Neu-Code-Mix bootet).
 Neu verifiziert: **790 Bytes von 2048 Bytes** (+44 Bytes) - weiterhin
 komfortabel im Budget (39%).
 
+**Zweiter Nachtrag (2026-09-09):** Idle-Boot-Timeout repariert (siehe Change
+3 im Datei-Kopfkommentar von `main.c`, CODE_REVIEW.md #9 - `boot_timeout`
+wurde vorher von jedem echten Bootloader-Kommando dauerhaft auf 0 gesetzt
+und nie wieder aktiviert, statt einen rollierenden Idle-Timer zu bilden;
+eine abgebrochene Sitzung VOR dem Scharfstellen des EEPROM-Markers blieb
+dadurch ohne funktionierenden automatischen Rückweg im Bootloader stecken -
+live reproduziert, brauchte einen manuellen Stromzyklus). Neu verifiziert:
+**792 Bytes von 2048 Bytes** (+2 Bytes) - weiterhin komfortabel im Budget
+(39%).
+
 ## Schritt 2: ISP-Flash - identisch für jede Unit
 
 **Nur mit der gerade angeschlossenen Unit**, ISP-Programmer entsprechend

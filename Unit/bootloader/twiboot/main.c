@@ -44,6 +44,30 @@
  * pushFirmwareToUnit(), which arms the marker before writing any page and
  * only clears it after page 0 is written AND verified.
  *
+ * Change 3 (2026-09-09, CODE_REVIEW.md #9): unmodified upstream TWI_data_write()
+ * sets boot_timeout = 0 ("abort countdown") on every real command (chip-info
+ * read, flash/eeprom access, WAIT heartbeat) and NEVER sets it back to a
+ * nonzero value anywhere else in this file - so the ~1000ms idle-boot
+ * countdown isn't restarted, it's permanently disabled for the rest of this
+ * power cycle the moment any real command arrives, which is true of nearly
+ * every real session. A master that then abandons the session before ever
+ * arming the Change-2 EEPROM marker (e.g. rejects the target after reading
+ * chip info, or crashes/loses network before starting to write) leaves the
+ * unit stuck in the bootloader with no working automatic recovery path at
+ * all - confirmed by direct code trace and reproduced live during this
+ * session (a unit left this way needed a manual power cycle; twiboot also
+ * disables the watchdog on entry, see disable_wdt_timer() below, so there's
+ * no independent hardware fallback either). Changed to re-arm
+ * TIMER_MSEC2IRQCNT(TIMEOUT_MS) instead of disabling on every command,
+ * making it a rolling idle timer: the unit now auto-boots ~1s after the
+ * master goes quiet, in EVERY abandonment scenario, not just the ones an
+ * ESPMaster-side fix could enumerate up front. This does not weaken Change
+ * 2's protection - jump_to_app()'s marker check still runs on every trip
+ * through the for(;;) loop regardless of which of the three paths
+ * (idle timeout / explicit switch-app / SLA+W junk byte) set
+ * cmd = CMD_BOOT_APPLICATION, and sends it back to CMD_WAIT if a write is
+ * genuinely still in progress.
+ *
  * Everything else in this file is unmodified upstream code. This file
  * remains licensed under GPL-2.0 (see LICENSE in this directory), as
  * required for redistributing a modified version.
@@ -373,8 +397,9 @@ static uint8_t TWI_data_write(uint8_t bcnt, uint8_t data)
                     /* no break */
 
                 case CMD_WAIT:
-                    /* abort countdown */
-                    boot_timeout = 0;
+                    /* Re-arm the idle-boot countdown rather than permanently disabling it - see
+                     * Change 3 in the file header comment above. */
+                    boot_timeout = TIMER_MSEC2IRQCNT(TIMEOUT_MS);
                     cmd = data;
                     break;
 
