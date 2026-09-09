@@ -38,10 +38,17 @@ void checkCountdown() {
     //flipping which day a near-midnight countdown rounds to.
     long currentTimeSeconds = getRealUtcNow();
     long differenceSeconds = countdownInSeconds - currentTimeSeconds;
-    long hours = differenceSeconds / 60 / 60;
 
-    //If there is any remainder, we want to actually still display the full day remaining
-    long days = ceil(hours / 24.0);
+    //If there is any remainder, we want to actually still display the full day remaining - must
+    //compute directly from seconds (matching checkRotation()'s countdown branch below), not via
+    //an intermediate truncated-to-hours value. `differenceSeconds / 60 / 60` is integer division
+    //and silently discards any partial-hour remainder BEFORE ceil() ever sees it, so ceil() can
+    //only ever round up whole discarded hours, never the sub-hour remainder that's the whole
+    //point of this comment (found 2026-09-09, CODE_REVIEW.md #22, reproduced: 30 minutes
+    //remaining rounded down to 0 days instead of up to 1; 24h30m rounded to 1 day instead of 2).
+    //Note: checkCountup()'s equivalent uses floor(), not ceil() - that one's mathematically
+    //unaffected (floor(floor(x/3600)/24) == floor(x/86400) for x>=0), so it wasn't touched.
+    long days = ceil(differenceSeconds / 60.0 / 60.0 / 24.0);
 
     //Make sure we don't go negative
     days = days > 0 ? days : 0;
