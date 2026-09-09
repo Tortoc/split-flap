@@ -294,7 +294,20 @@ void rotateToLetter(int toLetter) {
 #ifdef SERIAL_ENABLE
         Serial.println(F("full rotation incl. calibration"));
 #endif
-        calibrate(false); //calibrate revolver and do not stop motor
+        //calibrate()'s return value was previously discarded entirely (found 2026-09-09,
+        //CODE_REVIEW.md #18): on failure (-1, Hall sensor/marker never found within 3*STEPS) it
+        //already stops the motor and resets displayedLetter to 0 as an honest "actual position
+        //unknown" - but this function then went on to step further FROM that unverified position
+        //and unconditionally claimed displayedLetter=toLetter anyway, as if the rotation had
+        //genuinely succeeded. Abort instead: leave displayedLetter at calibrate()'s own reset
+        //value (0) rather than lying about having reached toLetter. loop()'s existing
+        //`displayedLetter != receivedNumber` retry naturally tries again on the next call (gated
+        //by the same OVERHEATINGTIMEOUT cooldown as every other rotation attempt, so this can't
+        //spin tightly) - a lightweight, self-retrying "error state" rather than a new persistent
+        //lockout that would need its own explicit clear/reporting mechanism.
+        if (calibrate(false) == -1) {
+          return;
+        }
         //startMotor();
         currentPhase = PHASE_ROTATING; //calibrate() left it at PHASE_CALIBRATING, we're rotating to the target letter now
         stepLetters(posLetter);
@@ -391,7 +404,17 @@ void receiveLetter(int numBytes) {
 
 void requestEvent() {
   //send unit status and current calibration offset to master
-  Wire.write(currentlyrotating);
+  //Report busy if EITHER actually rotating right now (currentlyrotating), OR a newly-received
+  //letter is still waiting to be applied - e.g. during the OVERHEATINGTIMEOUT cooldown in
+  //rotateToLetter(), which returns immediately without moving anything or updating
+  //displayedLetter whenever it's called again too soon after the last rotation. Previously only
+  //currentlyrotating was checked, which stays 0 for the whole cooldown wait - the master's "is
+  //this unit ready" poll (pollDisplayJobWaitAllUnitsReady() in ESPMaster.ino) considered the unit
+  //already done before it had even started moving toward the newly-received letter, so a job
+  //could complete (and a subsequent write overwrite receivedNumber) before the pending rotation
+  //ever actually happened. Found 2026-09-09, CODE_REVIEW.md #16.
+  uint8_t effectivelyBusy = (currentlyrotating != 0 || displayedLetter != receivedNumber) ? 1 : 0;
+  Wire.write(effectivelyBusy);
   Wire.write(lowByte(calOffset));
   Wire.write(highByte(calOffset));
   Wire.write(currentPhase);
@@ -451,7 +474,19 @@ int calibrate(bool initialCalibration) {
   while (!reachedMarker) {
     currentPhaseProgress = (uint16_t)i;
     int currentHallValue = digitalRead(HALLPIN);
-    if (currentHallValue == 1 && i == 0) { //already in zero position move out a bit and do the calibration {
+    //LOW is the detected marker (see the final `else` below - that's the only branch that ever
+    //declares success) - but this i==0 "already inside the marker, move out first" special case
+    //was checking HIGH instead (found 2026-09-09, CODE_REVIEW.md #19): if the drum happened to
+    //already be sitting inside the marker's active zone at the very start of calibration (a real,
+    //reachable case - e.g. left there by a previous calibration), the very FIRST reading (LOW)
+    //fell straight into the final `else` and was accepted as "found" immediately, without ever
+    //leaving the zone and searching for a genuine, repeatable entry edge - reproduced locally as
+    //literally zero motor movement when calOffset happens to be 0 (step(ROTATIONDIRECTION * 0)).
+    //The mechanical drift this causes (fully or partly stale/random reference point) scales with
+    //how wide the marker's physical zone is. Fixed: leave the zone first (this branch) whenever
+    //already inside it, THEN search for the defined HIGH-to-LOW entry edge (final `else`, now only
+    //reachable after having genuinely left and re-entered the zone).
+    if (currentHallValue == 0 && i == 0) { //already inside the marker zone - leave it before searching
       //not reached yet
       i = 50;
       stepper.step(ROTATIONDIRECTION * 50); //move 50 steps to get out of scope of hall
