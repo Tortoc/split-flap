@@ -3,3 +3,4 @@ BUGFIX_LOG.md
 
 # arduino-cli build output (--export-binaries), not source
 ESPMaster/build/
+Unit/build/

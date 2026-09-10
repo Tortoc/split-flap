@@ -43,6 +43,26 @@ const uint8_t addressPins[ADDRESS_PIN_COUNT] = {A0, A1, A2, A3, 3, 4}; //bit 0..
 #define RAMP_DOWN_LETTERS 1
 #define RAMP_DOWN_MIN_FACTOR 0.7 //speed fraction (of stepperSpeed) reached on the final letter-position
 
+//Acceleration ramp tuning for stepLetters() below - mirrors RAMP_DOWN_* above but for the START of
+//a move instead of the end. Found missing 2026-09-10 while comparing against scottbez1/splitflap's
+//motor control (different hardware entirely - ESP32+Chainlink, so not portable code, just a
+//portable idea): that project ramps UP from a stop as well as down, we previously only had the
+//RAMP_DOWN half (from an earlier session). A slower start needs less initial current/torque than
+//jumping straight to full stepperSpeed - plausible (not proven) as one contributor to the
+//still-open "Unit dreht langsam" investigation (voltage-sag hypothesis, see
+//unit-slow-rotation-and-remote-reset memory). 0.6 is a slightly more conservative starting factor
+//than RAMP_DOWN_MIN_FACTOR's 0.7 - starting from a dead stop needs more torque than coasting to one.
+#define RAMP_UP_LETTERS 1
+#define RAMP_UP_MIN_FACTOR 0.6 //speed fraction (of stepperSpeed) used on the first letter-position
+
+//Diagnostic-only threshold (found successful, but took unusually long) - see
+//unexpectedHomeTriggerCount/slowHomeSearchCount's own comments below for the full story. From any
+//starting position the marker should normally be found within about one revolution; this is a
+//deliberately generous multiple of that, well under the existing 3*STEPS hard-failure cap in
+//calibrate(), meant to catch "still working, but struggling" before it becomes an outright failure.
+//Starting value, not a measured one - see the plan's own "Unsicherheiten" section.
+#define EXPECTED_HOME_SEARCH_MAX_STEPS (STEPS + STEPS / 2)
+
 //constants others
 #define BAUDRATE 115200
 //Valid stepperSpeed range - must stay in sync with ESPMaster.ino's MIN_SPEED/MAX_SPEED
@@ -98,6 +118,29 @@ bool lastInd3 = false; //store last status of phase
 bool lastInd4 = false; //store last status of phase
 float missedSteps = 0; //cummulate steps <1, to compensate via additional step when reaching >1
 volatile int currentlyrotating = 0; // 1 = drum is currently rotating, 0 = drum is standing still
+
+//Diagnostic counters, found missing 2026-09-10 while comparing against scottbez1/splitflap's
+//motor control (see the RAMP_UP_* comment above for the full context - different hardware, ported
+//idea not code). Both accumulate since the last power-cycle/reset only (like currentlyrotating and
+//friends above) - no reset command or EEPROM persistence in this first round, deliberately kept
+//simple. Neither is a hard error by itself; both are a coarse "has this unit been struggling
+//lately" signal, surfaced to ESPMaster via requestEvent() below and GET /api/units?detail=1.
+//
+//Incremented in stepLetters() whenever the hall sensor reads LOW (marker state) at any point
+//during a DIRECT move - a direct move (by construction) never expects to cross the home marker, so
+//any such reading is anomalous (bumped drum, slipped steps, sensor noise). stepLetters() also
+//clears positionKnown when this happens - the existing !positionKnown dispatch in loop() (see its
+//own comment, CODE_REVIEW_V3.md #4) then forces a full recalibration on the very next iteration,
+//without needing any new dispatch logic.
+volatile uint8_t unexpectedHomeTriggerCount = 0;
+
+//Incremented in calibrate()'s own success path when it took unusually many steps (more than
+//EXPECTED_HOME_SEARCH_MAX_STEPS, but still under the existing 3*STEPS hard-failure cap) to find
+//the marker - "found it, but struggled" rather than an outright failure. Doesn't change the actual
+//calibration result (still succeeds, positionKnown still becomes true) - purely an early-warning
+//diagnostic that would otherwise be completely invisible (calibrate()'s own step count isn't
+//looked at by anything today beyond the hard failure cap).
+volatile uint8_t slowHomeSearchCount = 0;
 
 //Extra I2C status byte so ESPMaster can tell a slow calibration search from an actually stuck unit.
 #define PHASE_IDLE        0
@@ -287,21 +330,45 @@ int translateLettertoInt(char letterchar) {
   return -1;
 }
 
-//Moves the drum forward by `letterSteps` letter-positions, decelerating over the final
-//RAMP_DOWN_LETTERS positions instead of hitting the target at full stepperSpeed. Shared by both
-//rotateToLetter() branches (direct move, and the post-calibration full-rotation move).
+//Moves the drum forward by `letterSteps` letter-positions, ramping speed at both ends instead of
+//jumping straight to full stepperSpeed / braking abruptly: RAMP_UP_LETTERS at the very start,
+//RAMP_DOWN_LETTERS at the very end (see both constants' own comments) - whichever ramp is more
+//conservative at a given position wins, which also handles short moves where both windows overlap
+//without any special-casing. Shared by both rotateToLetter() branches (direct move, and the
+//post-calibration full-rotation move) - both only ever call this with letterSteps < AMOUNTFLAPS
+//(diffPosition/posLetter are always 0..44), so a single call here never covers a full revolution
+//and, once already homed, should therefore never cross the home marker again - see the hall-sensor
+//check below (found missing 2026-09-10, see unexpectedHomeTriggerCount's own comment).
 void stepLetters(int letterSteps) {
   stepper.setSpeed(stepperSpeed);
 
   for (int i = 0; i < letterSteps; i++) {
     currentPhaseProgress = (uint16_t)i;
 
+    float speedFactor = 1.0;
+
+    if (RAMP_UP_LETTERS > 0 && i < RAMP_UP_LETTERS) {
+      float rampFraction = (float)(i + 1) / (float)(RAMP_UP_LETTERS + 1);
+      float upFactor = RAMP_UP_MIN_FACTOR + (1.0 - RAMP_UP_MIN_FACTOR) * rampFraction;
+      if (upFactor < speedFactor) {
+        speedFactor = upFactor;
+      }
+    }
+
     int stepsRemaining = letterSteps - i;
     if (RAMP_DOWN_LETTERS > 0 && stepsRemaining <= RAMP_DOWN_LETTERS) {
       float rampFraction = (float)stepsRemaining / (float)(RAMP_DOWN_LETTERS + 1);
-      float speedFactor = RAMP_DOWN_MIN_FACTOR + (1.0 - RAMP_DOWN_MIN_FACTOR) * rampFraction;
+      float downFactor = RAMP_DOWN_MIN_FACTOR + (1.0 - RAMP_DOWN_MIN_FACTOR) * rampFraction;
+      if (downFactor < speedFactor) {
+        speedFactor = downFactor;
+      }
+    }
+
+    if (speedFactor < 1.0) {
       int rampedSpeed = (int)(stepperSpeed * speedFactor);
       stepper.setSpeed(rampedSpeed > 0 ? rampedSpeed : 1); //never 0, Stepper::step() would spin forever
+    } else {
+      stepper.setSpeed(stepperSpeed);
     }
 
     float preciseStep = (float)STEPS / (float)AMOUNTFLAPS;
@@ -312,6 +379,21 @@ void stepLetters(int letterSteps) {
       missedSteps--;
     }
     stepper.step(ROTATIONDIRECTION * roundedStep);
+
+    //Continuous plausibility check (see unexpectedHomeTriggerCount's own comment) - as coarse an
+    //approximation of "continuous" as the blocking Stepper library allows: only after each whole
+    //letter-position's worth of microsteps (~STEPS/AMOUNTFLAPS ≈ 45), not truly during it. A very
+    //brief sensor blip entirely inside one step() call could still be missed - an accepted
+    //limitation, not a claim of full per-microstep coverage (see the plan's own "Unsicherheiten").
+    if (digitalRead(HALLPIN) == 0) {
+      //Marker seen where none should be, mid-move (see this function's own header comment for why
+      //a single call never legitimately covers a full revolution). Don't abort THIS move - just
+      //flag it and let the existing loop()/CODE_REVIEW_V3.md #4 dispatch self-heal via a full
+      //recalibration on the next iteration, instead of adding a new abort path to this tight
+      //timing loop.
+      unexpectedHomeTriggerCount++;
+      positionKnown = false;
+    }
   }
 }
 
@@ -481,6 +563,14 @@ void requestEvent() {
   Wire.write(currentPhase);
   Wire.write(lowByte(currentPhaseProgress));
   Wire.write(highByte(currentPhaseProgress));
+  //Diagnostic counters (see their own comments above) - appended, not inserted, so this stays
+  //backwards compatible: a master still requesting only ANSWER_SIZE_LIGHT (3) or the previous
+  //ANSWER_SIZE (6) bytes via Wire.requestFrom() simply reads fewer of the bytes written here, same
+  //as how the light 3-byte read and the previous 6-byte read already coexisted with this same
+  //handler always writing 6. Only a master that now asks for all 8 (ESPMaster.ino's
+  //ANSWER_SIZE_DIAG) sees these two.
+  Wire.write(unexpectedHomeTriggerCount);
+  Wire.write(slowHomeSearchCount);
   /*
     #ifdef SERIAL_ENABLE
     Serial.print("Status ");
@@ -564,6 +654,12 @@ int calibrate(bool initialCalibration) {
       //reached marker (a confirmed HIGH-to-LOW edge, not just any LOW reading), go to calibrated
       //offset position
       reachedMarker = true;
+      //Early-warning diagnostic (see slowHomeSearchCount's own comment) - found the marker, so
+      //this is still a genuine success below, just an unusually long search for one. Doesn't
+      //change the outcome, only adds visibility that would otherwise not exist.
+      if (i > EXPECTED_HOME_SEARCH_MAX_STEPS) {
+        slowHomeSearchCount++;
+      }
       //Snapshot atomically before use - a torn calOffset here would turn the motor by a wrong,
       //momentarily-garbled step count instead of just reporting a stale status value (see the
       //volatile-block comment near calOffset's declaration).

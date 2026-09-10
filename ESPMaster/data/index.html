@@ -1567,7 +1567,7 @@ curl -X POST http://192.168.1.50/api/text --data "text=BRB&amp;duration=10"</pre
 						<details class="api-endpoint">
 							<summary>GET /api/units</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Live-Status und Kalibrierungs-Offset jeder Unit. Mit <code>?detail=1</code> zusätzlich Phase/Fortschritt.</p>
+								<p class="api-endpoint-desc">Live-Status und Kalibrierungs-Offset jeder Unit. Mit <code>?detail=1</code> zusätzlich Phase/Fortschritt sowie zwei Diagnose-Zähler (unerwartete Sensor-Trigger, ungewöhnlich lange Home-Suchen) - Details in <code>API.md</code>. <b>Bis alle Units die neue Firmware haben, zeigen diese beiden Zähler bei älteren Units <code>255</code> statt echter Daten.</b></p>
 								<pre class="api-code">curl http://192.168.1.50/api/units
 curl "http://192.168.1.50/api/units?detail=1"</pre>
 							</div>

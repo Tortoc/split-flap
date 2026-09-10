@@ -373,11 +373,11 @@ anything beyond status/offset.
 **Shares one registration with `POST /api/units` below** (heap-saving pattern established for
 `/api/wifi` etc., see BUGFIX_LOG #124) - dispatched internally by request method, same path.
 
-**Query param** `detail` (any value, e.g. `?detail=1`): opts into the heavier 6-byte read instead,
-adding `phase`/`progress` to each unit - added as a diagnostic for
-watching a Unit that starts rotating with no ESPMaster-issued display job involved (the normal
-display-job wait logic's phase/progress logging never runs in that case). Not used by the
-Administration page itself - pass it manually (e.g. `curl`) when actively diagnosing.
+**Query param** `detail` (any value, e.g. `?detail=1`): opts into the heavier 8-byte read instead,
+adding `phase`/`progress`/`unexpectedHomeTriggerCount`/`slowHomeSearchCount` to each unit - added
+as a diagnostic for watching a Unit that starts rotating with no ESPMaster-issued display job
+involved (the normal display-job wait logic's phase/progress logging never runs in that case). Not
+used by the Administration page itself - pass it manually (e.g. `curl`) when actively diagnosing.
 
 **Response** `200 application/json`:
 ```json
@@ -385,17 +385,28 @@ Administration page itself - pass it manually (e.g. `curl`) when actively diagno
   "unitsAmount": 3,
   "units": [
     { "index": 0, "online": true, "status": 0, "offset": 100 },
-    { "index": 1, "online": true, "status": 1, "offset": 95, "phase": 2, "progress": 340 }
+    { "index": 1, "online": true, "status": 1, "offset": 95, "phase": 2, "progress": 340, "unexpectedHomeTriggerCount": 0, "slowHomeSearchCount": 0 }
   ]
 }
 ```
 - `status`: `0` = ready, `1` = busy/moving.
 - `offset` / `status` are `-1` / `-2` respectively for a unit that didn't respond (`online: false`).
-- `phase`/`progress` only present with `?detail=1`. `phase`: `0` = idle, `1` = calibrating
-  (searching for the hall sensor marker), `2` = rotating to a target letter. `progress`: steps
-  done so far in the current phase - watch whether this climbs steadily (points at a mechanical/
-  torque issue) or keeps resetting toward 0 (points at the Unit itself repeatedly restarting, e.g.
-  from a brown-out reset).
+- `phase`/`progress`/`unexpectedHomeTriggerCount`/`slowHomeSearchCount` only present with
+  `?detail=1`. `phase`: `0` = idle, `1` = calibrating (searching for the hall sensor marker), `2` =
+  rotating to a target letter. `progress`: steps done so far in the current phase - watch whether
+  this climbs steadily (points at a mechanical/torque issue) or keeps resetting toward 0 (points at
+  the Unit itself repeatedly restarting, e.g. from a brown-out reset).
+- `unexpectedHomeTriggerCount`/`slowHomeSearchCount` (added 2026-09-10, inspired by
+  `scottbez1/splitflap`'s continuous home-sensor plausibility check): coarse, accumulate-since-
+  power-on counts of "the hall sensor fired somewhere it structurally shouldn't have" and
+  "calibration succeeded, but took unusually long to find the marker" respectively - a nonzero and
+  climbing value is worth investigating (possible slipping/insufficient torque), a single low
+  nonzero value isn't necessarily alarming. **Caveat, found live-testing this exact rollout**: a
+  Unit still running firmware from before this feature answers the same 8-byte request without
+  error, but its last 2 bytes are undefined bus-idle filler that reads back as **255** on this
+  hardware - not a real count, and not distinguishable from a genuine 255 (I2C has no
+  short-response signal a master can detect). Until every unit has received the newer `Unit.ino`,
+  treat `255` on these two fields as "not supported by this unit's firmware yet", not as data.
 
 Returns `503 text/plain` if another units request is already in progress.
 

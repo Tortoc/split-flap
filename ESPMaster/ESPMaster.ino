@@ -42,6 +42,15 @@
 //--- Constants - only change if you know what you're doing ---
 #define ANSWER_SIZE         6 //status + offset + phase + progress bytes, must match Unit.ino's requestEvent()
 #define ANSWER_SIZE_LIGHT   3 //status + offset only, see readUnitInfo()'s 3-arg overload
+#define ANSWER_SIZE_DIAG    8 //adds the two diagnostic counters (found 2026-09-10, inspired by
+                               //scottbez1/splitflap) - see readUnitInfo()'s 7-arg overload. Unit's
+                               //requestEvent() always writes all 8 bytes now; a master still using
+                               //ANSWER_SIZE or ANSWER_SIZE_LIGHT just reads fewer of them, same
+                               //backwards-compatible relationship those two already had. IMPORTANT
+                               //(see readUnitInfo()'s 7-arg overload comment): a unit not yet
+                               //updated to the newer Unit.ino still answers an 8-byte request
+                               //without error - the last 2 bytes just read back as 255 (idle bus),
+                               //not a detectable "unsupported" marker.
 #define FLAP_AMOUNT         45
 #define MIN_SPEED           1
 #define MAX_SPEED           12
@@ -2797,14 +2806,20 @@ void loop() {
       int status = -2;
       int offset = -1;
       bool online;
-      //Default is the light 3-byte status+offset read, not the 6-byte one with phase/progress -
-      //the Administration page never displays those. ?detail=1 opts into the heavy read.
+      //Default is the light 3-byte status+offset read, not the 8-byte one with phase/progress/
+      //diagnostics - the Administration page never displays those. ?detail=1 opts into the heavy
+      //read (added the two diagnostic counters 2026-09-10 alongside phase/progress, rather than a
+      //separate query param - two extra I2C bytes is negligible next to the existing 6).
       if (pendingUnitsInfoRequestDetail) {
         int phase = -1;
         int progress = -1;
-        online = readUnitInfo(unitIndex, status, offset, phase, progress);
+        int unexpectedHomeTriggerCount = -1;
+        int slowHomeSearchCount = -1;
+        online = readUnitInfo(unitIndex, status, offset, phase, progress, unexpectedHomeTriggerCount, slowHomeSearchCount);
         doc["units"][unitIndex]["phase"] = phase;
         doc["units"][unitIndex]["progress"] = progress;
+        doc["units"][unitIndex]["unexpectedHomeTriggerCount"] = unexpectedHomeTriggerCount;
+        doc["units"][unitIndex]["slowHomeSearchCount"] = slowHomeSearchCount;
       } else {
         online = readUnitInfo(unitIndex, status, offset);
       }

@@ -232,6 +232,58 @@ bool readUnitInfo(int address, int &statusOut, int &offsetOut, int &phaseOut, in
   return true;
 }
 
+//Same as the 5-arg overload above, plus the two diagnostic counters added 2026-09-10 (inspired by
+//scottbez1/splitflap's continuous home-sensor plausibility check - see Unit.ino's
+//unexpectedHomeTriggerCount/slowHomeSearchCount comments for the full story). Deliberately a
+//separate overload rather than extending the 5-arg one in place - that one's two existing call
+//sites (ServiceDisplayJobFunctions.ino's job-wait poller, and the routine /api/units listing) only
+//need phase/progress, not these two extra bytes on every poll. Used only where the diagnostics are
+//actually surfaced (GET /api/units?detail=1).
+//
+//IMPORTANT, found live-testing this on 2026-09-10: an EARLIER version of this function tried to
+//distinguish "unit not yet updated to the newer Unit.ino" (only ANSWER_SIZE=6 real bytes written)
+//from a genuine read failure by comparing Wire.available() against ANSWER_SIZE_DIAG=8, and
+//substituting -1 for the two new fields when short. That doesn't work: I2C has no
+//short-response/length-prefix mechanism - once Wire.requestFrom(address, 8, ...) succeeds at all,
+//the master ends up with 8 bytes available regardless of how many the slave actually had prepared;
+//the "extra" bytes just come back as whatever the idle, pulled-up bus reads as (empirically 0xFF =
+//255 on this hardware), not some detectable "nothing sent" marker. Live-confirmed against all 10
+//real (not-yet-updated) units: every one reported unexpectedHomeTriggerCount=
+//slowHomeSearchCount=255, not -1. **So until every unit has received the Unit.ino update (see the
+//plan's Phase C), these two fields read 255 for any not-yet-updated unit - not a real count, not
+//a distinguishable "unsupported" sentinel either.** Documented in API.md/the Hilfe tab rather than
+//solved here - solving it properly would need an explicit capability signal from the unit (e.g. a
+//firmware-version byte), out of scope for this round.
+bool readUnitInfo(int address, int &statusOut, int &offsetOut, int &phaseOut, int &progressOut, int &unexpectedHomeTriggerCountOut, int &slowHomeSearchCountOut) {
+  Wire.requestFrom(address, ANSWER_SIZE_DIAG, 1);
+
+  //Only the base ANSWER_SIZE (6) is required for a successful read - see the comment above for why
+  //a not-yet-updated unit's response is still exactly ANSWER_SIZE_DIAG (8) bytes from this
+  //function's point of view, just with the last 2 not being real data.
+  if (Wire.available() < ANSWER_SIZE) {
+    SerialPrint(F("ERROR: Unit "));
+    SerialPrint(address);
+    SerialPrintln(F(" - No/incomplete response reading status+offset+diagnostics"));
+
+    recoverI2CBus();
+
+    return false;
+  }
+
+  statusOut = Wire.read();
+  int offsetLow = Wire.read();
+  int offsetHigh = Wire.read();
+  offsetOut = offsetLow + (offsetHigh << 8);
+  phaseOut = Wire.read();
+  int progressLow = Wire.read();
+  int progressHigh = Wire.read();
+  progressOut = progressLow + (progressHigh << 8);
+  unexpectedHomeTriggerCountOut = Wire.available() >= 2 ? Wire.read() : -1;
+  slowHomeSearchCountOut = Wire.available() >= 1 ? Wire.read() : -1;
+
+  return true;
+}
+
 //The old blocking waitForUnitReady()/waitForAllUnitsReady()/showMessage() wait loop now lives as
 //the non-blocking pollDisplayJobWaitAllUnitsReady() state machine in ServiceDisplayJobFunctions.ino.
 
