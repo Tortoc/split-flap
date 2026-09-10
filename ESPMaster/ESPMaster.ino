@@ -21,10 +21,15 @@
                                    //via the scientress fork and never picked this up). If running
                                    //more than one display on the same network, mdnsName below must
                                    //be unique per device.
+//Numbered boot-progress blink codes (1-8, one per setup() stage) were removed 2026-09-10 on user
+//request - they blocked every boot for ~8.7s of delay() regardless of outcome, and (since
+//ledOn() only actually lights up while showDebugPage is on, see its own comment) usually didn't
+//even visibly blink in normal production use. LED_ENABLE now only gates the "WiFi totally failed
+//to connect" continuous error blink at the end of setup() - see that block's own comment.
 #define LED_ENABLE          true
-#define DEBUG_ENABLE true  //startup debug page, error panel, page-load log, serial debug log,
-                           //and whether LED_ENABLE actually blinks - gated at runtime by
-                           //showDebugPage (POST /api/debug-mode, persisted in /debugmode.txt)
+#define DEBUG_ENABLE true  //startup debug page, error panel, page-load log, serial debug log -
+                           //gated at runtime by showDebugPage (POST /api/debug-mode, persisted
+                           //in /debugmode.txt)
 #define MQTT_ENABLE true   //MQTT + Home Assistant auto-discovery (found 2026-09-10 in two
                            //independent forks, see
                            //ServiceMqttFunctions.ino). This flag alone decides whether the
@@ -43,9 +48,10 @@
 #define LED_ON HIGH
 #define LED_OFF LOW
 
-//LED blink codes during startup (only while debug mode is on):
-//1=WiFi connecting, 2=WiFi connected, 3=NTP starting, 4=NTP success, 5=NTP failed,
-//6=filesystem init, 7=web server starting, 8=ready. Continuous=error.
+//The numbered per-stage startup blink codes this comment used to document were removed
+//2026-09-10 (see LED_ENABLE's own comment) - the only LED behavior left is a continuous blink at
+//the end of setup() if WiFi never connects at all, only visible while debug mode is on
+//(see ledOn()'s own comment).
 
 //--- Constants - only change if you know what you're doing ---
 #define ANSWER_SIZE         6 //status + offset + phase + progress bytes, must match Unit.ino's requestEvent()
@@ -691,25 +697,14 @@ void ledOff() {
 #endif
 }
 
-void blinkLed(int count, int onTime, int offTime) {
-#if LED_ENABLE == true
-  for (int i = 0; i < count; i++) {
-    ledOn();
-    delay(onTime);
-    ledOff();
-    if (i < count - 1) delay(offTime);
-  }
-#endif
-}
-
 void setup() {
   //Pull SDA/SCL to idle-high before anything can glitch them - the Unit's TWI hardware doesn't
   //reset when the ESP does and stays armed/listening.
   pinMode(I2C_SDA_PIN, INPUT_PULLUP);
   pinMode(I2C_SCL_PIN, INPUT_PULLUP);
 
-  //Load the debug-mode flag before the first blinkLed() call - some blink codes fire before the
-  //normal filesystem-init point.
+  //Load the debug-mode flag as early as possible - gates the startup debug page/error panel/
+  //page-load log further down, all of which can otherwise render before this is known.
 #if DEBUG_ENABLE == true
   if (LittleFS.begin()) {
     showDebugPage = (readFile(LittleFS, debugModePath, "false") == "true");
@@ -741,7 +736,6 @@ void setup() {
 #if LED_ENABLE == true
   pinMode(LED_DEBUG_PIN, OUTPUT);
   ledOff();
-  blinkLed(1, 100, 50); // Quick blink to show startup
 #endif
 
   // First I2C scan is deferred to loop() (firstUnitScanDone block there), 30s after boot to give
@@ -756,21 +750,18 @@ void setup() {
   //Load and read all the things
   debugStatus = "WiFi Init";
   SerialPrintln(F("DEBUG: Status = ") + debugStatus);
-  blinkLed(1, 200, 100); // 1 blink = WiFi connecting
   initWiFi();
   
   //Helpful if want to force reset WiFi settings for testing
   //wifiManager.resetSettings();
 
   if (isWifiConfigured && !isPendingReboot) {
-    blinkLed(2, 200, 100); // 2 blinks = WiFi connected
     debugStatus = "WiFi Connected";
     SerialPrintln(F("DEBUG: Status = ") + debugStatus);
-    
+
     //ezTime initialization - NON-BLOCKING with timeout
     debugStatus = "NTP Sync Starting";
     SerialPrintln(F("DEBUG: Status = ") + debugStatus);
-    blinkLed(3, 200, 100); // 3 blinks = NTP syncing
 
     //ezTime's own auto-sync (events()-driven updateNTP()) is fully disabled - setInterval(0)
     //makes events() a permanent no-op (see ezTime.cpp: "if (_ntp_interval) updateNTP();"). Our own
@@ -801,21 +792,18 @@ void setup() {
     }
     
     if (timeStatus() == timeSet) {
-      blinkLed(4, 200, 100); // 4 blinks = NTP sync success
       debugStatus = "NTP Sync Success";
       SerialPrintln(F("DEBUG: Status = ") + debugStatus);
       SerialPrintln(F("DEBUG: NTP sync successful!"));
     } else {
-      blinkLed(5, 200, 100); // 5 blinks = NTP sync failed
       debugStatus = "NTP Sync Failed";
       SerialPrintln(F("DEBUG: Status = ") + debugStatus);
       SerialPrintln(F("DEBUG: WARNING - NTP sync failed or timed out, continuing anyway"));
     }
-    
+
     //Load various variables
     debugStatus = "File System Init";
     SerialPrintln(F("DEBUG: Status = ") + debugStatus);
-    blinkLed(6, 200, 100); // 6 blinks = File system init
     initialiseFileSystem();
     loadValuesFromFileSystem();
     //See ServiceCrashLogFunctions.ino - must run after LittleFS mounts. Also called from the
@@ -841,17 +829,16 @@ void setup() {
     bootTimezoneLookupPending = true; //see its own comment - lets loop() retry this specific attempt on failure
     SerialPrintln(F("DEBUG: Timezone lookup started (non-blocking) for: ") + timezoneSetting);
     
-    // Debug mode was already loaded at the very top of setup(), before the earlier blinkLed()
-    // calls - just log the already-known value here.
+    // Debug mode was already loaded at the very top of setup() - just log the already-known
+    // value here.
 #if DEBUG_ENABLE == true
-    SerialPrintln(F("DEBUG: Debug mode: ") + String(showDebugPage ? F("enabled") : F("disabled")) + F(" (controls startup page, error status, page load log, LED blink codes, and serial log)"));
+    SerialPrintln(F("DEBUG: Debug mode: ") + String(showDebugPage ? F("enabled") : F("disabled")) + F(" (controls startup page, error status, page load log, and serial log)"));
 #endif
 
     //Web Server Endpoint configuration
     debugStatus = "Web Server Setup";
     SerialPrintln(F("DEBUG: Status = ") + debugStatus);
-    blinkLed(7, 200, 100); // 7 blinks = Web server starting
-    
+
     //Was `webServer.serveStatic("/", LittleFS, "/")` - a filesystem-wide static route. The only
     //real static asset is index.html(.gz), already served explicitly below (GET "/") - the
     //favicon is an embedded base64 data URI in that same HTML, no separate file. This catch-all
@@ -2944,7 +2931,6 @@ void setup() {
     initMqtt();
 #endif
 
-    blinkLed(8, 200, 100); // 8 blinks = Web server ready
     debugStatus = "Ready";
     SerialPrintln(F("DEBUG: Status = ") + debugStatus);
     SerialPrintln(F("Split Flap Ready!"));
