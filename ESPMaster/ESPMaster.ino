@@ -15,6 +15,12 @@
                                     //is auto-detected at startup via scanI2CBus()
 #define SERIAL_BAUDRATE     115200
 #define WIFI_USE_DIRECT     false  //false = AP config portal (WiFiManager), true = direct connect
+#define USE_MULTICAST       true   //broadcast a "<mdnsName>.local" hostname on the local network
+                                   //(found missing vs. the real upstream, JonnyBooker/split-flap
+                                   //commit b3465b1/PR #30 - our fork branched off an earlier point
+                                   //via the scientress fork and never picked this up). If running
+                                   //more than one display on the same network, mdnsName below must
+                                   //be unique per device.
 #define LED_ENABLE          true
 #define DEBUG_ENABLE true  //startup debug page, error panel, page-load log, serial debug log,
                            //and whether LED_ENABLE actually blinks - gated at runtime by
@@ -70,6 +76,9 @@
 #include <ESPAsyncTCP.h>
 #include <ESPAsyncWebSrv.h>
 #include <ESP8266WiFi.h>
+#if USE_MULTICAST == true
+#include <ESP8266mDNS.h>
+#endif
 #include <ezTime.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
@@ -85,6 +94,12 @@
 #include "LittleFS.h"
 
 //--- User-facing settings ---
+//Hostname broadcast via mDNS when USE_MULTICAST is enabled - reachable as "<mdnsName>.local" on
+//networks whose clients support mDNS (most desktop OSes and phones; not universal on all routers/
+//IoT-only networks). Only one device on this repo's hardware exists so far - no uniqueness
+//conflict today, but change this if a second display ever joins the same network.
+const char* mdnsName = "split-flap";
+
 //Used if connecting via "WIFI_USE_DIRECT" of "true" - Otherwise, leave blank
 const char* wifiDirectSsid = "";
 const char* wifiDirectPassword = "";
@@ -2559,7 +2574,15 @@ void setup() {
 
     delay(250);
     webServer.begin();
-    
+
+#if USE_MULTICAST == true
+    if (MDNS.begin(mdnsName)) {
+      SerialPrintln(F("DEBUG: mDNS responder started - reachable as ") + String(mdnsName) + F(".local"));
+    } else {
+      SerialPrintln(F("DEBUG: mDNS responder failed to start"));
+    }
+#endif
+
     blinkLed(8, 200, 100); // 8 blinks = Web server ready
     debugStatus = "Ready";
     SerialPrintln(F("DEBUG: Status = ") + debugStatus);
@@ -2587,6 +2610,10 @@ void setup() {
 }
 
 void loop() {
+#if USE_MULTICAST == true
+  MDNS.update();
+#endif
+
   //First I2C scan, delayed 30s after boot (see setup()) - runs here instead of blocking setup(),
   //so WiFi/the web server start immediately. Fires exactly once.
   static bool firstUnitScanDone = false;

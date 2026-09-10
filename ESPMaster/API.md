@@ -5,8 +5,10 @@ endpoint layout.
 
 ## Conventions
 
-- **Base URL**: `http://<device-ip>/` (mDNS/hostname not currently configured - find the IP via
-  your router's DHCP client list, or the serial log at boot).
+- **Base URL**: `http://<device-ip>/`, or `http://split-flap.local/` on networks/clients that
+  support mDNS (most desktop OSes and phones; not universal on IoT-only networks/routers) - added
+  2026-09-10, `mdnsName` in `ESPMaster.ino`. Falls back to the router's DHCP client list or the
+  serial log at boot if mDNS resolution doesn't work on your network.
 - **Auth**: a single password protects state-changing endpoints, via an `X-OTA-Password` header.
   It can be turned off entirely (empty password - every endpoint below, including firmware/flash,
   becomes unauthenticated) or scoped down category-by-category while still set - see
