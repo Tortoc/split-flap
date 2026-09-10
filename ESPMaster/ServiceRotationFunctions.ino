@@ -25,12 +25,24 @@ void checkRotation() {
   int durationSeconds = item.DurationSeconds > 0 ? item.DurationSeconds : 5;
 
   //Defense-in-depth against a permanently-stuck item (CODE_REVIEW_V3.md #13, see
-  //rotationItemElapsedRealSeconds' own comment) - counts every tick regardless of acceptance, so
-  //it keeps climbing even while rotationItemAcceptedSeconds itself never moves. A generous grace
-  //period past the item's own configured duration distinguishes "genuinely just slow to render"
-  //(large flap-position change, multi-line item) from "will never succeed" without being
-  //trigger-happy about ordinary rendering delays.
-  rotationItemElapsedRealSeconds++;
+  //rotationItemElapsedRealSeconds' own comment) - a generous grace period past the item's own
+  //configured duration distinguishes "genuinely just slow to render" from "will never succeed"
+  //without being trigger-happy about ordinary rendering delays.
+  //
+  //Only counts a tick while the display is actually IDLE going into it, not unconditionally every
+  //tick (found 2026-09-10, CODE_REVIEW_V4.md #8): a job legitimately still busy rendering this
+  //item - a multi-line item with per-line pauses, or a large staggered animation across many
+  //units, both easily exceeding durationSeconds+30 in total - is proof of ongoing progress, not
+  //neglect, and must not be treated the same as an item whose showText() call keeps being
+  //rejected outright with the display sitting idle. isDisplayJobBusy() here reflects whatever job
+  //is still running from the end of the PREVIOUS tick's showText() call (loop()'s per-second
+  //block calls checkRotation() before its own showText() call for this same tick) - and, as a
+  //side effect, also correctly covers a foreign temporary message (e.g. a scheduled message)
+  //displacing the rotation: that keeps the display busy too, so it doesn't eat into this budget
+  //either, matching the review's own recommendation not to spend it on someone else's message.
+  if (!isDisplayJobBusy()) {
+    rotationItemElapsedRealSeconds++;
+  }
   #define ROTATION_STUCK_ITEM_GRACE_SECONDS 30
   if (rotationItemElapsedRealSeconds > (unsigned long)durationSeconds + ROTATION_STUCK_ITEM_GRACE_SECONDS) {
     SerialPrintln(F("Rotation item ") + String(rotationCurrentIndex) + F(" stuck (no accepted render within ") +

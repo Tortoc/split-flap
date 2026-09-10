@@ -1,11 +1,20 @@
-//Replace/add a scheduled message and persist the result afterwards
-void addAndPersistScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool showIndefinitely) {
-  addScheduledMessage(scheduledText, scheduledDateTimeUnix, showIndefinitely);
-  writeScheduledMessagesToFile();
+//Replace/add a scheduled message and persist the result afterwards - returns false (and skips the
+//write, nothing changed) if the message was rejected as already due/in the past, same reasoning
+//as addScheduledMessage() below (found 2026-09-10, CODE_REVIEW_V4.md #12).
+bool addAndPersistScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool showIndefinitely) {
+  bool added = addScheduledMessage(scheduledText, scheduledDateTimeUnix, showIndefinitely);
+  if (added) {
+    writeScheduledMessagesToFile();
+  }
+  return added;
 }
 
-//Replace/add a scheduled message
-void addScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool showIndefinitely) {
+//Replace/add a scheduled message. Returns whether it was actually added - found 2026-09-10,
+//CODE_REVIEW_V4.md #12: this used to be void, silently no-op'ing (just a serial log line) for a
+//past-due timestamp while its caller (POST /api/settings' handler) had no way to know and always
+//answered 200 "OK" regardless - a schedule request with a timestamp that's already passed (or
+//passes before this runs) looked successful to the client but nothing was actually scheduled.
+bool addScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool showIndefinitely) {
   SerialPrintln(F("Processing New Scheduled Message"));
   SerialPrintln(F("-- Message: ") + scheduledText);
   SerialPrint(F("-- Unix: "));
@@ -37,9 +46,11 @@ void addScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool 
   if (scheduledDateTimeUnix > getRealUtcNow()) {
     SerialPrintln(F("Adding new Scheduled Message"));
     scheduledMessages.add({scheduledText, scheduledDateTimeUnix, showIndefinitely});
+    return true;
   }
   else {
     SerialPrintln(F("Not adding Scheduled Message as it is in the past"));
+    return false;
   }
 }
 

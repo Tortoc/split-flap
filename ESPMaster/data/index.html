@@ -2126,7 +2126,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					case "text":
 						//Encode chars that don't translate directly to unused unicode stand-ins #, $, &
 						var inputTextValue = document.getElementById('inputText').value;
-						encodedTextValue = inputTextValue.replace(/ä/gi, '$').replace(/ö/gi, '&').replace(/ü/gi, '#');
+						encodedTextValue = encodeUmlautPlaceholders(inputTextValue);
 
 						var currentScheduledDateTimeText = document.getElementById('inputScheduledDateTime').value;
 						var time = scheduledDateTimeStringToUtcSeconds(currentScheduledDateTimeText);
@@ -2240,20 +2240,36 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 
 		// Request and retrieve settings from ESP-01s filesystem
-		function loadPage() {
-			//Set date time fields to be a minimum of today's device-local date/time + 1 minute -
-			//found 2026-09-10, CODE_REVIEW_V3.md #6: the old "shift by timezoneOffset, then read
-			//with the browser's own local getters" approach double-applies the shift once
-			//timezoneOffset is already populated - which it is on every loadPage() call AFTER the
-			//first settings fetch, since this function runs again after every settings submission.
-			//formatUnixSecondsForDeviceTimezone() already handles both states correctly (falls back
-			//to a safe UTC-getter-based shift before deviceTimezoneName is known yet, uses the real
-			//IANA zone once it is - see its own comment).
+		//Set date time fields to be a minimum of today's device-local date/time + 1 minute -
+		//found 2026-09-10, CODE_REVIEW_V3.md #6: the old "shift by timezoneOffset, then read
+		//with the browser's own local getters" approach double-applies the shift once
+		//timezoneOffset is already populated - which it is on every loadPage() call AFTER the
+		//first settings fetch, since this function runs again after every settings submission.
+		//formatUnixSecondsForDeviceTimezone() already handles both states correctly (falls back
+		//to a safe UTC-getter-based shift before deviceTimezoneName is known yet, uses the real
+		//IANA zone once it is - see its own comment).
+		//
+		//Extracted into its own function and called a SECOND time once the /settings response
+		//actually populates timezoneOffset/deviceTimezoneName (found 2026-09-10,
+		//CODE_REVIEW_V4.md #9): loadPage()'s FIRST call on initial page load always runs before
+		//that response arrives, back when both are still at their unset defaults
+		//(timezoneOffset=0, deviceTimezoneName="") - so the very first prefill was silently
+		//computed in UTC instead of the device's real timezone, and never got recomputed
+		//afterward since nothing called this loop again until the next full loadPage() (a
+		//settings submission). No "was this field already edited by the user" guard is needed for
+		//the second call: the whole form (this field included) stays hidden via showContent()
+		//until after this same response is fully processed, so there is no window in which a user
+		//could have touched it first.
+		function prefillDateTimeLocalDefaults() {
 			var nowPlus1MinUnix = Math.floor(Date.now() / 1000) + 60;
 			document.querySelectorAll('input[type="datetime-local"]').forEach((dateTimeElement) => {
 				var currentDateTime = formatUnixSecondsForDeviceTimezone(nowPlus1MinUnix, false);
 				dateTimeElement.value = dateTimeElement.min = currentDateTime;
 			});
+		}
+
+		function loadPage() {
+			prefillDateTimeLocalDefaults();
 
 			if (localDevelopment) {
 				setSpeed("80");
@@ -2305,6 +2321,9 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 								timezoneOffset = responseObject.timezoneOffset;
 								deviceTimezoneName = responseObject.timezone || "";
+								//Recompute now that the real timezone is known - see
+								//prefillDateTimeLocalDefaults()'s own comment (CODE_REVIEW_V4.md #9).
+								prefillDateTimeLocalDefaults();
 
 								setSpeed(responseObject.flapSpeed);
 								setSavedMode(responseObject.deviceMode);
@@ -2316,7 +2335,10 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 								//into every second - only trustworthy as "what the user actually typed for Text
 								//mode" while deviceMode is really "text", so only populate the field then.
 								if (responseObject.deviceMode === "text") {
-									document.getElementById('inputText').value = responseObject.inputText || "";
+									//decodeUmlautPlaceholders(): found 2026-09-10, CODE_REVIEW_V4.md #11 -
+									//without it, a saved "MÄRZ" reappeared here as "M$RZ" (the internal,
+									//encoded form form.onsubmit sends, see encodeUmlautPlaceholders()'s comment).
+									document.getElementById('inputText').value = decodeUmlautPlaceholders(responseObject.inputText || "");
 									updateCharacterCount();
 								}
 								setAlignment(responseObject.alignment);
@@ -2521,12 +2543,27 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				if (!tab.classList.contains("hidden")) {
 					tab.classList.add("hidden");
 				}
+				//Exclude every INACTIVE tab's own fields from the form's native constraint
+				//validation (found 2026-09-10, CODE_REVIEW_V4.md #10) - tabs are only CSS-hidden,
+				//so a field the user isn't even looking at can still block a normal submit from a
+				//completely different, active tab if the browser considers it invalid (e.g.
+				//Countdown's date field once its stored target day arrives - see
+				//setCountdownDate()'s own fix above for that specific case). A `disabled` form
+				//control is excluded from constraint validation (and from the submitted data) by
+				//spec, unlike a merely hidden one - reading its .value from JS elsewhere
+				//(pendingCountdownDateOverride etc.) is unaffected either way.
+				tab.querySelectorAll('input, select, textarea').forEach(function(field) {
+					field.disabled = true;
+				});
 			});
 
 			var tabName = `tab-${mode}`;
 			var tab = document.getElementById(tabName);
 			if (tab !== null) {
 				tab.classList.remove("hidden");
+				tab.querySelectorAll('input, select, textarea').forEach(function(field) {
+					field.disabled = false;
+				});
 			}
 
 			//Rotation items live behind their own endpoint - fetch fresh whenever this tab opens.
@@ -2653,7 +2690,15 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				var countdownDateStr = formatUnixSecondsForDeviceTimezone(dateUnix, true);
 				if (countdownDateStr >= todayStr) { //ISO date strings compare correctly lexically
 					currentCountdownDate.value = countdownDateStr;
-					currentCountdownDate.min = nextDayStr;
+					//min must never exceed the value being restored (found 2026-09-10,
+					//CODE_REVIEW_V4.md #10): forcing tomorrow as the floor even when the STORED
+					//countdown is exactly today made the field - and via it, the whole form, since
+					//tabs are only CSS-hidden, not excluded from validation on their own (see the
+					//setDeviceModeTab() fix for that half) - immediately invalid on the countdown's
+					//own target day. A stored value of exactly today keeps today as its own floor;
+					//anything further out still gets tomorrow, since a NEW pick (the other branch
+					//below) still shouldn't allow "today" - a 0-day countdown doesn't make sense.
+					currentCountdownDate.min = countdownDateStr > todayStr ? nextDayStr : todayStr;
 					return;
 				}
 			}
@@ -3231,7 +3276,10 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				timeElement.innerText = formatUnixSecondsHumanReadable(scheduledMessage.scheduledDateTimeUnix);
 
 				//message is user-supplied - must stay escaped, this goes into innerHTML (XSS otherwise).
-				var message = `<b>Message:</b> ${scheduledMessage.message.trim() == "" ? "<Blank>" : escapeHtml(scheduledMessage.message)}`
+				//decodeUmlautPlaceholders() here too, same reasoning/finding as the main text field
+				//restore above (CODE_REVIEW_V4.md #11) - a scheduled message goes through the exact
+				//same encode-before-submit path (form.onsubmit's "text" case).
+				var message = `<b>Message:</b> ${scheduledMessage.message.trim() == "" ? "<Blank>" : escapeHtml(decodeUmlautPlaceholders(scheduledMessage.message))}`
 				var isIndefinitely = `<b>Shown Indefinitely:</b> ${scheduledMessage.showIndefinitely ? "Yes" : "No"}`;
 
 				var textElement = document.createElement("span");
@@ -3261,6 +3309,24 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 			elementInitialLoading.classList.add("hidden");
 			elementContent.classList.remove("hidden");
+		}
+
+		//Encodes ä/ö/ü (any case) into the internal single-byte stand-ins #, $, & the device's own
+		//protocol/character set uses (Unit.ino's `letters[]` has no lowercase entries at all, so
+		//case is intentionally not preserved here). Shared by form.onsubmit above.
+		function encodeUmlautPlaceholders(text) {
+			return (text || "").replace(/ä/gi, '$').replace(/ö/gi, '&').replace(/ü/gi, '#');
+		}
+
+		//Reverses encodeUmlautPlaceholders() for display - found 2026-09-10, CODE_REVIEW_V4.md #11:
+		//text round-tripped through the server (GET /api/settings' inputText, and a scheduled
+		//message's own stored text) was shown back to the user with the raw internal placeholders
+		//still in it (e.g. "MÄRZ" saved, then "M$RZ" shown after a reload) instead of the umlaut the
+		//physical flaps actually display. Always decodes to the UPPERCASE umlaut, matching both the
+		//device's own uppercase-only character set and the fact that the forward encode above is
+		//case-insensitive, so the original case isn't recoverable anyway.
+		function decodeUmlautPlaceholders(text) {
+			return (text || "").replace(/\$/g, 'Ä').replace(/&/g, 'Ö').replace(/#/g, 'Ü');
 		}
 
 		function escapeHtml(text) {

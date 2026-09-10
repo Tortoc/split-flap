@@ -1124,6 +1124,11 @@ void setup() {
       //forever) once due (found 2026-09-09, CODE_REVIEW_V2.md #10). Same "reject, don't silently
       //drop/accept" pattern as rotationItemsUpdateRejected above.
       bool scheduledMessageRejected = false;
+      //Distinct human-readable detail for scheduledMessageRejected, since it's now set for two
+      //different reasons (too long to render, or a past-due timestamp - see
+      //addAndPersistScheduledMessage()'s new return value below, CODE_REVIEW_V4.md #12) that
+      //deserve different explanations in the final response.
+      String scheduledMessageRejectionReason = "";
 
       //Separate declarations - `bool a, b = false;` only initializes b, not a.
       bool newMessageScheduleEnabledValue = false;
@@ -1476,8 +1481,19 @@ void setup() {
           if (isMessageTooLongToRender(newInputTextValue)) {
             SerialPrintln(F("Scheduled Message rejected: needs more lines than fit, would never actually show"));
             scheduledMessageRejected = true;
+            scheduledMessageRejectionReason = "the scheduled message needs more lines than fit and was NOT scheduled - it would never actually show.";
+          } else if (!addAndPersistScheduledMessage(newInputTextValue, newMessageScheduleDateTimeUnixValue, newMessageScheduleShowIndefinitely)) {
+            //Found 2026-09-10, CODE_REVIEW_V4.md #12: addAndPersistScheduledMessage()'s return
+            //value used to be ignored entirely - a timestamp that's already due/in the past (the
+            //request only checked it was numeric, never that it was actually in the future) was
+            //silently dropped while this handler still answered 200 "OK" as if it had been
+            //scheduled. Can happen with a maliciously/accidentally crafted request, or legitimately
+            //if a very soon deadline passes in the time between the browser prefilling the field
+            //and this request actually being processed (see CODE_REVIEW_V4.md #9's related fix).
+            SerialPrintln(F("Scheduled Message rejected: date/time is not in the future"));
+            scheduledMessageRejected = true;
+            scheduledMessageRejectionReason = "the scheduled date/time has already passed and was NOT scheduled - pick a time in the future.";
           } else {
-            addAndPersistScheduledMessage(newInputTextValue, newMessageScheduleDateTimeUnixValue, newMessageScheduleShowIndefinitely);
             SerialPrintln(F("New Scheduled Message added"));
           }
         }
@@ -1504,11 +1520,13 @@ void setup() {
         }
 
         if (rotationItemsUpdateRejected && scheduledMessageRejected) {
-          request->send(400, "text/plain", "OK, but the submitted rotation items were rejected (invalid JSON, or a text item needs more lines than fit) AND the scheduled message needs more lines than fit - neither was applied.");
+          request->send(400, "text/plain", "OK, but the submitted rotation items were rejected (invalid JSON, or a text item needs more lines than fit) AND " + scheduledMessageRejectionReason);
         } else if (rotationItemsUpdateRejected) {
           request->send(400, "text/plain", "OK, but the submitted rotation items were rejected (invalid JSON, or a text item needs more lines than fit to ever display) and were NOT applied - the existing rotation list is unchanged.");
         } else if (scheduledMessageRejected) {
-          request->send(400, "text/plain", "OK, but the scheduled message needs more lines than fit and was NOT scheduled - it would never actually show.");
+          //scheduledMessageRejectionReason (found 2026-09-10, CODE_REVIEW_V4.md #12) now carries
+          //one of two distinct explanations - see where it's set above.
+          request->send(400, "text/plain", "OK, but " + scheduledMessageRejectionReason);
         } else {
           request->send(200, "text/plain", "OK");
         }
@@ -2791,31 +2809,45 @@ void setup() {
       // request->method() == HTTP_POST
       if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
 
-      //Same HTML-checkbox semantics as the accessControl* toggles - present = true, absent = false.
-      mqttEnabled = request->hasParam("enabled", true);
-      writeFile(LittleFS, mqttEnabledPath, mqttEnabled ? "true" : "false");
-
-      if (request->hasParam("brokerHost", true)) {
-        mqttBrokerHost = request->getParam("brokerHost", true)->value();
-        writeFile(LittleFS, mqttBrokerHostPath, mqttBrokerHost.c_str());
-      }
+      //Validate EVERYTHING into local temporaries before touching any persisted/live state -
+      //found 2026-09-10, CODE_REVIEW_V4.md #4: this used to mutate and persist mqttEnabled/
+      //mqttBrokerHost, THEN validate brokerPort - a request with a valid host but an invalid port
+      //got 400, yet the host change (and its file write) had already happened. Worse,
+      //applyMqttSettingsChange() (the only place that re-points the live PubSubClient's
+      //setServer() at mqttBrokerHost's CURRENT buffer) never ran on that early return, so the
+      //client kept using whatever raw pointer an earlier setServer() call had captured - if
+      //mqttBrokerHost's String reallocated its buffer on that partial reassignment (as String
+      //commonly does), the client was left holding a dangling pointer into freed memory. Now: on
+      //any validation failure, nothing has changed at all; on success, every field is applied and
+      //persisted together, immediately followed by the one applyMqttSettingsChange() call that
+      //refreshes the client's server pointer against the final, current buffer.
+      bool newMqttEnabled = request->hasParam("enabled", true); //same checkbox semantics as accessControl*
+      String newBrokerHost = request->hasParam("brokerHost", true) ? request->getParam("brokerHost", true)->value() : mqttBrokerHost;
+      uint16_t newBrokerPort = mqttBrokerPort;
       if (request->hasParam("brokerPort", true)) {
         String rawPort = request->getParam("brokerPort", true)->value();
         if (!isNumber(rawPort) || rawPort.toInt() < 1 || rawPort.toInt() > 65535) {
           request->send(400, "text/plain", "'brokerPort' must be a number 1-65535");
           return;
         }
-        mqttBrokerPort = rawPort.toInt();
-        writeFile(LittleFS, mqttBrokerPortPath, String(mqttBrokerPort).c_str());
+        newBrokerPort = rawPort.toInt();
       }
-      if (request->hasParam("username", true)) {
-        mqttUsername = request->getParam("username", true)->value();
-        writeFile(LittleFS, mqttUsernamePath, mqttUsername.c_str());
-      }
+      String newUsername = request->hasParam("username", true) ? request->getParam("username", true)->value() : mqttUsername;
       //Same "present decides, absent means unchanged, empty explicitly clears" convention as
       //otaPassword's newPassword - see that comment.
-      if (request->hasParam("password", true)) {
-        mqttPassword = request->getParam("password", true)->value();
+      bool passwordProvided = request->hasParam("password", true);
+      String newPassword = passwordProvided ? request->getParam("password", true)->value() : mqttPassword;
+
+      mqttEnabled = newMqttEnabled;
+      writeFile(LittleFS, mqttEnabledPath, mqttEnabled ? "true" : "false");
+      mqttBrokerHost = newBrokerHost;
+      writeFile(LittleFS, mqttBrokerHostPath, mqttBrokerHost.c_str());
+      mqttBrokerPort = newBrokerPort;
+      writeFile(LittleFS, mqttBrokerPortPath, String(mqttBrokerPort).c_str());
+      mqttUsername = newUsername;
+      writeFile(LittleFS, mqttUsernamePath, mqttUsername.c_str());
+      if (passwordProvided) {
+        mqttPassword = newPassword;
         writeFile(LittleFS, mqttPasswordPath, mqttPassword.c_str());
       }
 
@@ -3258,23 +3290,36 @@ void loop() {
 
   // Separate from the block above on purpose: the flash-side result and the deferred request can
   // become ready in either order.
-  if (otaResultReady && pendingFirmwareUploadSlot.request != nullptr) {
-    std::shared_ptr<std::atomic<bool>> disconnected;
-    AsyncWebServerRequest* deferredRequest = pendingFirmwareUploadSlot.take(disconnected);
-
-    if (PendingRequestSlot::stillConnected(disconnected)) {
-      AsyncWebServerResponse* response = deferredRequest->beginResponse(otaResultSuccess ? 200 : 500, "text/plain", otaResultMessage);
-      response->addHeader("Connection", "close");
-      deferredRequest->send(response);
-    }
-
-    otaResultReady = false;
+  //
+  // Gated on otaResultReady ALONE now, not "otaResultReady && pendingFirmwareUploadSlot.request !=
+  // nullptr" (found 2026-09-10, CODE_REVIEW_V4.md #13): /api/firmware-finish's client can disconnect
+  // right after the request is accepted but before this loop() tick runs - PendingRequestSlot's own
+  // onDisconnect callback (see its accept() comment) already nulls the slot's request pointer at
+  // that point, which used to skip this WHOLE block, reboot-flagging included, even though
+  // Update.end() had already genuinely succeeded and the new firmware was already active. Whether
+  // to actually SEND the HTTP response legitimately depends on a request still being there to send
+  // it to - whether to flag the reboot must not, since the flash write itself doesn't care whether
+  // anyone is still listening for its result.
+  if (otaResultReady) {
     if (otaResultSuccess && otaCompletedPhase == OTA_PHASE_FINISH) {
       SerialPrintln(F("Firmware update successful, rebooting..."));
       isPendingReboot = true;
     } else if (!otaResultSuccess) {
       SerialPrintln(F("Firmware update failed"));
     }
+
+    if (pendingFirmwareUploadSlot.request != nullptr) {
+      std::shared_ptr<std::atomic<bool>> disconnected;
+      AsyncWebServerRequest* deferredRequest = pendingFirmwareUploadSlot.take(disconnected);
+
+      if (PendingRequestSlot::stillConnected(disconnected)) {
+        AsyncWebServerResponse* response = deferredRequest->beginResponse(otaResultSuccess ? 200 : 500, "text/plain", otaResultMessage);
+        response->addHeader("Connection", "close");
+        deferredRequest->send(response);
+      }
+    }
+
+    otaResultReady = false;
   }
 #endif
 

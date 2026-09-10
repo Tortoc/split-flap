@@ -330,16 +330,60 @@ int translateLettertoInt(char letterchar) {
   return -1;
 }
 
+//Approximate letter-space position of the Hall marker, given the current calibration offset -
+//found 2026-09-10, CODE_REVIEW_V4.md #6. calibrate() defines letter 0 as calOffset STEPS past the
+//marker (see its own stepper.step(offsetSnapshot) call), so the marker itself sits calOffset
+//steps BEHIND letter 0 - converting that to letter-space and wrapping into [0, AMOUNTFLAPS) gives
+//its approximate letter index. Deliberately as coarse as stepLetters()'s own plausibility check
+//below (per letter-position, not per microstep) - it only needs to be right to within about one
+//letter-position's worth of steps.
+int markerLetterIndex() {
+  float stepsPerLetter = (float)STEPS / (float)AMOUNTFLAPS;
+  uint16_t offsetSnapshot;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    offsetSnapshot = calOffset;
+  }
+  int offsetLetters = ((int)round((float)offsetSnapshot / stepsPerLetter)) % AMOUNTFLAPS;
+  return (AMOUNTFLAPS - offsetLetters) % AMOUNTFLAPS;
+}
+
 //Moves the drum forward by `letterSteps` letter-positions, ramping speed at both ends instead of
 //jumping straight to full stepperSpeed / braking abruptly: RAMP_UP_LETTERS at the very start,
 //RAMP_DOWN_LETTERS at the very end (see both constants' own comments) - whichever ramp is more
 //conservative at a given position wins, which also handles short moves where both windows overlap
 //without any special-casing. Shared by both rotateToLetter() branches (direct move, and the
 //post-calibration full-rotation move) - both only ever call this with letterSteps < AMOUNTFLAPS
-//(diffPosition/posLetter are always 0..44), so a single call here never covers a full revolution
-//and, once already homed, should therefore never cross the home marker again - see the hall-sensor
-//check below (found missing 2026-09-10, see unexpectedHomeTriggerCount's own comment).
-void stepLetters(int letterSteps) {
+//(diffPosition/posLetter are always 0..44), so a single call here never covers a full revolution.
+//
+//`startLetter` is the absolute letter index this specific move starts FROM (-1 for the
+//post-calibration full-rotation call, which always starts fresh right at letter 0, immediately
+//after calibrate() itself just left the marker behind - a move of well under one AMOUNTFLAPS from
+//there can never reach back around to it, so -1 there keeps every marker reading anomalous,
+//unchanged from before). For a "direct" move (rotateToLetter()'s other branch), it's NOT always
+//true that "once already homed, this never crosses the home marker again" (found 2026-09-10,
+//CODE_REVIEW_V4.md #6 - the previous version of this comment claimed exactly that): calOffset can
+//place the marker's own letter-space position (see markerLetterIndex() above) ANYWHERE within the
+//0..AMOUNTFLAPS-1 range, not necessarily exactly at the 0/AMOUNTFLAPS-1 boundary, so a direct move
+//that happens to span across it is a perfectly legitimate crossing, not a bumped-drum/slipped-step
+//anomaly - see the hall-sensor check below (found missing 2026-09-10, see
+//unexpectedHomeTriggerCount's own comment) for how this is now taken into account.
+void stepLetters(int letterSteps, int startLetter) {
+  //Precompute the one loop iteration `i` (if any) within THIS move where the marker is
+  //legitimately expected, so the check below can tell "the marker was crossed exactly where
+  //calOffset says it should be" apart from "the marker showed up somewhere it has no business
+  //being". Iteration i steps the drum from absolute letter (startLetter+i) to (startLetter+i+1)
+  //and checks HALLPIN right after - so the marker (at markerLetterIndex()) is expected to be seen
+  //during iteration i = markerLetterIndex()-startLetter-1, INCLUSIVE of the last iteration
+  //(letterSteps-1, i.e. the marker sitting exactly at the target letter itself is a valid, in-range
+  //crossing, not one-past-the-end).
+  int expectedCrossingStep = -1;
+  if (startLetter >= 0) {
+    int crossingIndex = markerLetterIndex() - startLetter - 1;
+    if (crossingIndex >= 0 && crossingIndex < letterSteps) {
+      expectedCrossingStep = crossingIndex;
+    }
+  }
+
   stepper.setSpeed(stepperSpeed);
 
   for (int i = 0; i < letterSteps; i++) {
@@ -386,13 +430,22 @@ void stepLetters(int letterSteps) {
     //brief sensor blip entirely inside one step() call could still be missed - an accepted
     //limitation, not a claim of full per-microstep coverage (see the plan's own "Unsicherheiten").
     if (digitalRead(HALLPIN) == 0) {
-      //Marker seen where none should be, mid-move (see this function's own header comment for why
-      //a single call never legitimately covers a full revolution). Don't abort THIS move - just
-      //flag it and let the existing loop()/CODE_REVIEW_V3.md #4 dispatch self-heal via a full
-      //recalibration on the next iteration, instead of adding a new abort path to this tight
-      //timing loop.
-      unexpectedHomeTriggerCount++;
-      positionKnown = false;
+      //Allow one letter-position's worth of slack around the precomputed expected crossing point
+      //(found 2026-09-10, CODE_REVIEW_V4.md #6) - this check only samples once per letter-position
+      //to begin with (see this function's own header comment), so it can't pin the crossing down
+      //to single-microstep precision, and the ramp-adjusted step size right at RAMP_UP_LETTERS/
+      //RAMP_DOWN_LETTERS boundaries isn't perfectly uniform either.
+      bool expectedHere = (expectedCrossingStep >= 0) && (abs(i - expectedCrossingStep) <= 1);
+      if (!expectedHere) {
+        //Marker seen where none should be, mid-move (see this function's own header comment for
+        //why a single call never legitimately covers a full revolution, and why a crossing AT the
+        //calibration offset's own expected position is not itself anomalous). Don't abort THIS
+        //move - just flag it and let the existing loop()/CODE_REVIEW_V3.md #4 dispatch self-heal
+        //via a full recalibration on the next iteration, instead of adding a new abort path to
+        //this tight timing loop.
+        unexpectedHomeTriggerCount++;
+        positionKnown = false;
+      }
     }
   }
 }
@@ -425,7 +478,7 @@ void rotateToLetter(int toLetter) {
         //go directly to next letter, get steps from current letter to target letter
         int diffPosition = posLetter - posCurrentLetter;
         startMotor();
-        stepLetters(diffPosition);
+        stepLetters(diffPosition, posCurrentLetter);
       }
       else {
         //full rotation is needed, good time for a calibration
@@ -439,16 +492,24 @@ void rotateToLetter(int toLetter) {
         //and unconditionally claimed displayedLetter=toLetter anyway, as if the rotation had
         //genuinely succeeded. Abort instead: leave displayedLetter at calibrate()'s own reset
         //value (0) rather than lying about having reached toLetter. loop()'s existing
-        //`displayedLetter != receivedNumber` retry naturally tries again on the next call (gated
-        //by the same OVERHEATINGTIMEOUT cooldown as every other rotation attempt, so this can't
-        //spin tightly) - a lightweight, self-retrying "error state" rather than a new persistent
-        //lockout that would need its own explicit clear/reporting mechanism.
+        //`displayedLetter != receivedNumber` retry naturally tries again on the next call.
         if (calibrate(false) == -1) {
+          //Re-stamp lastRotation HERE, not just at this function's own entry above (found
+          //2026-09-10, CODE_REVIEW_V4.md #7): the OVERHEATINGTIMEOUT cooldown is measured from
+          //lastRotation, which was set at the START of this attempt - but a failed calibrate()
+          //search can itself run for up to 3*STEPS steps (well over OVERHEATINGTIMEOUT's 2s worth
+          //of stepping), meaning the cooldown window can already be fully expired again by the
+          //time this function returns. Without this, the very next loop() iteration immediately
+          //starts another full failed search with no actual rest for the motor in between,
+          //defeating the whole point of OVERHEATINGTIMEOUT. Re-stamping restarts the cooldown from
+          //the point of FAILURE instead, guaranteeing at least one genuine OVERHEATINGTIMEOUT-long
+          //gap before the next attempt.
+          lastRotation = millis();
           return;
         }
         //startMotor();
         currentPhase = PHASE_ROTATING; //calibrate() left it at PHASE_CALIBRATING, we're rotating to the target letter now
-        stepLetters(posLetter);
+        stepLetters(posLetter, -1); //fresh from letter 0, right after calibrate() - see stepLetters()'s own comment
       }
       //store new position
       displayedLetter = toLetter;
