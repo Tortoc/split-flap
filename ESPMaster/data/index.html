@@ -611,6 +611,20 @@
 			flex-wrap: wrap;
 		}
 
+		/* Visual separators between Ausrichtung/Geschwindigkeit/Animation, added 2026-09-10 on user
+		   request - scoped to this one field-grid (a modifier class, not a plain .ls-field-grid
+		   rule) so the Countdown/Countup prefix/date/suffix rows elsewhere, which reuse the same
+		   base classes, stay unaffected. A left border on the gap itself (half-gap padding+margin
+		   trick) rather than on .ls-field directly, so the line doesn't move if the fields'
+		   flex-basis ever changes independently, and so it collapses away cleanly when the row
+		   wraps onto multiple lines on narrow screens instead of leaving an orphaned rule mid-air. */
+		.ls-field-grid-divided > .ls-field:not(:first-child) {
+			border-left: 1px solid var(--color-border);
+			padding-left: 14px;
+			margin-left: -14px; /* half the 28px gap each side, so the border sits centered in the
+			                       existing gap instead of widening the row */
+		}
+
 		.ls-field {
 			flex: 1;
 			min-width: 180px;
@@ -1212,7 +1226,7 @@
 				<form action="/" method="post" id="form">
 					<div class="card-grid card-grid-stack">
 						<div class="card">
-							<div class="ls-field-grid">
+							<div class="ls-field-grid ls-field-grid-divided">
 								<div class="ls-field">
 									<span class="ls-microlabel">Ausrichtung</span>
 									<div class="ls-align-group">
