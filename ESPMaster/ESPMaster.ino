@@ -1409,7 +1409,7 @@ void setup() {
           unitFirmwareUploadWriteFailed = false;
           if (String(otaPassword) != "") {
             String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-            if (providedPassword != String(otaPassword)) {
+            if (!constantTimeEquals(providedPassword, String(otaPassword))) {
               SerialPrintln(F("Unit firmware upload rejected: invalid password"));
               unitFirmwareUploadAuthFailed = true;
               return;
@@ -1511,7 +1511,7 @@ void setup() {
       if (action == "push") {
         if (String(otaPassword) != "") {
           String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-          if (providedPassword != String(otaPassword)) {
+          if (!constantTimeEquals(providedPassword, String(otaPassword))) {
             SerialPrintln(F("Unit firmware push rejected: invalid password"));
             request->send(401, "text/plain", "Invalid password");
             return;
@@ -1675,7 +1675,7 @@ void setup() {
           webFileUploadWriteFailed = false;
           if (String(otaPassword) != "") {
             String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-            if (providedPassword != String(otaPassword)) {
+            if (!constantTimeEquals(providedPassword, String(otaPassword))) {
               SerialPrintln(F("Web file upload rejected: invalid password"));
               webFileUploadAuthFailed = true;
               return;
@@ -1758,7 +1758,7 @@ void setup() {
         return true; //no password configured, nothing to check
       }
       String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-      return providedPassword == String(otaPassword);
+      return constantTimeEquals(providedPassword, String(otaPassword));
     };
 
     // Step 1: tell the ESP how big the firmware is and let it erase/prepare the flash region.
@@ -2084,6 +2084,15 @@ void setup() {
     //quirk down, this single-registration form sidesteps it and saves even more).
     webServer.on("/api/wifi", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
       if (request->method() == HTTP_GET) {
+        //Found 2026-09-10: unlike every POST action on this endpoint (all gated on
+        //accessControlWifiPublic), these two GET polling reads were never checked at all - leaked
+        //nearby-network scan results (SSID/RSSI/security) and the device's own currently-connected
+        //SSID/IP to anyone unauthenticated on the LAN, regardless of the Wifi category toggle.
+        //Consistent to gate here too: the same browser/session that started a scan or connect via
+        //the (already-gated) POST action already has the password, so this doesn't block normal
+        //polling of an attempt that was actually allowed to start.
+        if (rejectIfPasswordRequired(request, accessControlWifiPublic)) return;
+
         String type = request->hasParam("type") ? request->getParam("type")->value() : "";
 
         if (type == "scan-result") {
@@ -2251,7 +2260,7 @@ void setup() {
       }
 
       String currentPasswordValue = request->getParam("currentPassword", true)->value();
-      if (currentPasswordValue != otaPassword) {
+      if (!constantTimeEquals(currentPasswordValue, String(otaPassword))) {
         SerialPrintln(F("OTA password/access-control change rejected: current password incorrect"));
         request->send(401, "text/plain", "Current password is incorrect");
         return;

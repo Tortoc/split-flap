@@ -1642,7 +1642,12 @@
 							clearAdminPassword();
 							showBannerMessage("Falsches Administrator-Passwort - siehe System &gt; Zugriffskontrolle.");
 						} else {
-							showBannerMessage(this.responseText || `
+							//escapeHtml() on the server's own text - found 2026-09-10: this is rendered via
+							//innerHTML (showBannerMessage()), and while no current /api/settings error path
+							//echoes back raw submitted text, an unescaped server response landing here would
+							//be a live XSS the moment one ever did. The static fallback string below is
+							//developer-authored, not server input, so it keeps its intentional <br>.
+							showBannerMessage(this.responseText ? escapeHtml(this.responseText) : `
 								Something went wrong during submission. Feel free to try again, ensure that you have entered valid information.
 								<br>
 								Ensure things like dates provided for schedules/countdowns are in the future.
@@ -3012,7 +3017,7 @@
 						clearAdminPassword();
 						showAdminBannerMessage("Falsches Administrator-Passwort.");
 					} else {
-						showAdminBannerMessage("Failed: " + (this.responseText || ("Status " + this.status)));
+						showAdminBannerMessage("Failed: " + (this.responseText ? escapeHtml(this.responseText) : ("Status " + this.status)));
 					}
 				}
 			};
@@ -3579,7 +3584,7 @@
 					} else {
 						button.disabled = false;
 						button.innerText = "Save & Recalibrate";
-						showAdminBannerMessage("Failed to set offset: " + (this.responseText || ("Status " + this.status)));
+						showAdminBannerMessage("Failed to set offset: " + (this.responseText ? escapeHtml(this.responseText) : ("Status " + this.status)));
 					}
 				}
 			};

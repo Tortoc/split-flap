@@ -1,3 +1,24 @@
+//Constant-time string comparison, for password checks (found 2026-09-10, used by
+//ServiceAccessControlFunctions.ino and /api/firmware-*'s checkOtaPassword lambda). A plain `==`
+//does an early-exit byte compare - a theoretical timing side-channel that could, in principle,
+//let repeated measurements narrow down a correct password one byte at a time. Practically very
+//low-risk here (no remote attacker path with precise-enough timing over a local IoT device's
+//WiFi/HTTP stack), but this is exactly the kind of check the pattern exists for, and it costs
+//nothing. Always walks the longer of the two lengths and folds a length mismatch into the same
+//accumulator, rather than returning early for either a length or a content difference.
+bool constantTimeEquals(const String &a, const String &b) {
+  size_t lenA = a.length();
+  size_t lenB = b.length();
+  size_t maxLen = lenA > lenB ? lenA : lenB;
+  uint8_t diff = (lenA != lenB) ? 1 : 0;
+  for (size_t i = 0; i < maxLen; i++) {
+    uint8_t byteA = i < lenA ? (uint8_t)a.charAt(i) : 0;
+    uint8_t byteB = i < lenB ? (uint8_t)b.charAt(i) : 0;
+    diff |= byteA ^ byteB;
+  }
+  return diff == 0;
+}
+
 //Converts UTF-8 ä/ö/ü/Ä/Ö/Ü byte sequences to the internal single-byte placeholder codes ($/&/#)
 //that the physical letters[] array (ESPMaster.ino) actually has flaps for - centralizes what was
 //previously only done client-side, and only in the main text form's own onsubmit handler (found
@@ -277,6 +298,16 @@ String convertUserDateFormatToEzTime(String userFormat) {
 
 //Used for ensuring a string is a number
 bool isNumber(String str) {
+  //An empty string was previously accepted as "a number" (found 2026-09-10): strtol("", &endPtr,
+  //10) sets endPtr to point at str's own null terminator (no digits consumed, nothing to reject),
+  //so the "reached the end of the string" check below was trivially true for "" too - a caller
+  //passing e.g. `id=` (present but empty) as a form field got isNumber("")==true, then .toInt()==0,
+  //silently targeting id 0 instead of the intended clear "must be a number" 400 rejection. Reject
+  //empty input explicitly before ever calling strtol().
+  if (str.length() == 0) {
+    return false;
+  }
+
   char* endPtr;
 
   //10 specifies base 10 (decimal)

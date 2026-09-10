@@ -19,7 +19,7 @@ bool rejectIfPasswordRequired(AsyncWebServerRequest* request, bool categoryPubli
     return false;
   }
   String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-  if (providedPassword == String(otaPassword)) {
+  if (constantTimeEquals(providedPassword, String(otaPassword))) {
     return false;
   }
   request->send(401, "text/plain", "Password required - set it via the Administration page, or send it as the X-OTA-Password header");

@@ -321,9 +321,18 @@ void updateDisplayJob() {
       return;
 
     case DISPLAY_JOB_WRITE_LINE: {
-      //Matches the old code exactly: only pull from the split lines when there's more than one -
-      //a single line always uses originalMessage verbatim, not processSentenceToLines()'s output.
-      String line = displayJob.isMultiLine ? displayJob.lines[displayJob.currentLineIndex] : displayJob.originalMessage;
+      //A single line uses processSentenceToLines()'s own already-normalized output (lines[0]) too,
+      //not the raw originalMessage verbatim - found 2026-09-10: originalMessage can be LONGER than
+      //lines[0] whenever the raw input had irregular whitespace (e.g. double spaces) that
+      //processSentenceToLines() collapsed while determining line count/content - a case where
+      //lineCount still comes out as 1 (so this branch is taken) but originalMessage itself no
+      //longer fits within unitsAmount characters. centerString()/leftString()/rightString() then
+      //silently return it unpadded/untruncated, and the write loop below only ever reads the
+      //first unitsAmount characters of it - effectively truncating to whatever fit, arbitrarily,
+      //instead of the correctly space-collapsed content. lineCount==0 (message trims to nothing)
+      //has no lines[0] to fall back to - originalMessage there is safely empty/whitespace-only.
+      String line = displayJob.isMultiLine ? displayJob.lines[displayJob.currentLineIndex]
+                  : (displayJob.lineCount >= 1 ? displayJob.lines[0] : displayJob.originalMessage);
       if (displayJob.isMultiLine) {
         SerialPrint(F("-- Message Line: "));
         SerialPrintln(line);
