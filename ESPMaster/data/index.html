@@ -629,28 +629,31 @@
 			min-width: 220px;
 		}
 
-		.ls-animation-row {
-			display: flex;
-			gap: 8px;
-			align-items: center;
-		}
-
-		.ls-animation-row select {
-			flex: 1;
-			min-width: 0; /* allow the select to actually shrink below its content width in a flex row */
-		}
-
-		.ls-animation-row input[type=number] {
-			width: 64px;
-			flex: 0 0 auto;
-		}
-
 		/* Alignment: 3-way pill group, hidden native radios (same :has() pattern as .ls-rail-item),
 		   left-aligned under the "Ausrichtung" label. */
 		.ls-align-group {
 			display: flex;
 			justify-content: flex-start;
 			gap: 6px;
+			flex-wrap: wrap;
+		}
+
+		/* Animation ("Animationen" field, added 2026-09-10, switched from a <select> to icon
+		   buttons + tooltips on user request): 5 icon-only buttons instead of Ausrichtung's 3
+		   text-labelled ones, so they get their own narrower min-width - icons alone don't need
+		   .ls-align-btn's default 78px. The stagger-ms number input rides along in the same flex
+		   row/wrap as a 6th item. */
+		.ls-animation-icons .ls-align-btn {
+			min-width: 38px;
+			padding: 9px;
+		}
+
+		.ls-animation-icons input[type=number] {
+			width: 64px;
+			flex: 0 0 auto;
+			padding: 9px 10px;
+			border: 1px solid var(--color-border);
+			border-radius: 4px;
 		}
 
 		.ls-align-btn {
@@ -1216,18 +1219,30 @@
 
 								<div class="ls-field ls-field-wide">
 									<span class="ls-microlabel">Animation</span>
-									<div class="ls-animation-row">
-										<select id="selectAnimationMode" name="animationMode" style="padding: 8px 10px; border-radius: 4px;">
-											<option value="simultaneous">Gleichzeitig</option>
-											<option value="left-to-right">Links &rarr; Rechts</option>
-											<option value="right-to-left">Rechts &rarr; Links</option>
-											<option value="outside-in">Außen &rarr; Mitte</option>
-											<option value="inside-out">Mitte &rarr; Außen</option>
-										</select>
+									<div class="ls-align-group ls-animation-icons">
+										<label class="ls-align-btn" title="Gleichzeitig - alle Units starten zusammen">
+											<input type="radio" id="radioAnimSimultaneous" name="animationMode" autocomplete="off" value="simultaneous" checked />
+											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 5v14M12 5v14M18 5v14"></path></svg>
+										</label>
+										<label class="ls-align-btn" title="Links &rarr; Rechts - Unit 0 zuerst, dann der Reihe nach">
+											<input type="radio" id="radioAnimLeftToRight" name="animationMode" autocomplete="off" value="left-to-right" />
+											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 12h12M11 6l6 6-6 6"></path></svg>
+										</label>
+										<label class="ls-align-btn" title="Rechts &rarr; Links - letzte Unit zuerst, dann der Reihe nach">
+											<input type="radio" id="radioAnimRightToLeft" name="animationMode" autocomplete="off" value="right-to-left" />
+											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 12H8M13 6l-6 6 6 6"></path></svg>
+										</label>
+										<label class="ls-align-btn" title="Außen &rarr; Mitte - die beiden äußersten Units zuerst, dann paarweise nach innen">
+											<input type="radio" id="radioAnimOutsideIn" name="animationMode" autocomplete="off" value="outside-in" />
+											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12h6M6 8l3 4-3 4M21 12h-6M18 8l-3 4 3 4"></path></svg>
+										</label>
+										<label class="ls-align-btn" title="Mitte &rarr; Außen - die mittleren Units zuerst, dann paarweise nach außen">
+											<input type="radio" id="radioAnimInsideOut" name="animationMode" autocomplete="off" value="inside-out" />
+											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 12H5M8 8l-3 4 3 4M12 12h7M16 8l3 4-3 4"></path></svg>
+										</label>
 										<input type="number" id="inputAnimationStaggerMs" name="animationStaggerMs"
 											min="0" max="1000" step="10" value="150" title="Versatz in ms zwischen aufeinanderfolgenden Units" />
 									</div>
-									<p class="note" style="margin: 6px 0 0;">Versatz in ms zwischen den Units, wirkungslos bei "Gleichzeitig"</p>
 								</div>
 							</div>
 						</div>
@@ -2473,9 +2488,27 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			document.getElementById("rangeFlapSpeed").value = speed;
 		}
 
-		//Sets the animation mode/stagger fields ("Animationen", added 2026-09-10)
+		//Sets the animation mode/stagger fields ("Animationen", added 2026-09-10, switched from a
+		//<select> to icon buttons on user request) - mirrors setAlignment()'s radio-checking
+		//pattern below.
 		function setAnimation(mode, staggerMs) {
-			document.getElementById("selectAnimationMode").value = mode || "simultaneous";
+			switch (mode) {
+				case "left-to-right":
+					document.getElementById("radioAnimLeftToRight").checked = true;
+					break;
+				case "right-to-left":
+					document.getElementById("radioAnimRightToLeft").checked = true;
+					break;
+				case "outside-in":
+					document.getElementById("radioAnimOutsideIn").checked = true;
+					break;
+				case "inside-out":
+					document.getElementById("radioAnimInsideOut").checked = true;
+					break;
+				default:
+					document.getElementById("radioAnimSimultaneous").checked = true;
+					break;
+			}
 			document.getElementById("inputAnimationStaggerMs").value = (staggerMs === undefined || staggerMs === null) ? 150 : staggerMs;
 		}
 
