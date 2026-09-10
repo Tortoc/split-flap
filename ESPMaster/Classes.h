@@ -16,6 +16,12 @@ struct RotationItem {
   String Suffix = "";           //countdown/countup: per-item suffix, independent of the standalone mode's setting
   int DurationSeconds = 5;      //how long to display this item
   String Alignment = "";        //per-item override; "" inherits the default alignment
+  //Same "override, empty/sentinel inherits the default" pattern as Alignment above - found
+  //2026-09-10 on user request ("Animation pro Rotation-Item"). AnimationStaggerMs can't use ""
+  //as its own sentinel (it's a number) - -1 is used instead since 0 is itself a real, valid
+  //stagger value (explicitly "no delay" rather than "inherit").
+  String AnimationMode = "";       //per-item override; "" inherits the default animation mode
+  int AnimationStaggerMs = -1;     //per-item override; -1 inherits the default stagger
 };
 
 //twiboot chip-info response. Lives in a header (not a .ino) so Arduino's auto-generated function

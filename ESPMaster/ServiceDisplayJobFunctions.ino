@@ -69,9 +69,21 @@ struct DisplayJob {
   bool hadWriteFailure = false;
 
   //Animation (staggered per-unit start) support, found 2026-09-10 on user request - see
-  //computeUnitAnimationDelayMs()'s own comment for the delay formulas. Snapshotted once in
-  //startDisplayJob(), same reasoning as flapSpeedValue above - a settings change mid-job must not
-  //corrupt an animation already in progress.
+  //computeUnitAnimationDelayMs()'s own comment for the delay formulas.
+  //
+  //animationModeOverride/animationStaggerMsOverride: what the CALLER asked for (""/-1 = "no
+  //override, use the global setting") - set once in startDisplayJob(), same as
+  //alignmentOverride above. Only Rotation ever passes a non-default value here (found 2026-09-10:
+  //"Animation pro Rotation-Item" - see the showText()/startDisplayJob() overloads' own comments).
+  String animationModeOverride = "";
+  int animationStaggerMsOverride = -1;
+  //animationModeValue/animationStaggerMsValue: the RESOLVED values actually in effect for the
+  //line currently being written (override if one was given, else the global setting) - resolved
+  //fresh in DISPLAY_JOB_WRITE_LINE, not in startDisplayJob(), because startDisplayJob() alone
+  //can't tell "caller explicitly wants the global default" apart from "caller wants whatever the
+  //global default happens to be BY THE TIME this line actually renders" for the no-override case;
+  //resolving at write time keeps that always current, same spirit as flapSpeedValue/
+  //lastUsedEffectiveAlignment being captured at the point of use elsewhere in this struct.
   String animationModeValue = "simultaneous";
   unsigned long animationStaggerMsValue = 0;
   //The aligned line currently being written - was a local variable in DISPLAY_JOB_WRITE_LINE
@@ -170,7 +182,7 @@ bool isMessageTooLongToRender(String message) {
 //Starts a new display job. Returns false (does nothing) if one is already running - callers that
 //need strict ordering against other jobs (see updateUnitsResetSequence()) check isDisplayJobBusy()
 //themselves rather than relying on this to queue anything.
-bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPauseMs, String alignmentOverride) {
+bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPauseMs, String alignmentOverride, String animationModeOverride, int animationStaggerMsOverride) {
   if (displayJob.state != DISPLAY_JOB_IDLE) {
     return false;
   }
@@ -207,11 +219,11 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   displayJob.flapSpeedValue = flapSpeedValue;
   displayJob.finalPauseMs = finalPauseMs;
   displayJob.alignmentOverride = alignmentOverride;
-  //Snapshotted from the global settings (ESPMaster.ino), same reasoning as flapSpeedValue above -
-  //global, not per-call-site (unlike alignmentOverride, no caller has asked for a per-item
-  //override of this yet) - see this field's own comment.
-  displayJob.animationModeValue = animationMode;
-  displayJob.animationStaggerMsValue = animationStaggerMs;
+  //Just stored here, not resolved against the global settings yet - see animationModeOverride's
+  //own comment (this struct's field declarations) for why that resolution happens later, in
+  //DISPLAY_JOB_WRITE_LINE, not here.
+  displayJob.animationModeOverride = animationModeOverride;
+  displayJob.animationStaggerMsOverride = animationStaggerMsOverride;
   displayJob.lastUsedEffectiveAlignment = ""; //defensive reset - see the field's own comment
   displayJob.lastUsedRenderGeneration = displayRenderGeneration; //fallback for DEBUG_PAUSE - see the field's own comment
   displayJob.hadWriteFailure = false; //reset once per job, not per line - see the field's own comment
@@ -490,6 +502,12 @@ void updateDisplayJob() {
       //computeUnitAnimationDelayMs()'s own comment. currentAlignedLine/lineWriteStartMillis/
       //unitsWrittenMask are DisplayJob fields (not locals) because writing a line can now span
       //multiple loop() ticks - see writeDueAnimatedUnits() and the WAIT_STAGGER state below.
+      //
+      //Resolve the per-line override vs. the global setting HERE, not in startDisplayJob() - see
+      //animationModeOverride's own comment (this file, DisplayJob's field declarations) for why
+      //("Animation pro Rotation-Item", found 2026-09-10).
+      displayJob.animationModeValue = displayJob.animationModeOverride != "" ? displayJob.animationModeOverride : animationMode;
+      displayJob.animationStaggerMsValue = displayJob.animationStaggerMsOverride >= 0 ? (unsigned long)displayJob.animationStaggerMsOverride : animationStaggerMs;
       displayJob.currentAlignedLine = aligned;
       displayJob.lineWriteStartMillis = millis();
       displayJob.unitsWrittenMask = 0;
@@ -570,7 +588,7 @@ void updateUnitsResetSequence() {
     case UNITS_RESET_SEQ_IDLE:
       //Only actually logs/transitions once the display is free - if busy, silently retries next
       //tick instead of spamming this line every loop() iteration.
-      if (startDisplayJob(createRepeatingString('-'), convertSpeed(flapSpeed), 0, "")) {
+      if (startDisplayJob(createRepeatingString('-'), convertSpeed(flapSpeed), 0, "", "", -1)) {
         SerialPrintln(F("Reseting Units now..."));
         unitsResetSequenceState = UNITS_RESET_SEQ_BLANK1;
       }
@@ -585,7 +603,7 @@ void updateUnitsResetSequence() {
 
     case UNITS_RESET_SEQ_PAUSE:
       if (millisReached(unitsResetSequencePauseUntil)) {
-        if (startDisplayJob(createRepeatingString('.'), convertSpeed(flapSpeed), 0, "")) {
+        if (startDisplayJob(createRepeatingString('.'), convertSpeed(flapSpeed), 0, "", "", -1)) {
           unitsResetSequenceState = UNITS_RESET_SEQ_BLANK2;
         }
       }

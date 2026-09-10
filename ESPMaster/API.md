@@ -92,6 +92,7 @@ here to match.
 | POST | [`/api/firmware-finish`](#post-apifirmware-finish) | Finalize the update, reboot on success |
 | POST | [`/api/debug-mode`](#post-apidebug-mode) | Enable/disable debug mode |
 | POST | [`/api/reboot`](#post-apireboot) | Reboot the device |
+| GET | [`/api/rotation-items`](#get-apirotation-items) | List all Rotation items |
 | GET | [`/api/scheduled-messages`](#get-apischeduled-messages) | List all scheduled messages |
 | DELETE | [`/api/scheduled-messages`](#delete-apischeduled-messages) | Remove a scheduled message |
 | POST | [`/api/wifi?action=`](#post-apiwifi) | WiFi actions: `reset`\|`scan`\|`connect`\|`set-hostname` |
@@ -212,6 +213,7 @@ missing/wrong.
 | `scheduleShowIndefinitely` | `on` | Only relevant when `scheduleEnabled=on` |
 | `scheduledDateTimeUnix` | unix timestamp | When to show the scheduled message |
 | `countdownDateTimeUnix` | unix timestamp | Countdown target, only relevant for `deviceMode=countdown` |
+| `rotationItems` | JSON array (string) | Replaces the whole Rotation item list - see [`GET /api/rotation-items`](#get-apirotation-items) for the item schema. Only relevant for `deviceMode=rotation`, but can be sent regardless of the current mode. |
 
 When `scheduleEnabled=on` is present, this call adds a new entry to the scheduled-message queue
 (via `inputText` + `scheduledDateTimeUnix` + `scheduleShowIndefinitely`) rather than changing the
@@ -729,6 +731,43 @@ later). `accessControlSystem` category - see [Authentication](#authentication).
 
 ```bash
 curl -X POST http://192.168.1.50/api/reboot -H "X-OTA-Password: splitflap"
+```
+
+---
+
+### `GET /api/rotation-items`
+
+All current Rotation items, in display order. Was referenced from elsewhere in this document
+without ever having its own section - filled in 2026-09-10 alongside adding the per-item
+animation override fields below.
+
+**Response** `200 application/json`:
+```json
+[
+  { "type": "text", "value": "HELLO", "format": "", "targetDateTimeUnix": 0, "prefix": "", "suffix": "", "durationSeconds": 5, "alignment": "", "animationMode": "", "animationStaggerMs": -1 }
+]
+```
+- `type`: `text` \| `clock` \| `date` \| `countdown` \| `countup`.
+- `value`: the literal text, only meaningful for `type=text`.
+- `format`: `clock`/`date` display format (see `POST /api/settings`'s `clockFormat`/`dateFormat`
+  for the syntax) - unused for other types.
+- `targetDateTimeUnix`: `countdown`/`countup` target date - unused for other types.
+- `prefix`/`suffix`: per-item text wrapped around the day count, `countdown`/`countup` only -
+  independent of the standalone Countdown/Countup modes' own prefix/suffix settings.
+- `durationSeconds`: how long this item stays on screen before advancing to the next one.
+- `alignment`: per-item override (`left`\|`center`\|`right`) - `""` inherits the top-level
+  `alignment` setting.
+- `animationMode`/`animationStaggerMs` (added 2026-09-10, "Animation pro Rotation-Item"): same
+  per-item-override-vs-inherit pattern as `alignment` - `animationMode=""` (and/or
+  `animationStaggerMs=-1`) inherits the top-level `animationMode`/`animationStaggerMs` setting;
+  otherwise both are validated exactly like the top-level `POST /api/settings` fields of the same
+  name (see that entry).
+
+Replace the whole list via [`POST /api/settings`](#post-apisettings)'s `rotationItems` param
+(full replace, not a merge/patch - send the complete list every time).
+
+```bash
+curl http://192.168.1.50/api/rotation-items
 ```
 
 ---

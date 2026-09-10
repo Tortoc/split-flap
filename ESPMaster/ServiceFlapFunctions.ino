@@ -17,7 +17,14 @@ bool showText(String message, int delayMillis) {
   return showText(message, delayMillis, "");
 }
 
+//""/-1 = no animation override, use the global animation setting - see the 5-arg overload below
+//and computeUnitAnimationDelayMs()'s own comment. Only Rotation items ever pass a non-default
+//value here (found 2026-09-10, "Animation pro Rotation-Item" - see checkRotation()).
 bool showText(String message, int delayMillis, String alignmentOverride) {
+  return showText(message, delayMillis, alignmentOverride, "", -1);
+}
+
+bool showText(String message, int delayMillis, String alignmentOverride, String animationModeOverride, int animationStaggerMsOverride) {
   //Nothing to display to - see scanI2CBus(). Guarded here (rather than at every call site)
   //so scheduled messages, countdown, clock/date modes etc. all stay safe automatically. A real
   //failure to deliver, not a no-op - see the comment above this function.
@@ -57,9 +64,14 @@ bool showText(String message, int delayMillis, String alignmentOverride) {
     //startDisplayJob() below would be called with). Also requires the hold time to match -
     //see the delayMillis reasoning below, same principle applies while busy: a caller explicitly
     //asking for a hold must not be silently folded into a coincidentally-matching running job that
-    //was never asked to hold that long.
+    //was never asked to hold that long. Same reasoning extends to the animation override pair
+    //(found 2026-09-10, "Animation pro Rotation-Item") - raw override values, not the resolved
+    //animationModeValue/animationStaggerMsValue (those aren't even known yet at this point in a
+    //job that hasn't reached DISPLAY_JOB_WRITE_LINE for the first time).
     bool matchesRunningJob = displayJob.originalMessage == message &&
       displayJob.alignmentOverride == alignmentOverride &&
+      displayJob.animationModeOverride == animationModeOverride &&
+      displayJob.animationStaggerMsOverride == animationStaggerMsOverride &&
       displayJob.finalPauseMs == (unsigned long)delayMillis;
     if (matchesRunningJob) {
       //A repeated identical request while the job is already sitting in its final hold phase
@@ -77,7 +89,7 @@ bool showText(String message, int delayMillis, String alignmentOverride) {
       }
       return true; //already in progress toward exactly this request
     }
-    return startDisplayJob(message, convertSpeed(flapSpeed), (unsigned long)delayMillis, alignmentOverride); //correctly returns false: busy, try again next tick
+    return startDisplayJob(message, convertSpeed(flapSpeed), (unsigned long)delayMillis, alignmentOverride, animationModeOverride, animationStaggerMsOverride); //correctly returns false: busy, try again next tick
   }
 
   //Redraw if the text or effective alignment actually differs from what's really on the display,
@@ -96,7 +108,7 @@ bool showText(String message, int delayMillis, String alignmentOverride) {
     //startDisplayJob()'s own result rather than assuming success. (isDisplayJobBusy() was already
     //ruled out above, so this always actually starts here - kept as startDisplayJob()'s own return
     //value regardless, rather than assuming true, in case that ever changes.)
-    return startDisplayJob(message, convertSpeed(flapSpeed), (unsigned long)delayMillis, alignmentOverride);
+    return startDisplayJob(message, convertSpeed(flapSpeed), (unsigned long)delayMillis, alignmentOverride, animationModeOverride, animationStaggerMsOverride);
   }
   return true; //already showing this - not a failure, nothing to do
 }

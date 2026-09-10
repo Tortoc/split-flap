@@ -76,6 +76,8 @@ void loadValuesFromFileSystem() {
         item.Suffix = String((const char*)(value["suffix"] | ""));
         item.DurationSeconds = value["durationSeconds"] | 5;
         item.Alignment = String((const char*)(value["alignment"] | ""));
+        item.AnimationMode = String((const char*)(value["animationMode"] | ""));
+        item.AnimationStaggerMs = value["animationStaggerMs"] | -1;
         rotationItemCount++;
       }
     }

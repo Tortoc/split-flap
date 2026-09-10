@@ -48,6 +48,10 @@ void checkRotation() {
 
   //"" (empty) means "inherit the default alignment" - see showText()/DISPLAY_JOB_WRITE_LINE.
   rotationCurrentAlignment = currentItem.Alignment;
+  //Same "" / -1 = inherit pattern for the per-item animation override (found 2026-09-10,
+  //"Animation pro Rotation-Item") - see the globals' own comment (ESPMaster.ino).
+  rotationCurrentAnimationMode = currentItem.AnimationMode;
+  rotationCurrentAnimationStaggerMs = currentItem.AnimationStaggerMs;
 
   //Recompute inputText for whichever item is current every second, not just once when it becomes
   //current - keeps a clock/date/countdown item live for as long as it stays on screen.
@@ -114,10 +118,25 @@ bool replaceRotationItemsFromJson(String rotationItemsJson) {
   //runtime-computed content that can't be reliably bounded upfront; checkRotation() below carries
   //its own defense-in-depth timeout for those (and for any pre-existing text item saved before
   //this check existed).
+  //animationMode/animationStaggerMs validated the same way as POST /api/settings' own fields
+  //(found 2026-09-10, "Animation pro Rotation-Item") - "" (mode) / -1 (stagger, absent or
+  //explicitly -1) means "inherit the global default", anything else must be one of the known
+  //modes / 0-ANIMATION_STAGGER_MS_MAX.
   for (JsonVariant value : jsonDocument.as<JsonArray>()) {
     String itemType = value["type"] | DEVICE_MODE_TEXT;
     if (itemType == DEVICE_MODE_TEXT && isMessageTooLongToRender(String((const char*)(value["value"] | "")))) {
       SerialPrintln(F("Rotation items JSON rejected: a text item needs more lines than fit to display - keeping the existing list, not touching it"));
+      return false;
+    }
+
+    String itemAnimationMode = String((const char*)(value["animationMode"] | ""));
+    if (itemAnimationMode != "" && !isValidAnimationMode(itemAnimationMode)) {
+      SerialPrintln(F("Rotation items JSON rejected: invalid animationMode - keeping the existing list, not touching it"));
+      return false;
+    }
+    int itemAnimationStaggerMs = value["animationStaggerMs"] | -1;
+    if (itemAnimationStaggerMs != -1 && (itemAnimationStaggerMs < 0 || itemAnimationStaggerMs > ANIMATION_STAGGER_MS_MAX)) {
+      SerialPrintln(F("Rotation items JSON rejected: animationStaggerMs out of range - keeping the existing list, not touching it"));
       return false;
     }
   }
@@ -138,6 +157,8 @@ bool replaceRotationItemsFromJson(String rotationItemsJson) {
     item.Suffix = String((const char*)(value["suffix"] | ""));
     item.DurationSeconds = value["durationSeconds"] | 5;
     item.Alignment = String((const char*)(value["alignment"] | ""));
+    item.AnimationMode = String((const char*)(value["animationMode"] | ""));
+    item.AnimationStaggerMs = value["animationStaggerMs"] | -1;
     rotationItemCount++;
   }
 
@@ -167,6 +188,8 @@ void writeRotationItemsToFile() {
     itemObject["suffix"] = item.Suffix;
     itemObject["durationSeconds"] = item.DurationSeconds;
     itemObject["alignment"] = item.Alignment;
+    itemObject["animationMode"] = item.AnimationMode;
+    itemObject["animationStaggerMs"] = item.AnimationStaggerMs;
   }
 
   String rotationItemsJson;

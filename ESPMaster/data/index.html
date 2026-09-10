@@ -850,6 +850,29 @@
 			color: var(--color-primary);
 		}
 
+		/* Per-item animation override (found 2026-09-10, "Animation pro Rotation-Item") - same
+		   wrapper layout as .ls-rotation-item-align, reuses .ls-rotation-align-btn for the icons
+		   themselves (identical toggle-button look/behavior, just a different icon set). */
+		.ls-rotation-item-animation {
+			display: flex;
+			gap: 4px;
+			align-items: center;
+			flex-shrink: 0;
+		}
+
+		.ls-rotation-item-animation input[type=number] {
+			width: 56px;
+			height: 40px;
+			box-sizing: border-box;
+			padding: 0 6px;
+			border: 1px solid var(--color-border);
+			border-radius: 4px;
+		}
+
+		.ls-rotation-item-animation input[type=number]:disabled {
+			opacity: 0.4;
+		}
+
 		.btn-small,
 		.btn-small.action-link {
 			width: auto;
@@ -1652,6 +1675,13 @@ curl -X POST http://192.168.1.50/api/text --data "text=HELLO WORLD"
 
 # 10 Sekunden lang, dann zurück zur vorherigen Anzeige
 curl -X POST http://192.168.1.50/api/text --data "text=BRB&amp;duration=10"</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>GET /api/rotation-items</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Alle aktuellen Rotation-Einträge inkl. per-Item-Overrides für Ausrichtung und Animation (<code>alignment</code>/<code>animationMode</code>/<code>animationStaggerMs</code> - leer/<code>-1</code> = Standard erben). Ändern über <code>POST /api/settings</code> mit dem Parameter <code>rotationItems</code> (komplette Liste, kein Patch).</p>
+								<pre class="api-code">curl http://192.168.1.50/api/rotation-items</pre>
 							</div>
 						</details>
 
@@ -2794,7 +2824,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 		var rotationItemsData = [];
 
 		function addRotationItem() {
-			rotationItemsData.push({ type: "text", value: "", format: "", targetDateTimeUnix: 0, prefix: "", suffix: "", durationSeconds: 5, alignment: "" });
+			rotationItemsData.push({ type: "text", value: "", format: "", targetDateTimeUnix: 0, prefix: "", suffix: "", durationSeconds: 5, alignment: "", animationMode: "", animationStaggerMs: -1 });
 			renderRotationItems();
 		}
 
@@ -2831,6 +2861,30 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 		function updateRotationItemAlignment(index, value) {
 			rotationItemsData[index].alignment = rotationItemsData[index].alignment === value ? "" : value;
 			renderRotationItems();
+		}
+
+		//Same toggle pattern as updateRotationItemAlignment() above, for the per-item animation
+		//override (found 2026-09-10, "Animation pro Rotation-Item"). Clearing the mode back to ""
+		//also clears the stagger back to -1 ("inherit") - a lone stagger override with no mode
+		//override wouldn't mean anything on the backend (see checkRotation()/DISPLAY_JOB_WRITE_LINE).
+		function updateRotationItemAnimation(index, value) {
+			if (rotationItemsData[index].animationMode === value) {
+				rotationItemsData[index].animationMode = "";
+				rotationItemsData[index].animationStaggerMs = -1;
+			} else {
+				rotationItemsData[index].animationMode = value;
+				if (rotationItemsData[index].animationStaggerMs < 0) {
+					rotationItemsData[index].animationStaggerMs = 150; //same default as the top-level field
+				}
+			}
+			renderRotationItems();
+		}
+
+		//No re-render here, same reasoning as updateRotationItemField() above - don't lose focus
+		//mid-keystroke in the stagger-ms number field.
+		function updateRotationItemAnimationStaggerMs(index, value) {
+			var parsed = parseInt(value, 10);
+			rotationItemsData[index].animationStaggerMs = isNaN(parsed) ? 0 : Math.max(0, Math.min(1000, parsed));
 		}
 
 		//Rebuilds #containerRotationItems from rotationItemsData.
@@ -2945,6 +2999,40 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				});
 				row.appendChild(alignWrapper);
 
+				//Per-item animation override - same 5 icons as the top-level Animation field (Punkt
+				//189), same "none active = inherit" toggle behavior as alignWrapper above (found
+				//2026-09-10, "Animation pro Rotation-Item"). The stagger-ms field is disabled (not
+				//hidden - keeps the row's layout stable while editing) while inheriting.
+				var animationWrapper = document.createElement("div");
+				animationWrapper.className = "ls-rotation-item-animation";
+				[
+					["simultaneous", "Gleichzeitig", "M6 5v14M12 5v14M18 5v14"],
+					["left-to-right", "Links → Rechts", "M4 12h12M11 6l6 6-6 6"],
+					["right-to-left", "Rechts → Links", "M20 12H8M13 6l-6 6 6 6"],
+					["outside-in", "Außen → Mitte", "M3 12h6M6 8l3 4-3 4M21 12h-6M18 8l-3 4 3 4"],
+					["inside-out", "Mitte → Außen", "M12 12H5M8 8l-3 4 3 4M12 12h7M16 8l3 4-3 4"]
+				].forEach(function (option) {
+					var isActive = item.animationMode === option[0];
+					var animButton = document.createElement("button");
+					animButton.type = "button";
+					animButton.className = "ls-rotation-align-btn" + (isActive ? " active" : "");
+					animButton.title = isActive ? "Standard-Animation verwenden" : (option[1] + " (überschreibt Standard für diesen Eintrag)");
+					animButton.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="' + option[2] + '"></path></svg>';
+					animButton.onclick = (function (i, value) { return function () { updateRotationItemAnimation(i, value); }; })(index, option[0]);
+					animationWrapper.appendChild(animButton);
+				});
+				var animationStaggerInput = document.createElement("input");
+				animationStaggerInput.type = "number";
+				animationStaggerInput.min = "0";
+				animationStaggerInput.max = "1000";
+				animationStaggerInput.step = "10";
+				animationStaggerInput.title = "Versatz in ms für diesen Eintrag";
+				animationStaggerInput.disabled = item.animationMode === "";
+				animationStaggerInput.value = item.animationMode === "" ? "" : item.animationStaggerMs;
+				animationStaggerInput.oninput = (function (i) { return function () { updateRotationItemAnimationStaggerMs(i, this.value); }; })(index);
+				animationWrapper.appendChild(animationStaggerInput);
+				row.appendChild(animationWrapper);
+
 				var removeButton = document.createElement("span");
 				removeButton.className = "ls-message-remove";
 				removeButton.innerText = "Entfernen";
@@ -2966,7 +3054,11 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					prefix: item.prefix || "",
 					suffix: item.suffix || "",
 					durationSeconds: item.durationSeconds || 5,
-					alignment: item.alignment || ""
+					alignment: item.alignment || "",
+					animationMode: item.animationMode || "",
+					//Not "|| -1" - animationStaggerMs=0 is a real, valid override value ("no delay"),
+					//distinct from -1 ("inherit"); "||" would wrongly collapse a genuine 0 to -1.
+					animationStaggerMs: (item.animationStaggerMs === undefined || item.animationStaggerMs === null) ? -1 : item.animationStaggerMs
 				};
 			});
 			renderRotationItems();

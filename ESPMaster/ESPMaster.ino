@@ -426,6 +426,20 @@ const char* ANIMATION_MODES[] = {
                                        //a ~9s spread for the last unit; more than that stops being
                                        //a display effect and starts being just slow.
 
+//Shared by POST /api/settings' own validation and replaceRotationItemsFromJson()'s per-item
+//validation (found 2026-09-10, "Animation pro Rotation-Item") - one place for the "which values
+//are valid" list rather than two independently-maintained copies. Functions (unlike the #defines/
+//globals above) are auto-prototyped by the Arduino build regardless of file order, so this is
+//safe to call from any other .ino file despite being defined here.
+bool isValidAnimationMode(String value) {
+  for (int modeIndex = 0; modeIndex < ANIMATION_MODES_COUNT; modeIndex++) {
+    if (value == ANIMATION_MODES[modeIndex]) {
+      return true;
+    }
+  }
+  return false;
+}
+
 //File paths to save input values permanently
 const char* alignmentPath = "/alignment.txt";
 const char* flapSpeedPath = "/flapspeed.txt";
@@ -512,6 +526,11 @@ unsigned long rotationItemElapsedRealSeconds = 0;
 //Set by checkRotation() from the current item's Alignment field ("" = inherit the default) and
 //threaded through to showText() as an override.
 String rotationCurrentAlignment = "";
+//Same pattern as rotationCurrentAlignment above, for the per-item animation override (found
+//2026-09-10, "Animation pro Rotation-Item") - "" / -1 = inherit the global animationMode/
+//animationStaggerMs.
+String rotationCurrentAnimationMode = "";
+int rotationCurrentAnimationStaggerMs = -1;
 Timezone timezone;
 
 //Bug (found while fixing #117): despite the name/parameter, neither timezone.now() nor
@@ -1147,14 +1166,7 @@ void setup() {
           //HTTP POST Animation mode value ("Animationen", found 2026-09-10 on user request)
           if (p->name() == PARAM_ANIMATION_MODE) {
             String receivedValue = p->value();
-            bool isValidAnimationMode = false;
-            for (int modeIndex = 0; modeIndex < ANIMATION_MODES_COUNT; modeIndex++) {
-              if (receivedValue == ANIMATION_MODES[modeIndex]) {
-                isValidAnimationMode = true;
-                break;
-              }
-            }
-            if (isValidAnimationMode) {
+            if (isValidAnimationMode(receivedValue)) {
               newAnimationModeValue = receivedValue;
             } else {
               SerialPrintln(F("animationMode provided was not valid. Value: ") + receivedValue);
@@ -1499,6 +1511,8 @@ void setup() {
         itemObject["suffix"] = item.Suffix;
         itemObject["durationSeconds"] = item.DurationSeconds;
         itemObject["alignment"] = item.Alignment;
+        itemObject["animationMode"] = item.AnimationMode;
+        itemObject["animationStaggerMs"] = item.AnimationStaggerMs;
       }
 
       AsyncResponseStream *response = request->beginResponseStream("application/json");
@@ -3404,7 +3418,7 @@ void loop() {
         //part of an item's configured duration was consumed by motor movement time rather than
         //genuinely stationary, readable display time, especially for a large flap-position change
         //or a multi-line item.
-        bool rotationTextAccepted = showText(inputText, 0, rotationCurrentAlignment);
+        bool rotationTextAccepted = showText(inputText, 0, rotationCurrentAlignment, rotationCurrentAnimationMode, rotationCurrentAnimationStaggerMs);
         if (rotationTextAccepted && !isDisplayJobBusy()) {
           rotationItemAcceptedSeconds++;
         }
