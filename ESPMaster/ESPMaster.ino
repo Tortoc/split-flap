@@ -1994,7 +1994,27 @@ void setup() {
           }
         }
         if (!wasOwner) {
-          request->send(503, "text/plain", "Another web file upload is already in progress, try again shortly");
+          //Distinguish "this request's OWN filename was invalid" from "genuinely lost the
+          //ownership race to a concurrent upload" - found while implementing CODE_REVIEW_V4.md
+          //#2 (not itself part of that review): the body handler used to send its own 400
+          //directly for an invalid filename AND give up ownership, so the outer handler here
+          //would then ALSO try to send a (wrong, generic) 503 for the same request - a double
+          //response. Re-derive the uploaded filename statelessly from this request's own file
+          //param instead (ESPAsyncWebServer adds one with isFile()==true during multipart
+          //parsing, regardless of the field name used) rather than relying on any shared flag.
+          String uploadedFilename = "";
+          for (size_t i = 0; i < request->params(); i++) {
+            const AsyncWebParameter* p = request->getParam(i);
+            if (p->isFile()) {
+              uploadedFilename = p->value();
+              break;
+            }
+          }
+          if (uploadedFilename != "" && uploadedFilename != "index.html.gz") {
+            request->send(400, "text/plain", "Filename must be one of the known static assets");
+          } else {
+            request->send(503, "text/plain", "Another web file upload is already in progress, try again shortly");
+          }
           return;
         }
         if (webFileUploadWriteFailed) {
@@ -2063,11 +2083,16 @@ void setup() {
           //separate shared static `webUploadFilenameValid` bool with the identical
           //any-request-can-clobber-it problem as the auth/busy flags above; ownership alone
           //already fully covers it, since a request that never keeps ownership automatically
-          //fails every later fragment's "webFileUploadOwner != request" check below too).
+          //fails every later fragment's "webFileUploadOwner != request" check below too). Does
+          //NOT send a response itself (found while implementing #2, not itself part of that
+          //review): this body handler running to completion doesn't stop the separate outer
+          //(onRequest) handler above from ALSO running once the body finishes arriving over the
+          //wire - sending a response from both would be a double response for one request. The
+          //outer handler re-derives "was my own filename invalid" itself and sends the one actual
+          //reply.
           if (filename != "index.html.gz") {
             SerialPrintln(F("Web file upload rejected: filename not in allowlist: ") + filename);
             webFileUploadOwner = nullptr;
-            request->send(400, "text/plain", "Filename must be one of the known static assets");
             return;
           }
 

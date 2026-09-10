@@ -22,28 +22,35 @@ bool addScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool 
   SerialPrint(F("-- Show Indefinitely: "));
   SerialPrintln(showIndefinitely ? F("Yes") : F("No"));
 
-  //Find the existing scheduled message and update it if one exists
-  //.get() (not operator[]) - the library's operator[] dereferences a NULL node with no bounds
-  //check on a stale/invalid index; .get() returns a default-constructed value instead. See
-  //BUGFIX_LOG #117 - this loop itself never yields mid-iteration so isn't the reproduced hang,
-  //but kept consistent with the other scheduledMessages accessors as a precaution.
-  for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
-    ScheduledMessage scheduledMessage = scheduledMessages.get(scheduledMessageIndex);
-
-    if (scheduledDateTimeUnix == scheduledMessage.ScheduledDateTimeUnix) {
-      SerialPrintln(F("Removing Existing Scheduled Message due to be shown, it will be replaced"));
-      scheduledMessages.remove(scheduledMessageIndex);
-      break;
-    }
-  }
-
-  //Add the new scheduled message with the new value
+  //Reject a past-due timestamp FIRST, before touching the existing list at all - found 2026-09-10
+  //while implementing CODE_REVIEW_V4.md #12 (not itself part of that review): the old order
+  //removed any existing entry sharing this exact timestamp, THEN checked whether the new one was
+  //even in the future. A resubmission of an entry that's already essentially due (matching an
+  //existing stored timestamp) but rejected here as past-due would otherwise delete that still-
+  //valid existing entry with nothing to replace it with - a narrow window (the existing entry
+  //would itself already have to be right on the verge of firing, since checkScheduledMessages()
+  //fires/removes genuinely due entries on its own every second), but a real, avoidable loss.
   //Bug (found while fixing #117): timezone.now() doesn't return real UTC despite its name/params
   //(verified empirically - see getRealUtcNow()'s comment in ESPMaster.ino), but scheduledDateTimeUnix
   //arrives from the client as real UTC seconds - comparing them directly was off by the timezone
   //offset (2h for Europe/Berlin in summer), rejecting messages scheduled less than that far ahead
   //as "already in the past".
   if (scheduledDateTimeUnix > getRealUtcNow()) {
+    //Find the existing scheduled message and replace it if one exists.
+    //.get() (not operator[]) - the library's operator[] dereferences a NULL node with no bounds
+    //check on a stale/invalid index; .get() returns a default-constructed value instead. See
+    //BUGFIX_LOG #117 - this loop itself never yields mid-iteration so isn't the reproduced hang,
+    //but kept consistent with the other scheduledMessages accessors as a precaution.
+    for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
+      ScheduledMessage scheduledMessage = scheduledMessages.get(scheduledMessageIndex);
+
+      if (scheduledDateTimeUnix == scheduledMessage.ScheduledDateTimeUnix) {
+        SerialPrintln(F("Removing Existing Scheduled Message due to be shown, it will be replaced"));
+        scheduledMessages.remove(scheduledMessageIndex);
+        break;
+      }
+    }
+
     SerialPrintln(F("Adding new Scheduled Message"));
     scheduledMessages.add({scheduledText, scheduledDateTimeUnix, showIndefinitely});
     return true;
