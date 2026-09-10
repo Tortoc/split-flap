@@ -94,11 +94,13 @@
 #include "LittleFS.h"
 
 //--- User-facing settings ---
-//Hostname broadcast via mDNS when USE_MULTICAST is enabled - reachable as "<mdnsName>.local" on
-//networks whose clients support mDNS (most desktop OSes and phones; not universal on all routers/
-//IoT-only networks). Only one device on this repo's hardware exists so far - no uniqueness
-//conflict today, but change this if a second display ever joins the same network.
-const char* mdnsName = "split-flap";
+//Hostname broadcast via mDNS when USE_MULTICAST is enabled - reachable as "<mdnsHostname>.local"
+//on networks whose clients support mDNS (most desktop OSes and phones; not universal on all
+//routers/IoT-only networks). Persisted, not a compile-time constant (found 2026-09-10: with only
+//one device on this repo's hardware, a fixed name was fine at first, but the user asked to be
+//able to change it themselves - e.g. once a second display joins the same network and needs a
+//unique name) - see POST /api/wifi's "set-hostname" action (Netzwerk tab in the UI).
+String mdnsHostname = "split-flap";
 
 //Used if connecting via "WIFI_USE_DIRECT" of "true" - Otherwise, leave blank
 const char* wifiDirectSsid = "";
@@ -114,6 +116,7 @@ const char* wifiDirectPassword = "";
 //filesystem-wide static route [also fixed, see the comment there]).
 String otaPassword = "";
 const char* otaPasswordPath = "/otapassword.txt";
+const char* mdnsHostnamePath = "/mdnsname.txt";
 
 //Per-category "reachable without the password" toggles - only consulted when otaPassword is
 //non-empty (an empty password already means everything is open, see its own comment). Each
@@ -912,6 +915,7 @@ void setup() {
       minimalDoc["wifiRssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
       minimalDoc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
       minimalDoc["wifiSettingsResettable"] = true;
+      minimalDoc["mdnsHostname"] = mdnsHostname; //user-editable, see POST /api/wifi's "set-hostname" action
       //timezone included so Administration can populate from this one fetch, given this device's
       //hard 5-connection TCP limit. The password itself is NEVER sent back (CODE_REVIEW.md #29) -
       //only whether one is currently set, plus the (non-secret) per-category toggle states, both
@@ -2426,7 +2430,44 @@ void setup() {
         return;
       }
 
-      request->send(400, "text/plain", "Unknown 'action' - use reset, scan, or connect");
+      if (action == "set-hostname") {
+        //Shares this endpoint's registration rather than getting a dedicated route - see
+        //POST /api/quiet-hours' comment above ("every registered handler costs a small permanent
+        //heap allocation that's never freed") for why that's a deliberate choice here, not an
+        //oversight. Gated by the same accessControlWifiPublic as every other action on this route
+        //(the "Netzwerk" tab in the UI) - the hostname isn't a secret, but changing it is a
+        //device-state change like the others here.
+        if (!request->hasParam("hostname", true)) {
+          request->send(400, "text/plain", "'hostname' is required");
+          return;
+        }
+
+        String newHostname = request->getParam("hostname", true)->value();
+        if (!isValidMdnsHostname(newHostname)) {
+          request->send(400, "text/plain", "Invalid hostname - only letters, digits, and hyphens (not leading/trailing), 1-63 characters");
+          return;
+        }
+
+        mdnsHostname = newHostname;
+        writeFile(LittleFS, mdnsHostnamePath, mdnsHostname.c_str());
+
+#if USE_MULTICAST == true
+        //MDNS.begin() only sets up the responder once, in setup() - calling it again without
+        //end()ing the previous one first would just silently keep answering under the old name
+        //alongside (or instead of) the new one, depending on the library's internal state.
+        MDNS.end();
+        if (MDNS.begin(mdnsHostname.c_str())) {
+          SerialPrintln(F("mDNS hostname changed - now reachable as ") + mdnsHostname + F(".local"));
+        } else {
+          SerialPrintln(F("mDNS hostname changed but responder failed to restart"));
+        }
+#endif
+
+        request->send(200, "text/plain", "Hostname updated");
+        return;
+      }
+
+      request->send(400, "text/plain", "Unknown 'action' - use reset, scan, connect, or set-hostname");
     });
 #endif
 
@@ -2576,8 +2617,8 @@ void setup() {
     webServer.begin();
 
 #if USE_MULTICAST == true
-    if (MDNS.begin(mdnsName)) {
-      SerialPrintln(F("DEBUG: mDNS responder started - reachable as ") + String(mdnsName) + F(".local"));
+    if (MDNS.begin(mdnsHostname.c_str())) {
+      SerialPrintln(F("DEBUG: mDNS responder started - reachable as ") + mdnsHostname + F(".local"));
     } else {
       SerialPrintln(F("DEBUG: mDNS responder failed to start"));
     }

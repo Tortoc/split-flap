@@ -1311,7 +1311,7 @@
 			</div>
 			<div class="modal-body">
 				<div class="modal-tab-bar">
-					<button type="button" id="systemTabBtnWifi" class="modal-tab-btn active" onclick="setSystemModalTab('wifi')">WLAN</button>
+					<button type="button" id="systemTabBtnWifi" class="modal-tab-btn active" onclick="setSystemModalTab('wifi')">Netzwerk</button>
 					<button type="button" id="systemTabBtnTimezone" class="modal-tab-btn" onclick="setSystemModalTab('timezone')">Zeitzone</button>
 					<button type="button" id="systemTabBtnQuietHours" class="modal-tab-btn" onclick="setSystemModalTab('quietHours')">Ruhezeiten</button>
 					<button type="button" id="systemTabBtnCrashLog" class="modal-tab-btn" onclick="setSystemModalTab('crashLog')">Crash-Log</button>
@@ -1364,6 +1364,32 @@
 							</p>
 						</div>
 						<p id="wifiConnectStatus"></p>
+					</div>
+
+					<!-- mDNS-Hostname - eigener Abschnitt, nicht Teil des Verbinden-Formulars oben, da
+					     unabhängig vom aktuellen WLAN gültig (überlebt einen Netzwerkwechsel). -->
+					<div style="text-align: left; margin-top: 1.5em; border-top: 1px solid var(--color-border); padding-top: 1.5em;">
+						<p style="font-size: 1rem;">
+							Das Gerät ist zusätzlich zur IP-Adresse über einen Namen im lokalen Netzwerk
+							erreichbar (sofern Router/Client mDNS unterstützen - nicht garantiert in jedem
+							Netzwerk).
+						</p>
+						<p>
+							<label>Aktueller DNS-Name</label>
+							<br>
+							<span id="currentMdnsHostnameDisplay" style="font-family: monospace; font-size: 1.1rem;">wird geladen...</span><span style="font-family: monospace;">.local</span>
+						</p>
+						<p>
+							<label for="newMdnsHostname">DNS-Name ändern</label>
+							<br>
+							<input type="text" id="newMdnsHostname" style="width: 250px;" placeholder="z.B. split-flap" maxlength="63" />
+							<button class="btn-primary" onclick="changeMdnsHostname()">Ändern</button>
+						</p>
+						<p class="note">
+							Nur Buchstaben, Ziffern und Bindestriche (nicht am Anfang/Ende), 1-63 Zeichen.
+							Bei mehreren Displays im selben Netzwerk muss jedes einen eigenen Namen bekommen.
+						</p>
+						<p id="mdnsHostnameChangeStatus"></p>
 					</div>
 				</div>
 
@@ -1601,6 +1627,14 @@ curl -X POST "http://192.168.1.50/api/wifi?action=connect" \
 								<p class="api-endpoint-desc">Zum Abfragen des Ergebnisses von <code>action=scan</code> bzw. <code>action=connect</code> oben.</p>
 								<pre class="api-code">curl "http://192.168.1.50/api/wifi?type=scan-result" -H "X-OTA-Password: splitflap"
 curl "http://192.168.1.50/api/wifi?type=connect-status" -H "X-OTA-Password: splitflap"</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>POST /api/wifi?action=set-hostname</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Ändert den mDNS-Namen (<code>http://&lt;name&gt;.local/</code>) - nur Buchstaben, Ziffern und Bindestriche (nicht am Anfang/Ende), 1-63 Zeichen. Startet den mDNS-Responder sofort neu, kein Neustart nötig.</p>
+								<pre class="api-code">curl -X POST "http://192.168.1.50/api/wifi?action=set-hostname" \
+  -H "X-OTA-Password: splitflap" --data "hostname=mein-split-flap"</pre>
 							</div>
 						</details>
 
@@ -3071,6 +3105,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						document.getElementById("accessControlTimezone").checked = !!responseObject.accessControlTimezonePublic;
 						document.getElementById("accessControlSystem").checked = !!responseObject.accessControlSystemPublic;
 						document.getElementById("currentTimezoneDisplay").innerText = responseObject.timezone || "(leer)";
+						document.getElementById("currentMdnsHostnameDisplay").innerText = responseObject.mdnsHostname || "split-flap";
 						document.getElementById("quietHoursEnabled").checked = !!responseObject.quietHoursEnabled;
 						document.getElementById("quietHoursStart").value = responseObject.quietHoursStart || "22:00";
 						document.getElementById("quietHoursEnd").value = responseObject.quietHoursEnd || "07:00";
@@ -3636,6 +3671,58 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("timezone=" + encodeURIComponent(newTimezone));
+		}
+
+		//Shares POST /api/wifi (action=set-hostname) rather than a dedicated endpoint - see that
+		//action's own comment (ESPMaster.ino) for why. The device validates the same rules
+		//client-side only mirrors them for faster feedback; the server-side check is authoritative.
+		function changeMdnsHostname() {
+			var newHostnameInput = document.getElementById("newMdnsHostname");
+			var statusEl = document.getElementById("mdnsHostnameChangeStatus");
+
+			var newHostname = newHostnameInput.value;
+			if (!newHostname) {
+				alert("Bitte einen DNS-Namen eingeben.");
+				return;
+			}
+			if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(newHostname)) {
+				statusEl.innerHTML = '<span class="status-offline">Ungültig: nur Buchstaben, Ziffern und Bindestriche (nicht am Anfang/Ende), 1-63 Zeichen.</span>';
+				return;
+			}
+
+			if (localDevelopment) {
+				statusEl.innerHTML = '<span class="status-online-ready">DNS-Name geändert (simuliert).</span>';
+				document.getElementById("currentMdnsHostnameDisplay").innerText = newHostname;
+				newHostnameInput.value = "";
+				return;
+			}
+
+			statusEl.innerHTML = "";
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						statusEl.innerHTML = '<span class="status-online-ready">DNS-Name geändert.</span>';
+						document.getElementById("currentMdnsHostnameDisplay").innerText = newHostname;
+						newHostnameInput.value = "";
+					} else if (this.status == 401) {
+						clearAdminPassword();
+						statusEl.innerHTML = '<span class="status-offline">Falsches Administrator-Passwort.</span>';
+					} else {
+						statusEl.innerHTML = '<span class="status-offline">Fehlgeschlagen: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
+					}
+				}
+			};
+
+			xhrRequest.onerror = function () {
+				statusEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
+			};
+
+			xhrRequest.open("POST", "/api/wifi", true);
+			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
+			xhrRequest.send("action=set-hostname&hostname=" + encodeURIComponent(newHostname));
 		}
 
 		//Used only to refresh after a save - reuses /api/settings (same fields loadAdminSettings()

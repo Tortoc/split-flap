@@ -16,6 +16,7 @@ void loadValuesFromFileSystem() {
   flapSpeed = readFile(LittleFS, flapSpeedPath, "80");
   deviceMode = readFile(LittleFS, deviceModePath, DEVICE_MODE_TEXT);
   otaPassword = readFile(LittleFS, otaPasswordPath, "splitflap"); //persisted, not a compile-time constant
+  mdnsHostname = readFile(LittleFS, mdnsHostnamePath, "split-flap"); //persisted, not a compile-time constant
   timezoneSetting = readFile(LittleFS, timezonePath, "Europe/Berlin"); //persisted, not a compile-time constant
   clockFormat = readFile(LittleFS, clockFormatPath, clockFormat);
   dateFormat = readFile(LittleFS, dateFormatPath, dateFormat);

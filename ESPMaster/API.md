@@ -5,10 +5,11 @@ endpoint layout.
 
 ## Conventions
 
-- **Base URL**: `http://<device-ip>/`, or `http://split-flap.local/` on networks/clients that
+- **Base URL**: `http://<device-ip>/`, or `http://<hostname>.local/` on networks/clients that
   support mDNS (most desktop OSes and phones; not universal on IoT-only networks/routers) - added
-  2026-09-10, `mdnsName` in `ESPMaster.ino`. Falls back to the router's DHCP client list or the
-  serial log at boot if mDNS resolution doesn't work on your network.
+  2026-09-10, `"split-flap"` by default, user-changeable (System → Netzwerk in the UI, or
+  [`POST /api/wifi?action=set-hostname`](#post-apiwifi)). Falls back to the router's DHCP client
+  list or the serial log at boot if mDNS resolution doesn't work on your network.
 - **Auth**: a single password protects state-changing endpoints, via an `X-OTA-Password` header.
   It can be turned off entirely (empty password - every endpoint below, including firmware/flash,
   becomes unauthenticated) or scoped down category-by-category while still set - see
@@ -141,6 +142,7 @@ speed, mode, WiFi status, etc.
   "scheduledMessageCount": 1,
   "rotationItemCount": 0,
   "wifiSettingsResettable": true,
+  "mdnsHostname": "split-flap",
   "otaPasswordSet": true,
   "accessControlTextPublic": false,
   "accessControlSettingsPublic": false,
@@ -161,7 +163,8 @@ submitted for Text mode" while `deviceMode` is actually `"text"`; ignore it othe
 configured at all (the password itself is never sent back, unlike the field this replaced), and
 each `accessControl*Public` is that category's own toggle. Both are safe to expose
 unauthenticated - neither is a secret. `wifiSettingsResettable` reflects `WIFI_USE_DIRECT` being
-off (AP-config mode).
+off (AP-config mode). `mdnsHostname` is the current `http://<hostname>.local/` name - user-
+changeable via [`POST /api/wifi?action=set-hostname`](#post-apiwifi), see that entry.
 
 `scheduledMessageCount` is just the count (cheap) - same reasoning as `rotationItemCount`: the
 client fetches the full list from [`GET /api/scheduled-messages`](#get-apischeduled-messages) only
@@ -752,14 +755,14 @@ curl -X DELETE "http://192.168.1.50/api/scheduled-messages?id=1755331200"
 
 ### `POST /api/wifi`
 
-Three WiFi write-actions sharing one registered route, picked via `?action=` (same
+Four WiFi write-actions sharing one registered route, picked via `?action=` (same
 route-registration-costs-heap reasoning as `GET /api/diag` and `POST /api/units`).
-`accessControlWifi` category for all three actions - see [Authentication](#authentication);
+`accessControlWifi` category for all four actions - see [Authentication](#authentication);
 `401 text/plain` if a password is required and missing/wrong. Only present if
 `WIFI_USE_DIRECT` is `false` (it is, by default - this device uses WiFiManager's AP-config flow
 rather than hardcoded credentials).
 
-**Query param** `action` (required): `reset` | `scan` | `connect`.
+**Query param** `action` (required): `reset` | `scan` | `connect` | `set-hostname`.
 
 **`action=reset`** - erases the stored WiFi configuration and reboots into AP setup mode (connect
 to the device's own `Split-Flap-AP` network to reconfigure).
@@ -777,12 +780,21 @@ connection immediately, before the new credentials are known to work; reverts au
 **Response:** `200 text/plain`: `"Connection attempt started"`. `400 text/plain` if `ssid` is
 missing/empty. `409 text/plain` if a connection attempt is already in progress.
 
-`400 text/plain` if `action` is missing or not one of the three values above.
+**`action=set-hostname`** - changes the mDNS hostname (`http://<hostname>.local/`), added
+2026-09-10 (user-configurable; was a compile-time constant before). Restarts the mDNS responder
+immediately (only if `USE_MULTICAST` is compiled in) - no reboot needed.
+**Body params:** `hostname` (required) - DNS label rules: 1-63 characters, letters/digits/hyphens
+only, must not start or end with a hyphen.
+**Response:** `200 text/plain`: `"Hostname updated"`. `400 text/plain` if `hostname` is
+missing/invalid.
+
+`400 text/plain` if `action` is missing or not one of the four values above.
 
 ```bash
 curl -X POST "http://192.168.1.50/api/wifi?action=reset"
 curl -X POST "http://192.168.1.50/api/wifi?action=scan"
 curl -X POST "http://192.168.1.50/api/wifi?action=connect" --data "ssid=MyNetwork&password=secret"
+curl -X POST "http://192.168.1.50/api/wifi?action=set-hostname" -H "X-OTA-Password: splitflap" --data "hostname=my-split-flap"
 ```
 
 ---

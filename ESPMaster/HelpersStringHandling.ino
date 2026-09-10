@@ -338,3 +338,26 @@ int parseTimeOfDayToMinutes(String value) {
 
   return hour * 60 + minute;
 }
+
+//Validates a candidate mDNS/DNS hostname label (the "split-flap" in "split-flap.local") - used by
+//POST /api/wifi's "set-hostname" action, see mdnsHostname's own comment (ESPMaster.ino). Standard
+//DNS label rules: 1-63 chars, only letters/digits/hyphens, must not start or end with a hyphen
+//(RFC 1035/1123) - ESP8266mDNS itself doesn't validate this and would otherwise happily broadcast
+//a name that most resolvers then silently refuse to look up.
+bool isValidMdnsHostname(String hostname) {
+  if (hostname.length() == 0 || hostname.length() > 63) {
+    return false;
+  }
+  if (hostname.charAt(0) == '-' || hostname.charAt(hostname.length() - 1) == '-') {
+    return false;
+  }
+  for (unsigned int i = 0; i < hostname.length(); i++) {
+    char c = hostname.charAt(i);
+    bool isLetter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    bool isDigit = (c >= '0' && c <= '9');
+    if (!isLetter && !isDigit && c != '-') {
+      return false;
+    }
+  }
+  return true;
+}
