@@ -606,7 +606,18 @@ volatile uint32_t otaBeginSize = 0;
 //Update.progress() at finish time (found 2026-09-09, live-verified against a real firmware image
 //- see the comment at the finish-phase comparison below for why Update.progress() alone is wrong).
 volatile size_t otaBytesWritten = 0;
-volatile bool otaChunkRejected = false;
+//Removed 2026-09-10, CODE_REVIEW_V4.md #1: this used to be a single shared/global "reject this
+//chunk" flag, set by EITHER the true owner's own body OR a losing concurrent request's body, and
+//cleared by whichever request's outer handler happened to run next - regardless of which one
+//actually caused/deserved it. Repro: A owns a chunk, B loses the ownership race and sets the
+//shared flag, A's own next fragment gets silently dropped because of it, A's outer handler then
+//reports 400 and (wrongly) clears the flag on B's behalf, letting B's later fragment fall through
+//and get appended onto A's leftover buffer - a Frankenstein "AAbb" chunk gets accepted for
+//writing. Fixed by never letting a losing request's body touch ANY shared state at all (see the
+//per-fragment "otaChunkOwner != request" check below) and having the outer handler derive its
+//response purely from "was I (still) the owner when my body finished" (a request-pointer
+//comparison, inherently request-scoped) plus statelessly re-checked facts (password,
+//request->contentLength()) instead of a mutable shared flag.
 volatile bool otaResultReady = false;
 volatile bool otaResultSuccess = false;
 String otaResultMessage = "";
@@ -617,14 +628,15 @@ volatile unsigned long otaLastActivityAt = 0; //watchdog for an abandoned upload
 PendingRequestSlot pendingFirmwareUploadSlot; //reused in turn by all three /api/firmware-* steps
 #endif
 #if UNIT_BOOTLOADER_ENABLE == true
-bool unitFirmwareUploadAuthFailed = false;
 //Set when the upload couldn't be written/moved into place (open() or write() failure, or the
 //final rename() failing) - see the temp-file+atomic-rename pattern on that handler
-//(CODE_REVIEW.md #5). Distinct from ...AuthFailed so the final response can tell the two apart.
+//(CODE_REVIEW.md #5). Safe to keep global/shared despite CODE_REVIEW_V4.md #1/#2 (unlike the
+//removed ...AuthFailed/...BusyFailed flags below): only ever SET inside the "am I the current
+//owner" gated section of the body handler, and only ever READ/cleared by the outer handler after
+//confirming (via wasOwner) that THIS request still is that same owner - and reset to false the
+//moment a NEW request claims ownership, so a vanished previous owner's leftover true can never
+//leak into the next one's result.
 bool unitFirmwareUploadWriteFailed = false;
-//Set when a second, different request tries to start while another authenticated upload is
-//already mid-transfer - see unitFirmwareUploadOwner's own comment (CODE_REVIEW_V3.md #2).
-bool unitFirmwareUploadBusyFailed = false;
 //Which request currently "owns" the shared static unitFirmwareFile/temp-file state while its body
 //is still streaming in - found 2026-09-10, CODE_REVIEW_V3.md #2 (live-reproduced against the
 //extracted callback): the earlier CODE_REVIEW_V2.md #3 fix only reordered the password check
@@ -637,13 +649,28 @@ bool unitFirmwareUploadBusyFailed = false;
 //index==0 first, checked by every later request's own index==0 (in addition to, not instead of,
 //the existing password check), and released once its owning request's outer handler runs (body
 //fully received) or immediately via onDisconnect if the connection vanishes before that.
+//
+//unitFirmwareUploadAuthFailed/unitFirmwareUploadBusyFailed (removed 2026-09-10,
+//CODE_REVIEW_V4.md #2) used to be shared/global flags set by ANY request's body handler (including
+//a losing/rejected one) and cleared by ANY request's outer handler - so a concurrent request B's
+//bad password or busy-rejection could silently poison the flags a completely different, legitimate
+//owner A's own outer handler then read, e.g. making A's real fragment look "already failed" and
+//get dropped, or making A's outer handler clear B's flag on B's behalf, letting a later fragment of
+//B's fall through and get appended onto A's file. Repro (see CODE_REVIEW_V4.md #2): file ends up
+//"AAzz" (missing "aa"), A gets 200, B gets 401. Fixed by never touching shared state for a request
+//that fails before claiming ownership, and by having the outer handler re-derive its response from
+//data that's either independently stateless (the password, re-checked directly) or inherently
+//request-scoped (wasOwner, a request-pointer comparison against unitFirmwareUploadOwner) instead of
+//a mutable flag any other request's callback could also write to.
 AsyncWebServerRequest* unitFirmwareUploadOwner = nullptr;
 #endif
-bool webFileUploadAuthFailed = false;
-bool webFileUploadWriteFailed = false; //same reasoning as unitFirmwareUploadWriteFailed above
-//Same busy-request-ownership pattern as unitFirmwareUploadBusyFailed/unitFirmwareUploadOwner above
-//(CODE_REVIEW_V3.md #2) - this upload channel has the identical shared-static-state problem.
-bool webFileUploadBusyFailed = false;
+//Same reasoning/lifetime as unitFirmwareUploadWriteFailed above (CODE_REVIEW_V4.md #2) - only set
+//within the "am I owner" gated section, only read/cleared once wasOwner is confirmed true, reset
+//to false the moment a new request claims ownership.
+bool webFileUploadWriteFailed = false;
+//Same ownership pattern as unitFirmwareUploadOwner above (CODE_REVIEW_V3.md #2). The former
+//webFileUploadAuthFailed/webFileUploadBusyFailed shared flags were removed for the identical
+//cross-request-poisoning reason documented on unitFirmwareUploadOwner above (CODE_REVIEW_V4.md #2).
 AsyncWebServerRequest* webFileUploadOwner = nullptr;
 
 String debugStatus = "";
@@ -1618,18 +1645,26 @@ void setup() {
     // pushed to a unit via /api/units/firmware-push. Requires X-OTA-Password, same as /api/firmware.
     webServer.on("/api/units/firmware", HTTP_POST,
       [](AsyncWebServerRequest * request) {
-        //This request's body is now fully received by definition - release its ownership claim
-        //if it had one, same reasoning as otaChunkOwner's release in /api/firmware-chunk above.
-        if (unitFirmwareUploadOwner == request) {
+        //Capture ownership BEFORE releasing it - the one reliable, request-scoped (pointer
+        //comparison) way to know whether THIS request's body ever won the shared static file
+        //state, independent of whatever any other concurrent request's body did in the meantime
+        //(CODE_REVIEW_V4.md #2 - replaces the old shared unitFirmwareUploadAuthFailed/
+        //unitFirmwareUploadBusyFailed flags, see unitFirmwareUploadOwner's declaration comment).
+        bool wasOwner = (unitFirmwareUploadOwner == request);
+        if (wasOwner) {
           unitFirmwareUploadOwner = nullptr;
         }
-        if (unitFirmwareUploadAuthFailed) {
-          unitFirmwareUploadAuthFailed = false;
-          request->send(401, "text/plain", "Invalid password");
-          return;
+        //Password is stateless and independently re-checked here, same as checkOtaPassword() for
+        //the ESPMaster OTA endpoints above - never gated behind a shared flag another request's
+        //callback could set or clear.
+        if (String(otaPassword) != "") {
+          String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
+          if (!constantTimeEquals(providedPassword, String(otaPassword))) {
+            request->send(401, "text/plain", "Invalid password");
+            return;
+          }
         }
-        if (unitFirmwareUploadBusyFailed) {
-          unitFirmwareUploadBusyFailed = false;
+        if (!wasOwner) {
           request->send(503, "text/plain", "Another firmware upload is already in progress, try again shortly");
           return;
         }
@@ -1649,16 +1684,13 @@ void setup() {
           //still-legitimately-in-progress) file handle and delete its temp file BEFORE checking
           //this new request's own password - an unauthenticated POST here could already interrupt
           //and corrupt a different, correctly-authenticated upload that was still streaming in,
-          //purely by virtue of also hitting index==0 on the shared static state. The failure
-          //response for a bad password is unaffected either way.
-          unitFirmwareUploadAuthFailed = false;
-          unitFirmwareUploadBusyFailed = false;
-          unitFirmwareUploadWriteFailed = false;
+          //purely by virtue of also hitting index==0 on the shared static state. On failure, just
+          //return WITHOUT touching any shared state (found 2026-09-10, CODE_REVIEW_V4.md #2) - the
+          //outer handler above re-checks the password itself and never trusts a shared flag for it.
           if (String(otaPassword) != "") {
             String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
             if (!constantTimeEquals(providedPassword, String(otaPassword))) {
               SerialPrintln(F("Unit firmware upload rejected: invalid password"));
-              unitFirmwareUploadAuthFailed = true;
               return;
             }
           }
@@ -1667,13 +1699,18 @@ void setup() {
           //shared static state is already claimed by another still-in-flight upload - found
           //2026-09-10, CODE_REVIEW_V3.md #2, see unitFirmwareUploadOwner's own declaration comment
           //for the full mechanism/repro. Must come before any of the cleanup/touching of
-          //unitFirmwareFile below - a losing request must never get anywhere near it.
+          //unitFirmwareFile below - a losing request must never get anywhere near it. Again, just
+          //return - no shared flag to set (CODE_REVIEW_V4.md #2).
           if (unitFirmwareUploadOwner != nullptr && unitFirmwareUploadOwner != request) {
             SerialPrintln(F("Unit firmware upload rejected: another upload is already in progress"));
-            unitFirmwareUploadBusyFailed = true;
             return;
           }
           unitFirmwareUploadOwner = request;
+          //Fresh ownership period starts here - discard any leftover true from a PREVIOUS owner
+          //whose connection vanished before its own outer handler ran to consume/clear it (that
+          //handler is the only other place this gets cleared). Without this reset, a vanished
+          //owner's failure could otherwise get blamed on this brand new, unrelated request.
+          unitFirmwareUploadWriteFailed = false;
           //Releases this claim immediately if the connection vanishes before the outer handler
           //ever runs to release it normally (e.g. WiFi drops mid-transfer) - otherwise every
           //future upload would be permanently rejected as "busy" by a request that never finishes.
@@ -1711,17 +1748,12 @@ void setup() {
           }
         }
 
-        if (unitFirmwareUploadAuthFailed || unitFirmwareUploadWriteFailed) {
-          return; //Already failed - final response already handled/will be handled above
-        }
-        //A per-fragment ownership check, not just a sticky "was rejected" flag - without this, a
-        //LATER fragment (index>0) of a rejected request would fall straight through to
-        //unitFirmwareFile.write() below, writing its bytes into the WINNING request's file (the
-        //exact same class of bug this whole fix exists to close, just reachable one check later -
-        //found while implementing CODE_REVIEW_V3.md #2's fix, not part of the original finding's
-        //own repro). Comparing live ownership on every fragment, instead of a separate sticky
-        //boolean, also avoids that boolean staying set from an earlier REJECTED request and then
-        //wrongly discarding the actual WINNING request's own later fragments too.
+        //A per-fragment ownership check, not a shared "was rejected" flag (CODE_REVIEW_V4.md #2) -
+        //without this, a LATER fragment (index>0) of a rejected request would fall straight
+        //through to unitFirmwareFile.write() below, writing its bytes into the WINNING request's
+        //file. Comparing live ownership on every fragment, instead of any shared boolean, means a
+        //rejected request's fragments are dropped purely because they're not the current owner -
+        //nothing it does can ever affect a different, legitimate owner's own fragments.
         if (unitFirmwareUploadOwner != request) {
           return;
         }
@@ -1928,18 +1960,22 @@ void setup() {
     //would wipe runtime settings files). Filename allowlisted, not an arbitrary path.
     webServer.on("/api/web-file", HTTP_POST,
       [](AsyncWebServerRequest * request) {
-        //This request's body is now fully received by definition - release its ownership claim
-        //if it had one, same reasoning as the other two upload channels above.
-        if (webFileUploadOwner == request) {
+        //Capture ownership BEFORE releasing it - same request-scoped derivation as
+        ///api/units/firmware above (CODE_REVIEW_V4.md #2).
+        bool wasOwner = (webFileUploadOwner == request);
+        if (wasOwner) {
           webFileUploadOwner = nullptr;
         }
-        if (webFileUploadAuthFailed) {
-          webFileUploadAuthFailed = false;
-          request->send(401, "text/plain", "Invalid password");
-          return;
+        //Password is stateless and independently re-checked here - never gated behind a shared
+        //flag another request's callback could set or clear.
+        if (String(otaPassword) != "") {
+          String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
+          if (!constantTimeEquals(providedPassword, String(otaPassword))) {
+            request->send(401, "text/plain", "Invalid password");
+            return;
+          }
         }
-        if (webFileUploadBusyFailed) {
-          webFileUploadBusyFailed = false;
+        if (!wasOwner) {
           request->send(503, "text/plain", "Another web file upload is already in progress, try again shortly");
           return;
         }
@@ -1952,22 +1988,19 @@ void setup() {
       },
       [](AsyncWebServerRequest * request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
         static File webUploadFile;
-        static bool webUploadFilenameValid = false;
         static String webUploadTmpPath;
 
         if (index == 0) {
           //Check the password FIRST, before touching any previous-upload state at all - same
           //reasoning as /api/units/firmware above (found 2026-09-09, CODE_REVIEW_V2.md #3): an
           //unauthenticated POST hitting index==0 must not be able to close/delete a different,
-          //still-legitimately-in-progress upload's file just by arriving first.
-          webFileUploadAuthFailed = false;
-          webFileUploadBusyFailed = false;
-          webFileUploadWriteFailed = false;
+          //still-legitimately-in-progress upload's file just by arriving first. On failure, just
+          //return - no shared flag to set (CODE_REVIEW_V4.md #2), the outer handler re-checks the
+          //password itself.
           if (String(otaPassword) != "") {
             String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
             if (!constantTimeEquals(providedPassword, String(otaPassword))) {
               SerialPrintln(F("Web file upload rejected: invalid password"));
-              webFileUploadAuthFailed = true;
               return;
             }
           }
@@ -1976,13 +2009,17 @@ void setup() {
           //shared static state is already claimed by another still-in-flight upload - found
           //2026-09-10, CODE_REVIEW_V3.md #2 (same underlying issue as /api/units/firmware above,
           //confirmed here by static analysis of the identical shared-static-state pattern). Must
-          //come before any cleanup/touching of webUploadFile below.
+          //come before any cleanup/touching of webUploadFile below. Again, just return
+          //(CODE_REVIEW_V4.md #2) - no shared flag.
           if (webFileUploadOwner != nullptr && webFileUploadOwner != request) {
             SerialPrintln(F("Web file upload rejected: another upload is already in progress"));
-            webFileUploadBusyFailed = true;
             return;
           }
           webFileUploadOwner = request;
+          //Fresh ownership period - discard any leftover true from a previous owner whose
+          //connection vanished before its own outer handler ran to consume/clear it (same
+          //reasoning as unitFirmwareUploadWriteFailed's reset above).
+          webFileUploadWriteFailed = false;
           //Releases this claim immediately if the connection vanishes before the outer handler
           //ever runs to release it normally - see the identical /api/units/firmware comment above.
           request->onDisconnect([request]() {
@@ -2003,10 +2040,15 @@ void setup() {
           }
 
           //"index.html.gz" is the only valid target - the whole UI is one gzip-compressed file,
-          //served automatically with Content-Encoding: gzip.
-          webUploadFilenameValid = (filename == "index.html.gz");
-          if (!webUploadFilenameValid) {
+          //served automatically with Content-Encoding: gzip. An invalid filename gives up
+          //ownership again immediately (found 2026-09-10, CODE_REVIEW_V4.md #2 - this used to be a
+          //separate shared static `webUploadFilenameValid` bool with the identical
+          //any-request-can-clobber-it problem as the auth/busy flags above; ownership alone
+          //already fully covers it, since a request that never keeps ownership automatically
+          //fails every later fragment's "webFileUploadOwner != request" check below too).
+          if (filename != "index.html.gz") {
             SerialPrintln(F("Web file upload rejected: filename not in allowlist: ") + filename);
+            webFileUploadOwner = nullptr;
             request->send(400, "text/plain", "Filename must be one of the known static assets");
             return;
           }
@@ -2024,13 +2066,10 @@ void setup() {
           }
         }
 
-        if (webFileUploadAuthFailed || !webUploadFilenameValid || webFileUploadWriteFailed) {
-          return;
-        }
         //Per-fragment ownership check, not a sticky flag - see the identical /api/units/firmware
-        //comment above for why this must compare live ownership on every fragment rather than
-        //relying solely on webFileUploadBusyFailed (which would otherwise also wrongly block the
-        //ACTUAL winning request once set by a different, rejected one).
+        //comment above for why this must compare live ownership on every fragment. Also the only
+        //thing needed to drop a rejected (bad password/busy/bad filename) request's later
+        //fragments, now that none of those paths touch any shared flag any more.
         if (webFileUploadOwner != request) {
           return;
         }
@@ -2110,26 +2149,32 @@ void setup() {
     //the next one, giving natural backpressure.
     webServer.on("/api/firmware-chunk", HTTP_POST,
       [checkOtaPassword](AsyncWebServerRequest * request) {
-        //This request's own body is now fully received by definition (the outer handler only
-        //ever runs once body parsing completes) - release its body-phase ownership claim, if it
-        //had one, now that the otaPendingPhase check below takes over guarding the next phase.
-        //Only clear it if it's actually THIS request's claim - a rejected/losing request's outer
-        //handler also always runs once ITS body finishes arriving over the wire, and must not
-        //clear whichever OTHER request's claim is still legitimately active.
-        if (otaChunkOwner == request) {
+        //Capture ownership BEFORE releasing it - this is the one and only thing that reliably
+        //tells THIS specific outer-handler invocation whether its own body ever got to claim the
+        //shared buffer, independent of anything any other concurrent request's body did (see
+        //otaChunkOwner's declaration comment and CODE_REVIEW_V4.md #1 for the bug this replaces).
+        bool wasOwner = (otaChunkOwner == request);
+        if (wasOwner) {
           otaChunkOwner = nullptr;
         }
         if (!checkOtaPassword(request)) {
           request->send(401, "text/plain", "Invalid password");
           return;
         }
-        if (otaChunkRejected) {
-          otaChunkRejected = false;
-          request->send(400, "text/plain", "Chunk too large or no upload in progress");
-          return;
-        }
         if (otaChunkBuffer == nullptr) {
           request->send(400, "text/plain", "No firmware upload in progress - call /api/firmware-start first");
+          return;
+        }
+        if (!wasOwner) {
+          //This request's body never claimed the shared buffer - either its declared size (Content-
+          //Length) exceeded OTA_CHUNK_SIZE, or another chunk was already mid-transfer/still pending
+          //when it arrived. Distinguish the two from data this request owns outright
+          //(contentLength()), not from any shared mutable flag another request could have touched.
+          if (request->contentLength() > OTA_CHUNK_SIZE) {
+            request->send(400, "text/plain", "Chunk too large");
+          } else {
+            request->send(503, "text/plain", "Another chunk upload is already in progress, try again shortly");
+          }
           return;
         }
         //Reject an overlapping request outright rather than silently overwriting the still-pending
@@ -2154,9 +2199,12 @@ void setup() {
           //otaChunkBuffer. Found 2026-09-09, CODE_REVIEW.md #3: without this, an unauthenticated
           //POST here could already corrupt an in-progress, correctly-authenticated upload's
           //buffered data before its own password is ever checked (which only happens afterward,
-          //in the request handler above, by which point the damage is already done).
+          //in the request handler above, by which point the damage is already done). On failure,
+          //just return WITHOUT touching any shared state at all (found 2026-09-10,
+          //CODE_REVIEW_V4.md #1) - this request simply never becomes otaChunkOwner, which the
+          //per-fragment check below and the outer handler's wasOwner re-derivation are both built
+          //to handle on their own, with nothing to leak into a different, legitimate request.
           if (!checkOtaPassword(request)) {
-            otaChunkRejected = true;
             return;
           }
           //Reject an overlapping chunk's body HERE too, before touching otaChunkLen/otaChunkBuffer
@@ -2164,12 +2212,8 @@ void setup() {
           //body has already streamed in and overwritten them. Found 2026-09-09,
           //CODE_REVIEW_V2.md #2, live-reproduced with the extracted body handler: a buffer holding
           //"AAAA" contained "BBBB" after a second body ran while the first chunk was still
-          //pending (loop() hadn't called Update.write() for it yet). Must come before the
-          //otaChunkLen=0 reset below, too - otherwise even a correctly-REJECTED overlapping body
-          //would still wipe the still-pending previous chunk's length, corrupting it a different
-          //way (loop() would then Update.write() zero bytes instead of the real chunk).
+          //pending (loop() hadn't called Update.write() for it yet).
           if (otaPendingPhase != OTA_PHASE_NONE) {
-            otaChunkRejected = true;
             return;
           }
           //Reject a SECOND body that's ALSO still mid-transfer, not just one whose outer handler
@@ -2177,17 +2221,25 @@ void setup() {
           //above only ever changes once a body is FULLY received, so two bodies that are BOTH
           //still streaming in concurrently (their fragments interleaved by AsyncTCP servicing
           //multiple open connections) previously passed both checks and corrupted each other -
-          //see otaChunkOwner's own declaration comment for the full mechanism and repro. Must also
-          //come before the otaChunkLen=0 reset below, same reasoning as the check above.
+          //see otaChunkOwner's own declaration comment for the full mechanism and repro.
           if (otaChunkOwner != nullptr && otaChunkOwner != request) {
-            otaChunkRejected = true;
+            return;
+          }
+          if (otaChunkBuffer == nullptr || total > OTA_CHUNK_SIZE) {
+            //This request's own chunk is invalid (no upload started, or too large) - never claim
+            //ownership for it; the outer handler re-derives the precise reason from
+            //request->contentLength() once this body finishes arriving.
             return;
           }
           otaChunkOwner = request;
           otaChunkLen = 0;
-          otaChunkRejected = (otaChunkBuffer == nullptr) || (total > OTA_CHUNK_SIZE);
         }
-        if (otaChunkRejected) {
+        //Per-fragment ownership check (not a shared "rejected" flag, see CODE_REVIEW_V4.md #1) -
+        //a request that never claimed ownership above, or that has since lost it (watchdog
+        //timeout, or its own overflow guard below), always fails this and is silently dropped -
+        //by construction this can never affect a DIFFERENT request's legitimate buffer, since the
+        //comparison is against this specific fragment's own `request` pointer.
+        if (otaChunkOwner != request) {
           return;
         }
         //Re-check on EVERY fragment, not just index==0 (found 2026-09-09, CODE_REVIEW_V2.md #4,
@@ -2199,12 +2251,12 @@ void setup() {
         //end) additionally means a genuinely still-arriving, slow-but-active body no longer looks
         //"abandoned" to that same watchdog in the first place.
         otaLastActivityAt = millis();
-        if (otaChunkBuffer == nullptr) {
-          otaChunkRejected = true;
-          return;
-        }
-        if (otaChunkLen + len > OTA_CHUNK_SIZE) {
-          otaChunkRejected = true; //shouldn't happen given the total check above, but never overflow
+        if (otaChunkBuffer == nullptr || otaChunkLen + len > OTA_CHUNK_SIZE) {
+          //Shouldn't happen given the total check at index==0 above, but never overflow the buffer.
+          //Give up ownership outright rather than setting a shared flag - the outer handler's
+          //wasOwner check then correctly reports this request as rejected (503) without needing
+          //any extra state, and a fresh request is free to claim the slot immediately after.
+          otaChunkOwner = nullptr;
           return;
         }
         memcpy(otaChunkBuffer + otaChunkLen, data, len);
@@ -3122,7 +3174,10 @@ void loop() {
     otaPendingPhase = OTA_PHASE_NONE;
 
   } else if (otaPendingPhase == OTA_PHASE_WRITE) {
-    bool ok = !otaChunkRejected && Update.write(otaChunkBuffer, otaChunkLen) == otaChunkLen;
+    //No otaChunkRejected check needed here (removed, CODE_REVIEW_V4.md #1) - otaPendingPhase only
+    //ever transitions to OTA_PHASE_WRITE from the /api/firmware-chunk outer handler above, which by
+    //now only does so once it has confirmed THIS request was the buffer's sole, still-current owner.
+    bool ok = (Update.write(otaChunkBuffer, otaChunkLen) == otaChunkLen);
     if (!ok) {
       SerialPrintln(F("Firmware upload: chunk write failed"));
       Update.printError(Serial);
