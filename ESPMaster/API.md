@@ -121,6 +121,7 @@ speed, mode, WiFi status, etc.
   "alignment": "left",
   "flapSpeed": "80",
   "deviceMode": "text",
+  "inputText": "HELLO WORLD",
   "version": "2.3.0-Scott",
   "lastTimeReceivedMessageDateTime": "16 Aug 26 09:12:04",
   "lastWrittenText": "",
@@ -143,6 +144,9 @@ speed, mode, WiFi status, etc.
 ```
 `timezone` duplicates `GET /api/timezone` (same value) - folded in here so the Administration view
 can populate its display from this one already-fetched response instead of a separate request.
+`inputText` is a shared internal variable every mode's per-second update (clock/date/countdown/
+countup/rotation) also writes its own rendered content into - only meaningful as "what was last
+submitted for Text mode" while `deviceMode` is actually `"text"`; ignore it otherwise.
 `otaPasswordSet`/`accessControl*Public` are the access-control state (CODE_REVIEW.md #29, see
 [Authentication](#authentication)) - `otaPasswordSet` is whether a password is currently
 configured at all (the password itself is never sent back, unlike the field this replaced), and

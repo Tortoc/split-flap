@@ -321,18 +321,22 @@ void updateDisplayJob() {
       return;
 
     case DISPLAY_JOB_WRITE_LINE: {
-      //A single line uses processSentenceToLines()'s own already-normalized output (lines[0]) too,
-      //not the raw originalMessage verbatim - found 2026-09-10: originalMessage can be LONGER than
-      //lines[0] whenever the raw input had irregular whitespace (e.g. double spaces) that
-      //processSentenceToLines() collapsed while determining line count/content - a case where
-      //lineCount still comes out as 1 (so this branch is taken) but originalMessage itself no
-      //longer fits within unitsAmount characters. centerString()/leftString()/rightString() then
-      //silently return it unpadded/untruncated, and the write loop below only ever reads the
-      //first unitsAmount characters of it - effectively truncating to whatever fit, arbitrarily,
-      //instead of the correctly space-collapsed content. lineCount==0 (message trims to nothing)
-      //has no lines[0] to fall back to - originalMessage there is safely empty/whitespace-only.
-      String line = displayJob.isMultiLine ? displayJob.lines[displayJob.currentLineIndex]
-                  : (displayJob.lineCount >= 1 ? displayJob.lines[0] : displayJob.originalMessage);
+      //Matches the old code exactly: only pull from the split lines when there's more than one -
+      //a single line always uses originalMessage verbatim, not processSentenceToLines()'s output.
+      //
+      //REVERTED 2026-09-10 (found live during testing): a 2026-09-10 "fix" briefly changed this to
+      //use processSentenceToLines()'s trimmed/double-space-collapsed lines[0] instead, reasoning
+      //that originalMessage could otherwise be silently truncated to whatever fit. That reasoning
+      //missed the actual intended use of leading/repeated spaces on this device: they're a
+      //deliberate way to manually POSITION text (e.g. leading spaces to shift a short message
+      //right, or extra spaces between words to space things out) - collapsing/trimming them is
+      //not a bug fix, it's the regression. Leading/double spaces are meant to reach the display
+      //exactly as typed for a single-line message; only the multi-line word-wrap path needs its
+      //own whitespace normalization for line-breaking purposes, and its use of lines[] here was
+      //never changed. Any actual length overflow just gets read up to unitsAmount characters by
+      //the loop below either way - no crash, only ever a truncation, exactly as before this whole
+      //file existed.
+      String line = displayJob.isMultiLine ? displayJob.lines[displayJob.currentLineIndex] : displayJob.originalMessage;
       if (displayJob.isMultiLine) {
         SerialPrint(F("-- Message Line: "));
         SerialPrintln(line);

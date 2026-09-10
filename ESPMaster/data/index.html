@@ -1771,6 +1771,17 @@
 
 								setSpeed(responseObject.flapSpeed);
 								setSavedMode(responseObject.deviceMode);
+								//Found 2026-09-10 (live user report): a browser reload always left the Text
+								//field empty, even though the server-side inputText was still fully intact -
+								//GET /api/settings simply never returned it, so the client had nothing to
+								//repopulate the field with. inputText is a SHARED variable other modes
+								//(clock/date/countdown/countup/rotation) also write their own rendered content
+								//into every second - only trustworthy as "what the user actually typed for Text
+								//mode" while deviceMode is really "text", so only populate the field then.
+								if (responseObject.deviceMode === "text") {
+									document.getElementById('inputText').value = responseObject.inputText || "";
+									updateCharacterCount();
+								}
 								setAlignment(responseObject.alignment);
 								setUnitCount(responseObject.unitCount);
 								setCountdownDate(responseObject.countdownToDateUnix);

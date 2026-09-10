@@ -818,6 +818,15 @@ void setup() {
       minimalDoc["alignment"] = alignment;
       minimalDoc["flapSpeed"] = flapSpeed;
       minimalDoc["deviceMode"] = deviceMode;
+      //Found 2026-09-10 (live user report): a browser reload always left the main Text field
+      //empty - this response never included inputText at all, so the client had nothing to
+      //repopulate it with even though the server-side value was still fully intact. inputText is
+      //a SHARED variable every mode's own per-second update (clock/date/countdown/countup/
+      //rotation) also writes its own rendered content into - only meaningful as "what the user
+      //actually typed for Text mode" while deviceMode is really "text" (see how the /api/settings
+      //POST handler above only ever assigns to it under that same condition); the client gates its
+      //use on deviceMode too, so sending it unconditionally here is harmless.
+      minimalDoc["inputText"] = inputText;
       minimalDoc["version"] = espVersion;
       minimalDoc["lastTimeReceivedMessageDateTime"] = lastReceivedMessageDateTime;
       minimalDoc["lastWrittenText"] = lastWrittenText;
