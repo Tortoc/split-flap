@@ -1316,6 +1316,7 @@
 					<button type="button" id="systemTabBtnQuietHours" class="modal-tab-btn" onclick="setSystemModalTab('quietHours')">Ruhezeiten</button>
 					<button type="button" id="systemTabBtnCrashLog" class="modal-tab-btn" onclick="setSystemModalTab('crashLog')">Crash-Log</button>
 					<button type="button" id="systemTabBtnAccessControl" class="modal-tab-btn" onclick="setSystemModalTab('accessControl')">Zugriffskontrolle</button>
+					<button type="button" id="systemTabBtnMqtt" class="modal-tab-btn" onclick="setSystemModalTab('mqtt')">MQTT</button>
 					<button type="button" id="systemTabBtnHelp" class="modal-tab-btn" onclick="setSystemModalTab('help')">Hilfe</button>
 				</div>
 
@@ -1502,6 +1503,53 @@
 					</div>
 				</div>
 
+				<div id="systemTabMqtt" class="hidden">
+					<div style="text-align: left;">
+						<p class="note">
+							Verbindet das Gerät mit einem MQTT-Broker und meldet sich dort per Home-Assistant-
+							Auto-Discovery an - ein Text-Entity zum Setzen/Auslesen des Anzeigetexts, plus ein
+							Diagnose-Sensor für freien Heap-Speicher. Ohne Broker-Adresse bzw. deaktiviert
+							bleibt dieser Teil des Codes zwar mitkompiliert, verbindet sich aber nie.
+						</p>
+						<p>
+							<label class="ls-checkbox-label"><input type="checkbox" id="mqttEnabled" /> MQTT aktivieren</label>
+						</p>
+						<p>
+							<label for="mqttBrokerHost">Broker-Host</label>
+							<br>
+							<input type="text" id="mqttBrokerHost" style="width: 250px;" placeholder="z.B. 192.168.1.50 oder mqtt.local" />
+						</p>
+						<p>
+							<label for="mqttBrokerPort">Broker-Port</label>
+							<br>
+							<input type="number" id="mqttBrokerPort" style="width: 100px;" min="1" max="65535" placeholder="1883" />
+						</p>
+						<p>
+							<label for="mqttUsername">Benutzername (optional)</label>
+							<br>
+							<input type="text" id="mqttUsername" autocomplete="off" style="width: 250px;" />
+						</p>
+						<p>
+							<label for="mqttPassword">Passwort (optional)</label>
+							<br>
+							<input type="password" id="mqttPassword" autocomplete="new-password" style="width: 250px;" placeholder="(unverändert lassen: leer lassen)" />
+						</p>
+						<p class="note">
+							Aktueller Passwort-Status: <span id="mqttPasswordStatus">wird geladen...</span>.
+							Leer lassen, um ein bereits gesetztes Passwort unverändert zu lassen.
+						</p>
+						<p>
+							<button class="btn-primary" onclick="saveMqttSettings()">MQTT-Einstellungen speichern</button>
+						</p>
+						<p>
+							<label>Verbindungsstatus</label>
+							<br>
+							<span id="mqttConnectionStatus" style="font-family: monospace; font-size: 1.1rem;">wird geladen...</span>
+						</p>
+						<p id="mqttSettingsChangeStatus"></p>
+					</div>
+				</div>
+
 				<div id="systemTabHelp" class="hidden">
 					<div style="text-align: left;">
 						<p class="note">
@@ -1635,6 +1683,19 @@ curl "http://192.168.1.50/api/wifi?type=connect-status" -H "X-OTA-Password: spli
 								<p class="api-endpoint-desc">Ändert den mDNS-Namen (<code>http://&lt;name&gt;.local/</code>) - nur Buchstaben, Ziffern und Bindestriche (nicht am Anfang/Ende), 1-63 Zeichen. Startet den mDNS-Responder sofort neu, kein Neustart nötig.</p>
 								<pre class="api-code">curl -X POST "http://192.168.1.50/api/wifi?action=set-hostname" \
   -H "X-OTA-Password: splitflap" --data "hostname=mein-split-flap"</pre>
+							</div>
+						</details>
+
+						<p class="api-group-title">MQTT</p>
+						<details class="api-endpoint">
+							<summary>GET/POST /api/mqtt</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">MQTT-Broker-Einstellungen + Home-Assistant-Auto-Discovery (Text-Entity + Heap-Sensor). Nur vorhanden, wenn <code>MQTT_ENABLE</code> einkompiliert ist (Standard). Passwort-Feld beim POST optional weglassen, um es unverändert zu lassen.</p>
+								<pre class="api-code">curl http://192.168.1.50/api/mqtt
+
+curl -X POST http://192.168.1.50/api/mqtt \
+  -H "X-OTA-Password: splitflap" \
+  --data "enabled=true&amp;brokerHost=192.168.1.50&amp;brokerPort=1883&amp;username=mqttuser&amp;password=mqttpass"</pre>
 							</div>
 						</details>
 
@@ -3043,12 +3104,14 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			document.getElementById("systemTabQuietHours").classList.toggle("hidden", tab !== "quietHours");
 			document.getElementById("systemTabCrashLog").classList.toggle("hidden", tab !== "crashLog");
 			document.getElementById("systemTabAccessControl").classList.toggle("hidden", tab !== "accessControl");
+			document.getElementById("systemTabMqtt").classList.toggle("hidden", tab !== "mqtt");
 			document.getElementById("systemTabHelp").classList.toggle("hidden", tab !== "help");
 			document.getElementById("systemTabBtnWifi").classList.toggle("active", tab === "wifi");
 			document.getElementById("systemTabBtnTimezone").classList.toggle("active", tab === "timezone");
 			document.getElementById("systemTabBtnQuietHours").classList.toggle("active", tab === "quietHours");
 			document.getElementById("systemTabBtnCrashLog").classList.toggle("active", tab === "crashLog");
 			document.getElementById("systemTabBtnAccessControl").classList.toggle("active", tab === "accessControl");
+			document.getElementById("systemTabBtnMqtt").classList.toggle("active", tab === "mqtt");
 			document.getElementById("systemTabBtnHelp").classList.toggle("active", tab === "help");
 		}
 
@@ -3106,6 +3169,14 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						document.getElementById("accessControlSystem").checked = !!responseObject.accessControlSystemPublic;
 						document.getElementById("currentTimezoneDisplay").innerText = responseObject.timezone || "(leer)";
 						document.getElementById("currentMdnsHostnameDisplay").innerText = responseObject.mdnsHostname || "split-flap";
+						document.getElementById("mqttEnabled").checked = !!responseObject.mqttEnabled;
+						document.getElementById("mqttBrokerHost").value = responseObject.mqttBrokerHost || "";
+						document.getElementById("mqttBrokerPort").value = responseObject.mqttBrokerPort || 1883;
+						document.getElementById("mqttUsername").value = responseObject.mqttUsername || "";
+						document.getElementById("mqttPasswordStatus").innerText = responseObject.mqttPasswordSet ? "gesetzt" : "nicht gesetzt";
+						document.getElementById("mqttConnectionStatus").innerHTML = responseObject.mqttConnected
+							? '<span class="status-online-ready">verbunden</span>'
+							: '<span class="status-offline">nicht verbunden</span>';
 						document.getElementById("quietHoursEnabled").checked = !!responseObject.quietHoursEnabled;
 						document.getElementById("quietHoursStart").value = responseObject.quietHoursStart || "22:00";
 						document.getElementById("quietHoursEnd").value = responseObject.quietHoursEnd || "07:00";
@@ -3723,6 +3794,62 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("action=set-hostname&hostname=" + encodeURIComponent(newHostname));
+		}
+
+		//POST /api/mqtt: `password` is only sent when the field isn't empty (leaving it blank means
+		//"leave unchanged", same convention as the OTA password field / changeOtaPassword()) -
+		//unlike the accessControl* checkboxes below, this endpoint's `enabled` still follows plain
+		//checkbox semantics (present = true, absent = false).
+		function saveMqttSettings() {
+			var statusEl = document.getElementById("mqttSettingsChangeStatus");
+			var enabled = document.getElementById("mqttEnabled").checked;
+			var brokerHost = document.getElementById("mqttBrokerHost").value;
+			var brokerPort = document.getElementById("mqttBrokerPort").value || "1883";
+			var username = document.getElementById("mqttUsername").value;
+			var password = document.getElementById("mqttPassword").value;
+
+			if (localDevelopment) {
+				statusEl.innerHTML = '<span class="status-online-ready">MQTT-Einstellungen gespeichert (simuliert).</span>';
+				document.getElementById("mqttPassword").value = "";
+				return;
+			}
+
+			statusEl.innerHTML = "";
+
+			var body = "brokerHost=" + encodeURIComponent(brokerHost) +
+				"&brokerPort=" + encodeURIComponent(brokerPort) +
+				"&username=" + encodeURIComponent(username);
+			if (enabled) {
+				body += "&enabled=true";
+			}
+			if (password) {
+				body += "&password=" + encodeURIComponent(password);
+			}
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						statusEl.innerHTML = '<span class="status-online-ready">MQTT-Einstellungen gespeichert.</span>';
+						document.getElementById("mqttPassword").value = "";
+						loadAdminSettings();
+					} else if (this.status == 401) {
+						clearAdminPassword();
+						statusEl.innerHTML = '<span class="status-offline">Falsches Administrator-Passwort.</span>';
+					} else {
+						statusEl.innerHTML = '<span class="status-offline">Fehlgeschlagen: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
+					}
+				}
+			};
+
+			xhrRequest.onerror = function () {
+				statusEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
+			};
+
+			xhrRequest.open("POST", "/api/mqtt", true);
+			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
+			xhrRequest.send(body);
 		}
 
 		//Used only to refresh after a save - reuses /api/settings (same fields loadAdminSettings()

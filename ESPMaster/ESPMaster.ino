@@ -25,6 +25,14 @@
 #define DEBUG_ENABLE true  //startup debug page, error panel, page-load log, serial debug log,
                            //and whether LED_ENABLE actually blinks - gated at runtime by
                            //showDebugPage (POST /api/debug-mode, persisted in /debugmode.txt)
+#define MQTT_ENABLE true   //MQTT + Home Assistant auto-discovery (found 2026-09-10 in two
+                           //independent forks, see
+                           //ServiceMqttFunctions.ino). This flag alone decides whether the
+                           //feature exists in the firmware AT ALL - PubSubClient's own buffer is
+                           //malloc()'d from its constructor, so a compile-time false here is the
+                           //only way to avoid that cost entirely. The separate, persisted
+                           //mqttEnabled (runtime, via POST /api/mqtt) controls whether it actually
+                           //connects - false by default, changeable without a reflash.
 
 #define WIFI_STATIC_IP      false //try a router-assigned static IP instead of DHCP
 #define FAE_MOD                   //modified PCB with an ESP-12F module
@@ -91,6 +99,9 @@
 #include <ezTime.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
+#if MQTT_ENABLE == true
+#include <PubSubClient.h>
+#endif
 #include <Wire.h>
 //twi.h's raw twi_writeTo() is used for twiboot flash-page writes instead of Wire - a page write is
 //132 bytes, which exceeds Wire's 128-byte TX buffer and silently drops the tail.
@@ -126,6 +137,31 @@ const char* wifiDirectPassword = "";
 String otaPassword = "";
 const char* otaPasswordPath = "/otapassword.txt";
 const char* mdnsHostnamePath = "/mdnsname.txt";
+
+#if MQTT_ENABLE == true
+//WiFiClient/PubSubClient objects declared here, not in ServiceMqttFunctions.ino - the Arduino
+//build concatenates .ino files in filename order (ESPMaster.ino before ServiceMqttFunctions.ino),
+//so a global used by code IN this file (GET /api/settings and POST /api/mqtt below both read
+//mqttClient.connected()) must be declared before that point, not in a later file.
+WiFiClient mqttWifiClient;
+PubSubClient mqttClient(mqttWifiClient);
+
+//MQTT broker settings - all persisted, all runtime-changeable via POST /api/mqtt (System ->
+//MQTT tab in the UI), same pattern as mdnsHostname/otaPassword above. mqttEnabled defaults to
+//off - MQTT_ENABLE (the compile-time flag above) only controls whether the feature EXISTS in
+//this firmware at all, not whether it's actively connecting.
+bool mqttEnabled = false;
+String mqttBrokerHost = "";
+int mqttBrokerPort = 1883;
+String mqttUsername = "";
+//Same never-sent-back-over-GET convention as otaPassword - see that comment.
+String mqttPassword = "";
+const char* mqttEnabledPath = "/mqttenabled.txt";
+const char* mqttBrokerHostPath = "/mqttbrokerhost.txt";
+const char* mqttBrokerPortPath = "/mqttbrokerport.txt";
+const char* mqttUsernamePath = "/mqttusername.txt";
+const char* mqttPasswordPath = "/mqttpassword.txt";
+#endif
 
 //Per-category "reachable without the password" toggles - only consulted when otaPassword is
 //non-empty (an empty password already means everything is open, see its own comment). Each
@@ -925,6 +961,16 @@ void setup() {
       minimalDoc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
       minimalDoc["wifiSettingsResettable"] = true;
       minimalDoc["mdnsHostname"] = mdnsHostname; //user-editable, see POST /api/wifi's "set-hostname" action
+#if MQTT_ENABLE == true
+      //Folded in here too, same "one fetch covers the whole System modal" reasoning as
+      //mdnsHostname above - the password itself is never included, see POST /api/mqtt's own GET.
+      minimalDoc["mqttEnabled"] = mqttEnabled;
+      minimalDoc["mqttBrokerHost"] = mqttBrokerHost;
+      minimalDoc["mqttBrokerPort"] = mqttBrokerPort;
+      minimalDoc["mqttUsername"] = mqttUsername;
+      minimalDoc["mqttPasswordSet"] = mqttPassword != "";
+      minimalDoc["mqttConnected"] = mqttEnabled && mqttClient.connected();
+#endif
       //timezone included so Administration can populate from this one fetch, given this device's
       //hard 5-connection TCP limit. The password itself is NEVER sent back (CODE_REVIEW.md #29) -
       //only whether one is currently set, plus the (non-secret) per-category toggle states, both
@@ -2577,6 +2623,64 @@ void setup() {
       pendingTimezoneSlot.accept(request);
     });
 
+#if MQTT_ENABLE == true
+    //Own registration, like /api/timezone above - a genuinely new settings category, no existing
+    //route it naturally shares with (see the "every registered handler costs a small permanent
+    //heap allocation" comment on /api/quiet-hours below for why that's a deliberate, not-free
+    //choice here, not an oversight).
+    webServer.on("/api/mqtt", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (request->method() == HTTP_GET) {
+        JsonDocument doc;
+        doc["mqttEnabled"] = mqttEnabled;
+        doc["mqttBrokerHost"] = mqttBrokerHost;
+        doc["mqttBrokerPort"] = mqttBrokerPort;
+        doc["mqttUsername"] = mqttUsername;
+        //Password itself never sent back, same convention as otaPassword - only whether one is
+        //set at all is exposed, not the value.
+        doc["mqttPasswordSet"] = mqttPassword != "";
+        doc["mqttConnected"] = mqttEnabled && mqttClient.connected();
+        AsyncResponseStream *response = request->beginResponseStream("application/json");
+        serializeJson(doc, *response);
+        request->send(response);
+        return;
+      }
+
+      // request->method() == HTTP_POST
+      if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
+
+      //Same HTML-checkbox semantics as the accessControl* toggles - present = true, absent = false.
+      mqttEnabled = request->hasParam("enabled", true);
+      writeFile(LittleFS, mqttEnabledPath, mqttEnabled ? "true" : "false");
+
+      if (request->hasParam("brokerHost", true)) {
+        mqttBrokerHost = request->getParam("brokerHost", true)->value();
+        writeFile(LittleFS, mqttBrokerHostPath, mqttBrokerHost.c_str());
+      }
+      if (request->hasParam("brokerPort", true)) {
+        String rawPort = request->getParam("brokerPort", true)->value();
+        if (!isNumber(rawPort) || rawPort.toInt() < 1 || rawPort.toInt() > 65535) {
+          request->send(400, "text/plain", "'brokerPort' must be a number 1-65535");
+          return;
+        }
+        mqttBrokerPort = rawPort.toInt();
+        writeFile(LittleFS, mqttBrokerPortPath, String(mqttBrokerPort).c_str());
+      }
+      if (request->hasParam("username", true)) {
+        mqttUsername = request->getParam("username", true)->value();
+        writeFile(LittleFS, mqttUsernamePath, mqttUsername.c_str());
+      }
+      //Same "present decides, absent means unchanged, empty explicitly clears" convention as
+      //otaPassword's newPassword - see that comment.
+      if (request->hasParam("password", true)) {
+        mqttPassword = request->getParam("password", true)->value();
+        writeFile(LittleFS, mqttPasswordPath, mqttPassword.c_str());
+      }
+
+      applyMqttSettingsChange();
+      request->send(200, "text/plain", "MQTT settings updated");
+    });
+#endif
+
     //No dedicated GET here - quietHoursEnabled/Start/End are already folded into GET /api/settings
     //(see minimalDoc above). Adding a second registered route on top of that one reproducibly
     //broke /api/settings' own response handling on this heap-constrained device - every registered
@@ -2633,6 +2737,10 @@ void setup() {
     }
 #endif
 
+#if MQTT_ENABLE == true
+    initMqtt();
+#endif
+
     blinkLed(8, 200, 100); // 8 blinks = Web server ready
     debugStatus = "Ready";
     SerialPrintln(F("DEBUG: Status = ") + debugStatus);
@@ -2662,6 +2770,9 @@ void setup() {
 void loop() {
 #if USE_MULTICAST == true
   MDNS.update();
+#endif
+#if MQTT_ENABLE == true
+  mqttLoop();
 #endif
 
   //First I2C scan, delayed 30s after boot (see setup()) - runs here instead of blocking setup(),
@@ -3196,6 +3307,9 @@ void loop() {
 #if WIFI_USE_DIRECT == false
     checkWifiScanRequest();
     checkWifiConnectAttempt();
+#endif
+#if MQTT_ENABLE == true
+    checkMqttState();
 #endif
 
     // Skip display updates if a web request is active to prevent blocking.

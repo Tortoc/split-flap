@@ -94,8 +94,10 @@ here to match.
 | POST | [`/api/reboot`](#post-apireboot) | Reboot the device |
 | GET | [`/api/scheduled-messages`](#get-apischeduled-messages) | List all scheduled messages |
 | DELETE | [`/api/scheduled-messages`](#delete-apischeduled-messages) | Remove a scheduled message |
-| POST | [`/api/wifi?action=`](#post-apiwifi) | WiFi actions: `reset`\|`scan`\|`connect` |
+| POST | [`/api/wifi?action=`](#post-apiwifi) | WiFi actions: `reset`\|`scan`\|`connect`\|`set-hostname` |
 | GET | [`/api/wifi?type=`](#get-apiwifi) | WiFi queries: `scan-result`\|`connect-status` |
+| GET | [`/api/mqtt`](#getpost-apimqtt) | Read MQTT broker settings/connection status |
+| POST | [`/api/mqtt`](#getpost-apimqtt) | Change MQTT broker settings |
 | POST | [`/api/ota-password`](#post-apiota-password) | Change the password and/or the access-control toggles |
 | GET | [`/api/timezone`](#get-apitimezone) | Read the current timezone |
 | POST | [`/api/timezone`](#post-apitimezone) | Change the timezone |
@@ -143,6 +145,12 @@ speed, mode, WiFi status, etc.
   "rotationItemCount": 0,
   "wifiSettingsResettable": true,
   "mdnsHostname": "split-flap",
+  "mqttEnabled": false,
+  "mqttBrokerHost": "",
+  "mqttBrokerPort": 1883,
+  "mqttUsername": "",
+  "mqttPasswordSet": false,
+  "mqttConnected": false,
   "otaPasswordSet": true,
   "accessControlTextPublic": false,
   "accessControlSettingsPublic": false,
@@ -164,7 +172,9 @@ configured at all (the password itself is never sent back, unlike the field this
 each `accessControl*Public` is that category's own toggle. Both are safe to expose
 unauthenticated - neither is a secret. `wifiSettingsResettable` reflects `WIFI_USE_DIRECT` being
 off (AP-config mode). `mdnsHostname` is the current `http://<hostname>.local/` name - user-
-changeable via [`POST /api/wifi?action=set-hostname`](#post-apiwifi), see that entry.
+changeable via [`POST /api/wifi?action=set-hostname`](#post-apiwifi), see that entry. The
+`mqtt*` fields only appear if `MQTT_ENABLE` is compiled in (the default) - see
+[`GET`/`POST /api/mqtt`](#getpost-apimqtt).
 
 `scheduledMessageCount` is just the count (cheap) - same reasoning as `rotationItemCount`: the
 client fetches the full list from [`GET /api/scheduled-messages`](#get-apischeduled-messages) only
@@ -841,6 +851,65 @@ being read.
 ```bash
 curl "http://192.168.1.50/api/wifi?type=scan-result" -H "X-OTA-Password: splitflap"
 curl "http://192.168.1.50/api/wifi?type=connect-status" -H "X-OTA-Password: splitflap"
+```
+
+---
+
+### `GET`/`POST /api/mqtt`
+
+MQTT + Home Assistant auto-discovery, added 2026-09-10 (found in two independent forks).
+Only exists at all if `MQTT_ENABLE` in `ESPMaster.ino` is `true`
+(the default) - a compile-time flag, not runtime-changeable, since `PubSubClient`'s buffer is
+`malloc()`'d from its constructor and there's no way to avoid that cost short of not linking the
+library in at all. Separately, `mqttEnabled` (this endpoint) controls whether it actually
+connects - `false` by default, changeable here without a reflash.
+
+Deliberately minimal scope: one Home Assistant `text` entity (bidirectional - reads and sets the
+display's current text, reusing the exact same code path `POST /api/text` without a `duration`
+already uses) plus one `sensor` entity (free heap, diagnostic only). No dedicated MQTT device
+mode, no buttons, no per-mode entities - the
+richer alternative (`Jerrys-modz/split-flap`) is intentionally *not* replicated, to keep
+the heap cost down on this device (see its own crash history, BUGFIX_LOG #41-43).
+
+**Auth:** `GET` is unauthenticated (no secret - the password itself is never included, only
+whether one is set). `POST` requires `X-OTA-Password` if a password is set and
+`accessControlSettings` isn't public (same category as the rest of `/api/settings`, no dedicated
+MQTT toggle).
+
+**`GET` response** `200 application/json`:
+```json
+{
+  "mqttEnabled": false,
+  "mqttBrokerHost": "",
+  "mqttBrokerPort": 1883,
+  "mqttUsername": "",
+  "mqttPasswordSet": false,
+  "mqttConnected": false
+}
+```
+
+**`POST` body params** (all optional individually - only the ones present are changed):
+
+| Param | Notes |
+| --- | --- |
+| `enabled` | Standard HTML checkbox semantics: present (any value) = MQTT enabled; absent = disabled. |
+| `brokerHost` | Broker hostname or IP. Empty clears it (and effectively disables connecting, even if `enabled` is set). |
+| `brokerPort` | `1` to `65535`. `400 text/plain` if present but not a valid number in range. |
+| `username` | Optional broker username. Empty clears it. |
+| `password` | Optional broker password. **Omit entirely to leave the current password unchanged** - same convention as `POST /api/ota-password`'s `newPassword`. An empty value explicitly clears it. Never sent back by `GET` - only `mqttPasswordSet` (whether one is currently set) is exposed. |
+
+Applying a change disconnects any current MQTT session and reconnects (or stays disconnected, if
+now disabled/no broker configured) on the next tick - no reboot needed.
+
+**Response:** `200 text/plain`: `"MQTT settings updated"`. `400 text/plain` if `brokerPort` is
+present but invalid. `401 text/plain` if a password is required and missing/wrong.
+
+```bash
+curl http://192.168.1.50/api/mqtt
+
+curl -X POST http://192.168.1.50/api/mqtt \
+  -H "X-OTA-Password: splitflap" \
+  --data "enabled=true&brokerHost=192.168.1.50&brokerPort=1883&username=mqttuser&password=mqttpass"
 ```
 
 ---

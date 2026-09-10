@@ -17,6 +17,14 @@ void loadValuesFromFileSystem() {
   deviceMode = readFile(LittleFS, deviceModePath, DEVICE_MODE_TEXT);
   otaPassword = readFile(LittleFS, otaPasswordPath, "splitflap"); //persisted, not a compile-time constant
   mdnsHostname = readFile(LittleFS, mdnsHostnamePath, "split-flap"); //persisted, not a compile-time constant
+#if MQTT_ENABLE == true
+  mqttEnabled = readFile(LittleFS, mqttEnabledPath, "false") == "true";
+  mqttBrokerHost = readFile(LittleFS, mqttBrokerHostPath, ""); //"" = not configured yet
+  String mqttBrokerPortRaw = readFile(LittleFS, mqttBrokerPortPath, "1883");
+  mqttBrokerPort = isNumber(mqttBrokerPortRaw) ? mqttBrokerPortRaw.toInt() : 1883;
+  mqttUsername = readFile(LittleFS, mqttUsernamePath, "");
+  mqttPassword = readFile(LittleFS, mqttPasswordPath, "");
+#endif
   timezoneSetting = readFile(LittleFS, timezonePath, "Europe/Berlin"); //persisted, not a compile-time constant
   clockFormat = readFile(LittleFS, clockFormatPath, clockFormat);
   dateFormat = readFile(LittleFS, dateFormatPath, dateFormat);

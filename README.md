@@ -199,6 +199,8 @@ To upload the sketch to the ESP you need to install a few things to your arduino
   - [ezTime](https://github.com/ropg/ezTime) - Version: 0.8.3
   - [LinkedList](https://github.com/ivanseidel/LinkedList) - Version: 1.3.3
   - [WiFiManager](https://github.com/tzapu/WiFiManager) - Version: 2.0.17
+  - [PubSubClient](https://github.com/knolleary/pubsubclient) - Version: 2.8.0 (MQTT support -
+    only linked in if `MQTT_ENABLE` in `ESPMaster.ino` is `true`, the default)
 
 To upload sketches to the ESP8266 you can either use an [Arduino Uno](https://create.arduino.cc/projecthub/pratikdesai/how-to-program-esp8266-esp-01-module-with-arduino-uno-598166) or you can buy a dedicated programmer. It is highly recommend getting a programmer as it makes uploading programs onto the ESP8266 much faster.
 
