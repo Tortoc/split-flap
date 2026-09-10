@@ -62,6 +62,19 @@ bool showText(String message, int delayMillis, String alignmentOverride) {
       displayJob.alignmentOverride == alignmentOverride &&
       displayJob.finalPauseMs == (unsigned long)delayMillis;
     if (matchesRunningJob) {
+      //A repeated identical request while the job is already sitting in its final hold phase
+      //refreshes that hold for a full fresh duration, rather than silently succeeding against
+      //whatever time happens to already be left on the original countdown - found 2026-09-10,
+      //CODE_REVIEW_V3.md #8 (live-reproduced): a 5s hold started at t=5000 (due to end at
+      //t=10000); an identical repeat request at t=9500 returned true here, but the message still
+      //disappeared at the ORIGINAL t=10000 - only 500ms later, not a fresh 5s from the repeat.
+      //Only applies once the job has actually settled into the hold (DISPLAY_JOB_PAUSE_AFTER_FINISH)
+      //- while it's still WAIT_READY_BEFORE/WRITE_LINE/WAIT_READY_AFTER (genuinely still rendering
+      //toward this same request for the first time), there's no hold running yet to refresh, and
+      //restarting the countdown here would be premature.
+      if (delayMillis > 0 && displayJob.state == DISPLAY_JOB_PAUSE_AFTER_FINISH) {
+        displayJob.pauseUntil = millis() + (unsigned long)delayMillis;
+      }
       return true; //already in progress toward exactly this request
     }
     return startDisplayJob(message, convertSpeed(flapSpeed), (unsigned long)delayMillis, alignmentOverride); //correctly returns false: busy, try again next tick

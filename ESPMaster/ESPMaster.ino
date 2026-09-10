@@ -284,6 +284,21 @@ String timezoneLookupDeferredValue = "";
 bool tzLookupDone = false;
 bool tzLookupResult = false;
 
+//Retry tracking for the ONE-SHOT boot-time timezone lookup (started once in setup(), entirely
+//fire-and-forget - see the comment there) - found 2026-09-10, CODE_REVIEW_V3.md #12: a transient
+//DNS/network failure during that single attempt permanently left the active timezone RULE
+//unresolved (ezTime's own 'UTC' default) until either an explicit POST /api/timezone or a luckier
+//boot - the later periodic NTP resync only refreshes the CLOCK, never re-resolves the zone RULE.
+//bootTimezoneLookupPending tracks "a boot/retry attempt is currently in flight, its own result not
+//yet consumed" so the retry logic below reacts to each completion exactly once (tzLookupDone
+//itself stays true indefinitely once set, so it alone can't distinguish a fresh completion from
+//an already-handled one - same reasoning as timezoneLookupDeferredRequest's nulling above, just
+//without an HTTP request to null).
+bool bootTimezoneRuleResolved = false;
+bool bootTimezoneLookupPending = false;
+unsigned long nextBootTimezoneRetryAt = 0; //0 = no retry currently scheduled
+#define BOOT_TIMEZONE_RETRY_MS 60000UL //not urgent - just needs to eventually succeed
+
 //Same reasoning, for the twiboot/bootloader endpoints (UNIT_BOOTLOADER_ENABLE).
 PendingRequestSlot pendingFirmwarePushSlot;
 int pendingFirmwarePushUnitIndex = -1;
@@ -394,6 +409,16 @@ int rotationCurrentIndex = 0;
 //could get skipped almost entirely while later items absorbed all the real visible time. Reset to
 //0 whenever the current item changes (checkRotation() below) or rotation restarts.
 unsigned long rotationItemAcceptedSeconds = 0;
+//Counts EVERY tick the current item has been current, regardless of whether showText() actually
+//accepted it - unlike rotationItemAcceptedSeconds above, which only counts genuinely
+//accepted/settled ticks. Used purely as a "how long has this item been stuck" defense in
+//checkRotation() (CODE_REVIEW_V3.md #13) - a permanently-unrenderable item (too many lines,
+//whether a pre-existing text item saved before the upfront validation in
+//replaceRotationItemsFromJson() existed, or a dynamic clock/date/countdown/countup item whose
+//content unpredictably grows too long) would otherwise leave rotationItemAcceptedSeconds stuck
+//below durationSeconds forever, permanently blocking every item behind it too. Reset alongside
+//rotationItemAcceptedSeconds, at every one of its own reset points.
+unsigned long rotationItemElapsedRealSeconds = 0;
 //Set by checkRotation() from the current item's Alignment field ("" = inherit the default) and
 //threaded through to showText() as an override.
 String rotationCurrentAlignment = "";
@@ -448,6 +473,21 @@ bool firmwareUpdateAuthFailed = false;
 //AsyncWebServer callback (too little stack there).
 #define OTA_CHUNK_SIZE 4096 //must match CHUNK_SIZE in index.html's uploadFirmware()
 uint8_t* otaChunkBuffer = nullptr; //allocated only while an upload is in progress
+//Which request currently "owns" otaChunkBuffer/otaChunkLen while its body is still streaming in -
+//found 2026-09-10, CODE_REVIEW_V3.md #1 (live-reproduced with the extracted body handler): the
+//existing otaPendingPhase!=OTA_PHASE_NONE check in the body handler only catches a SECOND request
+//starting once a FIRST request's entire body has already been fully received and its outer
+//handler has run (that's the only thing that ever sets otaPendingPhase away from NONE). Two
+//requests whose bodies are BOTH still streaming in concurrently - fully possible on this
+//single-threaded event loop, since AsyncTCP services multiple open connections' incoming data in
+//whatever order packets arrive - see otaPendingPhase stay OTA_PHASE_NONE the entire time either
+//body is mid-transfer, so neither ever rejects the other; repro: buffer holding "AA" (chunk A's
+//first fragment) ends up "BBaa" once B's index==0 fragment resets otaChunkLen out from under A's
+//still-in-flight remainder. otaChunkOwner closes that gap directly: claimed by whichever request's
+//body arrives at index==0 first, checked (not just otaPendingPhase) by every later request's own
+//index==0, and released once its owning request's outer handler runs (body fully received) or by
+//the abandoned-upload watchdog if the connection vanishes before that.
+AsyncWebServerRequest* otaChunkOwner = nullptr;
 volatile size_t otaChunkLen = 0;
 enum OtaPhase { OTA_PHASE_NONE, OTA_PHASE_BEGIN, OTA_PHASE_WRITE, OTA_PHASE_FINISH };
 volatile OtaPhase otaPendingPhase = OTA_PHASE_NONE; //what loop() should do next
@@ -473,9 +513,29 @@ bool unitFirmwareUploadAuthFailed = false;
 //final rename() failing) - see the temp-file+atomic-rename pattern on that handler
 //(CODE_REVIEW.md #5). Distinct from ...AuthFailed so the final response can tell the two apart.
 bool unitFirmwareUploadWriteFailed = false;
+//Set when a second, different request tries to start while another authenticated upload is
+//already mid-transfer - see unitFirmwareUploadOwner's own comment (CODE_REVIEW_V3.md #2).
+bool unitFirmwareUploadBusyFailed = false;
+//Which request currently "owns" the shared static unitFirmwareFile/temp-file state while its body
+//is still streaming in - found 2026-09-10, CODE_REVIEW_V3.md #2 (live-reproduced against the
+//extracted callback): the earlier CODE_REVIEW_V2.md #3 fix only reordered the password check
+//ahead of the cleanup step, so an UNAUTHENTICATED request could no longer disrupt an
+//authenticated one - but two AUTHENTICATED uploads (e.g. an accidental double-submit, or two
+//admin sessions) still shared the exact same static File/temp-path with no per-request isolation
+//at all, so their fragments could still interleave: A writes "AA", B starts and closes/replaces
+//A's temp file, A's later "aa" fragment then writes through B's now-reassigned handle - repro
+//confirmed: published file contains "BBaa". Claimed by whichever request's body arrives at
+//index==0 first, checked by every later request's own index==0 (in addition to, not instead of,
+//the existing password check), and released once its owning request's outer handler runs (body
+//fully received) or immediately via onDisconnect if the connection vanishes before that.
+AsyncWebServerRequest* unitFirmwareUploadOwner = nullptr;
 #endif
 bool webFileUploadAuthFailed = false;
 bool webFileUploadWriteFailed = false; //same reasoning as unitFirmwareUploadWriteFailed above
+//Same busy-request-ownership pattern as unitFirmwareUploadBusyFailed/unitFirmwareUploadOwner above
+//(CODE_REVIEW_V3.md #2) - this upload channel has the identical shared-static-state problem.
+bool webFileUploadBusyFailed = false;
+AsyncWebServerRequest* webFileUploadOwner = nullptr;
 
 String debugStatus = "";
 
@@ -639,6 +699,7 @@ void setup() {
     // network round-trip that can itself trip the software watchdog under network stress (see
     // ServiceAsyncTimeSyncFunctions.ino's header comment, BUGFIX_LOG #170).
     startTimezoneLookup(timezoneSetting);
+    bootTimezoneLookupPending = true; //see its own comment - lets loop() retry this specific attempt on failure
     SerialPrintln(F("DEBUG: Timezone lookup started (non-blocking) for: ") + timezoneSetting);
     
     // Debug mode was already loaded at the very top of setup(), before the earlier blinkLed()
@@ -1239,6 +1300,7 @@ void setup() {
             if (deviceMode == DEVICE_MODE_ROTATION) {
               rotationCurrentIndex = 0;
               rotationItemAcceptedSeconds = 0;
+              rotationItemElapsedRealSeconds = 0;
             }
 
             writeFile(LittleFS, deviceModePath, deviceMode.c_str());
@@ -1252,9 +1314,9 @@ void setup() {
         }
 
         if (rotationItemsUpdateRejected && scheduledMessageRejected) {
-          request->send(400, "text/plain", "OK, but the submitted rotation items were invalid JSON AND the scheduled message needs more lines than fit - neither was applied.");
+          request->send(400, "text/plain", "OK, but the submitted rotation items were rejected (invalid JSON, or a text item needs more lines than fit) AND the scheduled message needs more lines than fit - neither was applied.");
         } else if (rotationItemsUpdateRejected) {
-          request->send(400, "text/plain", "OK, but the submitted rotation items were invalid JSON and were NOT applied - the existing rotation list is unchanged.");
+          request->send(400, "text/plain", "OK, but the submitted rotation items were rejected (invalid JSON, or a text item needs more lines than fit to ever display) and were NOT applied - the existing rotation list is unchanged.");
         } else if (scheduledMessageRejected) {
           request->send(400, "text/plain", "OK, but the scheduled message needs more lines than fit and was NOT scheduled - it would never actually show.");
         } else {
@@ -1391,9 +1453,19 @@ void setup() {
     // pushed to a unit via /api/units/firmware-push. Requires X-OTA-Password, same as /api/firmware.
     webServer.on("/api/units/firmware", HTTP_POST,
       [](AsyncWebServerRequest * request) {
+        //This request's body is now fully received by definition - release its ownership claim
+        //if it had one, same reasoning as otaChunkOwner's release in /api/firmware-chunk above.
+        if (unitFirmwareUploadOwner == request) {
+          unitFirmwareUploadOwner = nullptr;
+        }
         if (unitFirmwareUploadAuthFailed) {
           unitFirmwareUploadAuthFailed = false;
           request->send(401, "text/plain", "Invalid password");
+          return;
+        }
+        if (unitFirmwareUploadBusyFailed) {
+          unitFirmwareUploadBusyFailed = false;
+          request->send(503, "text/plain", "Another firmware upload is already in progress, try again shortly");
           return;
         }
         if (unitFirmwareUploadWriteFailed) {
@@ -1415,6 +1487,7 @@ void setup() {
           //purely by virtue of also hitting index==0 on the shared static state. The failure
           //response for a bad password is unaffected either way.
           unitFirmwareUploadAuthFailed = false;
+          unitFirmwareUploadBusyFailed = false;
           unitFirmwareUploadWriteFailed = false;
           if (String(otaPassword) != "") {
             String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
@@ -1425,11 +1498,32 @@ void setup() {
             }
           }
 
-          //Only now, with this request's own credentials confirmed, touch the shared static
-          //upload state. If a previous upload's connection just vanished mid-transfer, "final"
-          //never fired for it and this handle was never closed - found live 2026-09-09 while
-          //testing the fix below (a dangling handle measurably cost heap/fragmentation across the
-          //next upload). Close it defensively before reusing the static variable for this attempt.
+          //Reject a second, DIFFERENT authenticated request trying to start while this channel's
+          //shared static state is already claimed by another still-in-flight upload - found
+          //2026-09-10, CODE_REVIEW_V3.md #2, see unitFirmwareUploadOwner's own declaration comment
+          //for the full mechanism/repro. Must come before any of the cleanup/touching of
+          //unitFirmwareFile below - a losing request must never get anywhere near it.
+          if (unitFirmwareUploadOwner != nullptr && unitFirmwareUploadOwner != request) {
+            SerialPrintln(F("Unit firmware upload rejected: another upload is already in progress"));
+            unitFirmwareUploadBusyFailed = true;
+            return;
+          }
+          unitFirmwareUploadOwner = request;
+          //Releases this claim immediately if the connection vanishes before the outer handler
+          //ever runs to release it normally (e.g. WiFi drops mid-transfer) - otherwise every
+          //future upload would be permanently rejected as "busy" by a request that never finishes.
+          request->onDisconnect([request]() {
+            if (unitFirmwareUploadOwner == request) {
+              unitFirmwareUploadOwner = nullptr;
+            }
+          });
+
+          //Only now, with this request's own credentials confirmed AND exclusive ownership
+          //claimed, touch the shared static upload state. If a previous upload's connection just
+          //vanished mid-transfer, "final" never fired for it and this handle was never closed -
+          //found live 2026-09-09 while testing the fix below (a dangling handle measurably cost
+          //heap/fragmentation across the next upload). Close it defensively before reusing the
+          //static variable for this attempt.
           if (unitFirmwareFile) {
             unitFirmwareFile.close();
           }
@@ -1454,6 +1548,17 @@ void setup() {
 
         if (unitFirmwareUploadAuthFailed || unitFirmwareUploadWriteFailed) {
           return; //Already failed - final response already handled/will be handled above
+        }
+        //A per-fragment ownership check, not just a sticky "was rejected" flag - without this, a
+        //LATER fragment (index>0) of a rejected request would fall straight through to
+        //unitFirmwareFile.write() below, writing its bytes into the WINNING request's file (the
+        //exact same class of bug this whole fix exists to close, just reachable one check later -
+        //found while implementing CODE_REVIEW_V3.md #2's fix, not part of the original finding's
+        //own repro). Comparing live ownership on every fragment, instead of a separate sticky
+        //boolean, also avoids that boolean staying set from an earlier REJECTED request and then
+        //wrongly discarding the actual WINNING request's own later fragments too.
+        if (unitFirmwareUploadOwner != request) {
+          return;
         }
 
         if (unitFirmwareFile) {
@@ -1658,9 +1763,19 @@ void setup() {
     //would wipe runtime settings files). Filename allowlisted, not an arbitrary path.
     webServer.on("/api/web-file", HTTP_POST,
       [](AsyncWebServerRequest * request) {
+        //This request's body is now fully received by definition - release its ownership claim
+        //if it had one, same reasoning as the other two upload channels above.
+        if (webFileUploadOwner == request) {
+          webFileUploadOwner = nullptr;
+        }
         if (webFileUploadAuthFailed) {
           webFileUploadAuthFailed = false;
           request->send(401, "text/plain", "Invalid password");
+          return;
+        }
+        if (webFileUploadBusyFailed) {
+          webFileUploadBusyFailed = false;
+          request->send(503, "text/plain", "Another web file upload is already in progress, try again shortly");
           return;
         }
         if (webFileUploadWriteFailed) {
@@ -1681,6 +1796,7 @@ void setup() {
           //unauthenticated POST hitting index==0 must not be able to close/delete a different,
           //still-legitimately-in-progress upload's file just by arriving first.
           webFileUploadAuthFailed = false;
+          webFileUploadBusyFailed = false;
           webFileUploadWriteFailed = false;
           if (String(otaPassword) != "") {
             String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
@@ -1691,10 +1807,29 @@ void setup() {
             }
           }
 
-          //Only now, with this request's own credentials confirmed, touch the shared static
-          //upload state. Same defensive cleanup as /api/units/firmware above, for a previous
-          //upload whose connection vanished mid-transfer ("final" never fired, so this never ran)
-          //- see that handler's comment.
+          //Reject a second, DIFFERENT authenticated request trying to start while this channel's
+          //shared static state is already claimed by another still-in-flight upload - found
+          //2026-09-10, CODE_REVIEW_V3.md #2 (same underlying issue as /api/units/firmware above,
+          //confirmed here by static analysis of the identical shared-static-state pattern). Must
+          //come before any cleanup/touching of webUploadFile below.
+          if (webFileUploadOwner != nullptr && webFileUploadOwner != request) {
+            SerialPrintln(F("Web file upload rejected: another upload is already in progress"));
+            webFileUploadBusyFailed = true;
+            return;
+          }
+          webFileUploadOwner = request;
+          //Releases this claim immediately if the connection vanishes before the outer handler
+          //ever runs to release it normally - see the identical /api/units/firmware comment above.
+          request->onDisconnect([request]() {
+            if (webFileUploadOwner == request) {
+              webFileUploadOwner = nullptr;
+            }
+          });
+
+          //Only now, with this request's own credentials confirmed AND exclusive ownership
+          //claimed, touch the shared static upload state. Same defensive cleanup as
+          ///api/units/firmware above, for a previous upload whose connection vanished mid-transfer
+          //("final" never fired, so this never ran) - see that handler's comment.
           if (webUploadFile) {
             webUploadFile.close();
           }
@@ -1725,6 +1860,13 @@ void setup() {
         }
 
         if (webFileUploadAuthFailed || !webUploadFilenameValid || webFileUploadWriteFailed) {
+          return;
+        }
+        //Per-fragment ownership check, not a sticky flag - see the identical /api/units/firmware
+        //comment above for why this must compare live ownership on every fragment rather than
+        //relying solely on webFileUploadBusyFailed (which would otherwise also wrongly block the
+        //ACTUAL winning request once set by a different, rejected one).
+        if (webFileUploadOwner != request) {
           return;
         }
 
@@ -1803,6 +1945,15 @@ void setup() {
     //the next one, giving natural backpressure.
     webServer.on("/api/firmware-chunk", HTTP_POST,
       [checkOtaPassword](AsyncWebServerRequest * request) {
+        //This request's own body is now fully received by definition (the outer handler only
+        //ever runs once body parsing completes) - release its body-phase ownership claim, if it
+        //had one, now that the otaPendingPhase check below takes over guarding the next phase.
+        //Only clear it if it's actually THIS request's claim - a rejected/losing request's outer
+        //handler also always runs once ITS body finishes arriving over the wire, and must not
+        //clear whichever OTHER request's claim is still legitimately active.
+        if (otaChunkOwner == request) {
+          otaChunkOwner = nullptr;
+        }
         if (!checkOtaPassword(request)) {
           request->send(401, "text/plain", "Invalid password");
           return;
@@ -1856,6 +2007,18 @@ void setup() {
             otaChunkRejected = true;
             return;
           }
+          //Reject a SECOND body that's ALSO still mid-transfer, not just one whose outer handler
+          //has already run - found 2026-09-10, CODE_REVIEW_V3.md #1: the otaPendingPhase check
+          //above only ever changes once a body is FULLY received, so two bodies that are BOTH
+          //still streaming in concurrently (their fragments interleaved by AsyncTCP servicing
+          //multiple open connections) previously passed both checks and corrupted each other -
+          //see otaChunkOwner's own declaration comment for the full mechanism and repro. Must also
+          //come before the otaChunkLen=0 reset below, same reasoning as the check above.
+          if (otaChunkOwner != nullptr && otaChunkOwner != request) {
+            otaChunkRejected = true;
+            return;
+          }
+          otaChunkOwner = request;
           otaChunkLen = 0;
           otaChunkRejected = (otaChunkBuffer == nullptr) || (total > OTA_CHUNK_SIZE);
         }
@@ -2512,6 +2675,10 @@ void loop() {
       timezoneSetting = timezoneLookupDeferredValue;
       writeFile(LittleFS, timezonePath, timezoneSetting.c_str());
       SerialPrintln(F("Timezone changed to: ") + timezoneSetting);
+      //The active rule is now confirmed resolved regardless of how the original boot attempt
+      //went - stops a still-pending boot-retry (CODE_REVIEW_V3.md #12) from redundantly
+      //re-resolving a value that's already correct (harmless either way, just unnecessary).
+      bootTimezoneRuleResolved = true;
     } else {
       SerialPrintln(F("Timezone change rejected: '") + timezoneLookupDeferredValue + F("' not recognized"));
     }
@@ -2523,6 +2690,33 @@ void loop() {
         deferredRequest->send(400, "text/plain", "Timezone not recognized - use a TZ database name like Europe/Berlin");
       }
     }
+  }
+
+  //Consumes the boot-time (or a retry of it) lookup's own result exactly once - see
+  //bootTimezoneRuleResolved's own comment (CODE_REVIEW_V3.md #12). Only reacts to a completion
+  //that has NO associated HTTP request (timezoneLookupDeferredRequest == nullptr) - an explicit
+  //POST /api/timezone's own outcome is fully handled by the block directly above and must never
+  //be reinterpreted as a boot/retry result here.
+  if (bootTimezoneLookupPending && timezoneLookupDeferredRequest == nullptr && tzLookupDone) {
+    bootTimezoneLookupPending = false;
+    if (tzLookupResult) {
+      bootTimezoneRuleResolved = true;
+      SerialPrintln(F("Boot timezone lookup succeeded"));
+    } else {
+      nextBootTimezoneRetryAt = millis() + BOOT_TIMEZONE_RETRY_MS;
+      SerialPrintln(F("Boot timezone lookup failed - retrying in ") + String(BOOT_TIMEZONE_RETRY_MS / 1000) + F("s"));
+    }
+  }
+
+  //Fires the scheduled retry once due - deliberately steps aside if a real user-initiated
+  ///api/timezone request is currently pending (harmless either way, isTimezoneLookupBusy() would
+  //also block it, but avoiding the race entirely means a real request never has to wait behind an
+  //automatic background retry it didn't ask for).
+  if (!bootTimezoneRuleResolved && !bootTimezoneLookupPending && nextBootTimezoneRetryAt != 0 &&
+      millisReached(nextBootTimezoneRetryAt) && !isTimezoneLookupBusy() && pendingTimezoneSlot.request == nullptr) {
+    SerialPrintln(F("Retrying boot timezone lookup for: ") + timezoneSetting);
+    startTimezoneLookup(timezoneSetting);
+    bootTimezoneLookupPending = true;
   }
 
   if (pendingUnitsInfoSlot.request != nullptr) {
@@ -2715,6 +2909,11 @@ void loop() {
     Update.end(false);
     delete[] otaChunkBuffer;
     otaChunkBuffer = nullptr;
+    //A body that claimed ownership but then vanished mid-transfer (connection dropped before its
+    //outer handler ever ran) would otherwise leave otaChunkOwner permanently stuck, since only
+    //that request's own outer handler normally clears it - the same watchdog window that already
+    //frees the buffer for this case releases the claim too.
+    otaChunkOwner = nullptr;
   }
 
   // Separate from the block above on purpose: the flash-side result and the deferred request can
@@ -2750,6 +2949,13 @@ void loop() {
     //Always runs to completion regardless of whether the client is still listening - see the
     //comment on the onDisconnect handler for /unit-firmware-push above.
     bool success = pushFirmwareToUnit(unitIndex, resultJson);
+    //Invalidate the display cache unconditionally, not just on success - found 2026-09-10,
+    //CODE_REVIEW_V3.md #10: pushFirmwareToUnit()'s very first step (requestUnitEnterBootloader())
+    //already interrupts the unit's running app and reboots it into the bootloader regardless of
+    //whether the push that follows ultimately succeeds - the unit's actual physical position may
+    //no longer match whatever the cache still believes, either way. Same reasoning as
+    //forceUnitRecoveryReset()'s identical fix (ServiceI2CRecoveryFunctions.ino).
+    displayRenderGeneration++;
 
     if (PendingRequestSlot::stillConnected(disconnected)) {
       deferredRequest->send(success ? 200 : 500, "application/json", resultJson);
@@ -2781,6 +2987,12 @@ void loop() {
       unsigned long bootloaderSearchStart = millis();
       uint8_t enterBootloaderResult = requestUnitEnterBootloader(unitIndex);
       SerialPrintln(F("  requestUnitEnterBootloader() Wire.endTransmission() = ") + String(enterBootloaderResult) + F(" (0 = success)"));
+      //Invalidate the display cache - found 2026-09-10, CODE_REVIEW_V3.md #10: this interrupts and
+      //reboots the unit's running app regardless of whether the probe below actually finds it in
+      //the bootloader afterward - see the identical fix/comment on pushFirmwareToUnit()'s call
+      //site above. Not reached in the collisionRisk branch above, which deliberately never sends
+      //this command at all - nothing to invalidate there.
+      displayRenderGeneration++;
 
       //Same retry/backoff as pushFirmwareToUnit() - give the watchdog reset + twiboot startup
       //time to happen. Probes ONLY unitIndex's own expected address, not a full scan of the whole
@@ -2910,8 +3122,16 @@ void loop() {
       if (deviceMode == DEVICE_MODE_ROTATION) {
         //rotationCurrentAlignment ("" = inherit the default) is set every tick by checkRotation().
         //Only count this second toward the current item's duration if it was actually accepted -
-        //see rotationItemAcceptedSeconds' own comment (CODE_REVIEW_V2.md #13).
-        if (showText(inputText, 0, rotationCurrentAlignment)) {
+        //see rotationItemAcceptedSeconds' own comment (CODE_REVIEW_V2.md #13). Additionally
+        //requires the display to have actually SETTLED (!isDisplayJobBusy()) before counting -
+        //found 2026-09-10, CODE_REVIEW_V3.md #9: showText() already returns true the moment a
+        //job merely STARTS toward this item (matching CODE_REVIEW_V2.md #9's "already in progress"
+        //check), well before the flaps have actually finished moving - counting from there meant
+        //part of an item's configured duration was consumed by motor movement time rather than
+        //genuinely stationary, readable display time, especially for a large flap-position change
+        //or a multi-line item.
+        bool rotationTextAccepted = showText(inputText, 0, rotationCurrentAlignment);
+        if (rotationTextAccepted && !isDisplayJobBusy()) {
           rotationItemAcceptedSeconds++;
         }
       }

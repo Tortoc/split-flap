@@ -100,8 +100,16 @@ void resetDisplayJobWaitSubstate() {
 //line breaks is a PERMANENT failure - unlike a busy display, retrying it later never helps, so
 //accepting it at all just defers an inevitable, silent failure to a worse moment - see
 //checkScheduledMessages() and the /api/text handler for the two places this matters).
+//
+//Normalizes umlauts FIRST, same as showText() does before it ever reaches startDisplayJob() -
+//found 2026-09-10, CODE_REVIEW_V3.md #11: every call site here runs on the RAW, not-yet-normalized
+//message (this is checked before showText() ever runs), but a 2-byte UTF-8 umlaut sequence
+//(ä/ö/ü/...) collapses to a single 1-byte placeholder once normalized - counting the raw bytes
+//instead double-counts every umlaut for line-wrapping purposes, rejecting messages that would
+//actually have fit once actually rendered (reproduced: 250x 'ä' counted as 56 lines raw vs. 28
+//lines normalized, at a 50-line limit - accepted once normalized, wrongly rejected before).
 bool isMessageTooLongToRender(String message) {
-  return processSentenceToLines(message).size() > DisplayJob::MAX_DISPLAY_LINES;
+  return processSentenceToLines(normalizeUmlautsForDisplay(message)).size() > DisplayJob::MAX_DISPLAY_LINES;
 }
 
 //Starts a new display job. Returns false (does nothing) if one is already running - callers that

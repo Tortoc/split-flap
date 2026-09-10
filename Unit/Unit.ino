@@ -243,7 +243,16 @@ void loop() {
     receivedNumberSnapshot = receivedNumber;
     displayedLetterSnapshot = displayedLetter;
   }
-  if (displayedLetterSnapshot != receivedNumberSnapshot)
+  //Also re-attempt whenever positionKnown is false, even if the numbers already coincide - found
+  //2026-09-10, CODE_REVIEW_V3.md #4: this comparison alone decided whether to call
+  //rotateToLetter() at all, completely independent of positionKnown (see that variable's own
+  //declaration comment) - if a failed calibration happened to leave displayedLetter equal to
+  //whatever receivedNumber already was (e.g. both 0/space), this dispatch never called
+  //rotateToLetter() again at all, so positionKnown staying false had no effect: the gate it
+  //controls lives INSIDE a function that was never even invoked. rotateToLetter() itself already
+  //handles this correctly once actually called - positionKnown==false forces its full-rotation/
+  //recalibration branch regardless of the numeric relationship between the two positions.
+  if (displayedLetterSnapshot != receivedNumberSnapshot || !positionKnown)
   {
     /*
       #ifdef SERIAL_ENABLE
@@ -460,7 +469,12 @@ void requestEvent() {
   //already done before it had even started moving toward the newly-received letter, so a job
   //could complete (and a subsequent write overwrite receivedNumber) before the pending rotation
   //ever actually happened. Found 2026-09-09, CODE_REVIEW.md #16.
-  uint8_t effectivelyBusy = (currentlyrotating != 0 || displayedLetter != receivedNumber) ? 1 : 0;
+  //Also busy while positionKnown is false - found 2026-09-10, CODE_REVIEW_V3.md #4: this report
+  //ignored positionKnown entirely, same gap as the loop() dispatch condition above it. Without
+  //this, a unit whose last calibration failed but whose displayedLetter (reset to 0 by that
+  //failure) happened to already equal receivedNumber would report itself READY despite its actual
+  //position being unconfirmed - letting the master consider the display job successfully done.
+  uint8_t effectivelyBusy = (currentlyrotating != 0 || displayedLetter != receivedNumber || !positionKnown) ? 1 : 0;
   Wire.write(effectivelyBusy);
   Wire.write(lowByte(calOffset));
   Wire.write(highByte(calOffset));

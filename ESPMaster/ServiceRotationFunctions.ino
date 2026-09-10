@@ -9,6 +9,7 @@ void checkRotation() {
   if (rotationCurrentIndex >= rotationItemCount) {
     rotationCurrentIndex = 0; //list shrank since the last advance - fall back to the start
     rotationItemAcceptedSeconds = 0;
+    rotationItemElapsedRealSeconds = 0;
   }
 
   //Bug (found while fixing #117): timezone.now() doesn't return real UTC (see getRealUtcNow()'s
@@ -23,9 +24,24 @@ void checkRotation() {
   RotationItem &item = rotationItems[rotationCurrentIndex];
   int durationSeconds = item.DurationSeconds > 0 ? item.DurationSeconds : 5;
 
-  if (rotationItemAcceptedSeconds >= (unsigned long)durationSeconds) {
+  //Defense-in-depth against a permanently-stuck item (CODE_REVIEW_V3.md #13, see
+  //rotationItemElapsedRealSeconds' own comment) - counts every tick regardless of acceptance, so
+  //it keeps climbing even while rotationItemAcceptedSeconds itself never moves. A generous grace
+  //period past the item's own configured duration distinguishes "genuinely just slow to render"
+  //(large flap-position change, multi-line item) from "will never succeed" without being
+  //trigger-happy about ordinary rendering delays.
+  rotationItemElapsedRealSeconds++;
+  #define ROTATION_STUCK_ITEM_GRACE_SECONDS 30
+  if (rotationItemElapsedRealSeconds > (unsigned long)durationSeconds + ROTATION_STUCK_ITEM_GRACE_SECONDS) {
+    SerialPrintln(F("Rotation item ") + String(rotationCurrentIndex) + F(" stuck (no accepted render within ") +
+      String(ROTATION_STUCK_ITEM_GRACE_SECONDS) + F("s past its own duration) - skipping to the next item"));
     rotationCurrentIndex = (rotationCurrentIndex + 1) % rotationItemCount;
     rotationItemAcceptedSeconds = 0;
+    rotationItemElapsedRealSeconds = 0;
+  } else if (rotationItemAcceptedSeconds >= (unsigned long)durationSeconds) {
+    rotationCurrentIndex = (rotationCurrentIndex + 1) % rotationItemCount;
+    rotationItemAcceptedSeconds = 0;
+    rotationItemElapsedRealSeconds = 0;
   }
 
   RotationItem &currentItem = rotationItems[rotationCurrentIndex];
@@ -86,6 +102,26 @@ bool replaceRotationItemsFromJson(String rotationItemsJson) {
     return false;
   }
 
+  //Pre-validate BEFORE touching any existing state - same "leave the previous, working list
+  //completely untouched on any validation failure" philosophy as the top-level JSON check above.
+  //Found 2026-09-10, CODE_REVIEW_V3.md #13: a text-type item whose Value alone needs more lines
+  //than fit (MAX_DISPLAY_LINES) passed every check this function otherwise does (the request-size
+  //limit is on the whole submitted JSON, not any one item's rendered content) - but every later
+  //showText() attempt for it inside checkRotation() then failed FOREVER, and since
+  //rotationItemAcceptedSeconds only advances on an ACCEPTED showText() call, the rotation could
+  //never progress past that one item again, permanently blocking every item behind it too. Only
+  //the text type can be checked exactly here - clock/date/countdown/countup items render dynamic,
+  //runtime-computed content that can't be reliably bounded upfront; checkRotation() below carries
+  //its own defense-in-depth timeout for those (and for any pre-existing text item saved before
+  //this check existed).
+  for (JsonVariant value : jsonDocument.as<JsonArray>()) {
+    String itemType = value["type"] | DEVICE_MODE_TEXT;
+    if (itemType == DEVICE_MODE_TEXT && isMessageTooLongToRender(String((const char*)(value["value"] | "")))) {
+      SerialPrintln(F("Rotation items JSON rejected: a text item needs more lines than fit to display - keeping the existing list, not touching it"));
+      return false;
+    }
+  }
+
   rotationItemCount = 0;
   for (JsonVariant value : jsonDocument.as<JsonArray>()) {
     if (rotationItemCount >= ROTATION_ITEMS_MAX) {
@@ -108,6 +144,7 @@ bool replaceRotationItemsFromJson(String rotationItemsJson) {
   //Always start a freshly-submitted sequence from the beginning.
   rotationCurrentIndex = 0;
   rotationItemAcceptedSeconds = 0;
+  rotationItemElapsedRealSeconds = 0;
 
   writeRotationItemsToFile();
   return true;

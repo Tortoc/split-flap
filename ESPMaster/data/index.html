@@ -2015,10 +2015,17 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 		// Request and retrieve settings from ESP-01s filesystem
 		function loadPage() {
-			//Set date time fields to be a minimum of todays date/time add 1 minute
-			var tzOffset = timezoneOffset * 60000;
+			//Set date time fields to be a minimum of today's device-local date/time + 1 minute -
+			//found 2026-09-10, CODE_REVIEW_V3.md #6: the old "shift by timezoneOffset, then read
+			//with the browser's own local getters" approach double-applies the shift once
+			//timezoneOffset is already populated - which it is on every loadPage() call AFTER the
+			//first settings fetch, since this function runs again after every settings submission.
+			//formatUnixSecondsForDeviceTimezone() already handles both states correctly (falls back
+			//to a safe UTC-getter-based shift before deviceTimezoneName is known yet, uses the real
+			//IANA zone once it is - see its own comment).
+			var nowPlus1MinUnix = Math.floor(Date.now() / 1000) + 60;
 			document.querySelectorAll('input[type="datetime-local"]').forEach((dateTimeElement) => {
-				var currentDateTime = convertDateToString((new Date(Date.now() - tzOffset + 60000)));
+				var currentDateTime = formatUnixSecondsForDeviceTimezone(nowPlus1MinUnix, false);
 				dateTimeElement.value = dateTimeElement.min = currentDateTime;
 			});
 
@@ -2348,55 +2355,48 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 		//Sets the version on the UI just for awareness
 		function setCountdownDate(dateUnix) {
-			//Set date fields to be a minimum of tomorrows date
 			var currentCountdownDate = document.getElementById('inputCountdownDateTime');
-			var tzOffset = timezoneOffset * 60000;
 
-			var currentDate = (new Date(Date.now() - tzOffset));
-			var nextDayDate = new Date();
-			nextDayDate.setDate(currentDate.getDate() + 1);
+			//"Today" and "tomorrow" as calendar days in the DEVICE's timezone, not the browser's -
+			//found 2026-09-10, CODE_REVIEW_V3.md #6: the previous "shift Date.now() by
+			//timezoneOffset, then read the result with the browser's own local getters" approach
+			//double-applies the shift once timezoneOffset is actually non-zero - which it always is
+			//on every loadPage() call AFTER the first settings fetch, since this function runs
+			//again after every settings submission, not just on a fresh page load. Comparing ISO
+			//"YYYY-MM-DD" strings instead of Date objects sidesteps that whole class of
+			//Date-object/timezone pitfall entirely. nextDayStr is then pure calendar-day arithmetic
+			//on top of todayStr (Date.UTC's rollover normalizes month/year boundaries) - not
+			//reprojected through the device timezone a second time, same reasoning as
+			//zonedWallTimeToUtcSeconds()'s own comment on this.
+			var todayStr = formatUnixSecondsForDeviceTimezone(Math.floor(Date.now() / 1000), true);
+			var [todayY, todayM, todayD] = todayStr.split('-').map(Number);
+			var nextDayStr = convertDateOnlyToStringUTC(new Date(Date.UTC(todayY, todayM - 1, todayD + 1)));
 
 			//If one has been set and it is not exceeded
 			if (dateUnix !== 0) {
-				var countdownDate = new Date(dateUnix * 1000);
-				if (countdownDate >= currentDate) {
-					//Rendered in the DEVICE's timezone, not read back via the Date object's own
-					//browser-local getters (found 2026-09-09, CODE_REVIEW_V2.md #11 - reproduced:
-					//a midnight-Berlin target stored as 23:00 UTC the day before showed the wrong,
-					//earlier calendar day once read back with UTC-as-local getters).
-					currentCountdownDate.value = formatUnixSecondsForDeviceTimezone(dateUnix, true);
-
-					if (countdownDate - currentDate < 24000) {
-						currentCountdownDate.min = convertDateOnlyToString(nextDayDate);
-						return;
-					}
+				var countdownDateStr = formatUnixSecondsForDeviceTimezone(dateUnix, true);
+				if (countdownDateStr >= todayStr) { //ISO date strings compare correctly lexically
+					currentCountdownDate.value = countdownDateStr;
+					currentCountdownDate.min = nextDayStr;
+					return;
 				}
 			}
-			else {
-				//Set date fields to be a minimum of tomorrows date
-				currentCountdownDate.value = convertDateOnlyToString(nextDayDate);
-			}
 
-			currentCountdownDate.min = convertDateOnlyToString(nextDayDate);
+			//Either no date set yet, or the stored one is already in the past - default forward.
+			currentCountdownDate.value = nextDayStr;
+			currentCountdownDate.min = nextDayStr;
 		}
 
 		//Countup counts days elapsed since a date, so - unlike Countdown above - it's constrained to
 		//today or earlier (a "since" date in the future doesn't make sense), defaulting to today.
 		function setCountupDate(dateUnix) {
 			var currentCountupDate = document.getElementById('inputCountupDateTime');
-			var tzOffset = timezoneOffset * 60000;
-			var currentDate = (new Date(Date.now() - tzOffset));
 
-			if (dateUnix !== 0) {
-				//Rendered in the DEVICE's timezone - see setCountdownDate()'s identical comment
-				//above (CODE_REVIEW_V2.md #11).
-				currentCountupDate.value = formatUnixSecondsForDeviceTimezone(dateUnix, true);
-			}
-			else {
-				currentCountupDate.value = convertDateOnlyToString(currentDate);
-			}
+			//Same device-timezone-string reasoning as setCountdownDate() above (CODE_REVIEW_V3.md #6).
+			var todayStr = formatUnixSecondsForDeviceTimezone(Math.floor(Date.now() / 1000), true);
 
-			currentCountupDate.max = convertDateOnlyToString(currentDate);
+			currentCountupDate.value = dateUnix !== 0 ? formatUnixSecondsForDeviceTimezone(dateUnix, true) : todayStr;
+			currentCountupDate.max = todayStr;
 		}
 
 		function convertDateToString(dateTime) {
@@ -2529,7 +2529,15 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					logPageLoadStatus("utcSecondsToZonedParts() failed (" + e + "), falling back to numeric offset", true);
 				}
 			}
-			const shiftedMs = unixSeconds * 1000 + timezoneOffset * 60000;
+			//Sign fixed 2026-09-10, CODE_REVIEW_V3.md #7: this was `+ timezoneOffset`, the wrong
+			//direction - timezoneOffset follows JS's own Date.getTimezoneOffset() convention
+			//(negative for a zone AHEAD of UTC, e.g. -120 for Europe/Berlin CEST), so converting
+			//UTC to LOCAL means SUBTRACTING it (local = UTC - offset), matching the established,
+			//already-correct convention in scheduledDateTimeStringToUtcSeconds()'s own fallback
+			//below (UTC = local + offset). Reproduced: 13:00 UTC with offset -120 rendered as 11:00
+			//instead of the correct 15:00 before this fix. Only reachable when deviceTimezoneName
+			//isn't available yet or Intl rejects it - the primary IANA-zone path above is unaffected.
+			const shiftedMs = unixSeconds * 1000 - timezoneOffset * 60000;
 			return dateOnly ? convertDateOnlyToStringUTC(new Date(shiftedMs)) : convertDateToStringUTC(new Date(shiftedMs));
 		}
 
@@ -2549,8 +2557,10 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				}
 			}
 			//Fallback: shift by the numeric offset, then format with UTC getters (not the browser's
-			//own local ones) so this doesn't ALSO depend on the browser's timezone.
-			var shifted = new Date(unixSeconds * 1000 + timezoneOffset * 60000);
+			//own local ones) so this doesn't ALSO depend on the browser's timezone. Sign fixed
+			//2026-09-10, CODE_REVIEW_V3.md #7 - see the identical fix/comment in
+			//formatUnixSecondsForDeviceTimezone() above for the full reasoning.
+			var shifted = new Date(unixSeconds * 1000 - timezoneOffset * 60000);
 			return shifted.toUTCString().replace(' GMT', '');
 		}
 
@@ -3171,6 +3181,14 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 							button.disabled = false;
 							resultEl.innerHTML = '<span class="status-offline">Antwort konnte nicht gelesen werden.</span>';
 						}
+					} else if (this.status == 401) {
+						//Found 2026-09-10, CODE_REVIEW_V3.md #3: this poll never sent the password header at
+						//all, even though the backend GET /api/wifi endpoints have required one (when set and
+						//the Wifi category isn't public) since BUGFIX_LOG #178 - every poll silently 401'd,
+						//the scan appeared to just hang/fail with no results ever showing up.
+						clearAdminPassword();
+						button.disabled = false;
+						resultEl.innerHTML = '<span class="status-offline">Falsches Administrator-Passwort.</span>';
 					} else {
 						button.disabled = false;
 						resultEl.innerHTML = '<span class="status-offline">Scan fehlgeschlagen.</span>';
@@ -3182,6 +3200,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				resultEl.innerHTML = '<span class="status-offline">Netzwerkfehler beim Scannen.</span>';
 			};
 			xhrRequest.open("GET", "/api/wifi?type=scan-result", true);
+			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send();
 		}
 
@@ -3294,6 +3313,14 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 							button.disabled = false;
 							statusEl.innerHTML = '<span class="status-offline">Antwort konnte nicht gelesen werden.</span>';
 						}
+					} else if (this.status == 401) {
+						//Found 2026-09-10, CODE_REVIEW_V3.md #3: this poll never sent the password header at
+						//all (same gap as pollWifiScanResult() above) - without this, every one of the up to
+						//30 retries below would 401 in turn, only ending in the generic "no result" timeout
+						//message after ~45s instead of telling the user it's a password problem.
+						clearAdminPassword();
+						button.disabled = false;
+						statusEl.innerHTML = '<span class="status-offline">Falsches Administrator-Passwort.</span>';
 					} else {
 						setTimeout(function () { pollWifiConnectStatus(attempt + 1); }, 1500);
 					}
@@ -3304,6 +3331,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				setTimeout(function () { pollWifiConnectStatus(attempt + 1); }, 1500);
 			};
 			xhrRequest.open("GET", "/api/wifi?type=connect-status", true);
+			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send();
 		}
 
@@ -3429,9 +3457,21 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				statusEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
 			};
 
+			//Found 2026-09-10, CODE_REVIEW_V3.md #5: this used to send only currentPassword+newPassword
+			//- the backend treats every ABSENT accessControl* param as "off" (standard HTML checkbox
+			//semantics, see its own comment), so a plain password change silently reset every
+			//previously-public category back to protected. Send the SAME current checkbox state
+			//saveAccessControl() below does, not just when that separate button is used.
+			var body = "currentPassword=" + encodeURIComponent(currentPasswordInput.value) + "&newPassword=" + encodeURIComponent(newPassword);
+			["Text", "Settings", "Units", "Wifi", "Timezone", "System"].forEach(function (category) {
+				if (document.getElementById("accessControl" + category).checked) {
+					body += "&accessControl" + category + "=on";
+				}
+			});
+
 			xhrRequest.open("POST", "/api/ota-password", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			xhrRequest.send("currentPassword=" + encodeURIComponent(currentPasswordInput.value) + "&newPassword=" + encodeURIComponent(newPassword));
+			xhrRequest.send(body);
 		}
 
 		//Explicit, separate action (own confirm() dialog) for clearing the password entirely -
