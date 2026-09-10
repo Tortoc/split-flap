@@ -132,6 +132,8 @@ speed, mode, WiFi status, etc.
   "unitCount": 3,
   "alignment": "left",
   "flapSpeed": "80",
+  "animationMode": "simultaneous",
+  "animationStaggerMs": 150,
   "deviceMode": "text",
   "inputText": "HELLO WORLD",
   "version": "2.3.0-Scott",
@@ -203,6 +205,8 @@ missing/wrong.
 | `alignment` | `left` \| `center` \| `right` | |
 | `deviceMode` | `text` \| `clock` \| `date` \| `countdown` | |
 | `flapSpeed` | `1`-`100` | Validated server-side even though the UI slider already clamps this |
+| `animationMode` | `simultaneous` \| `left-to-right` \| `right-to-left` \| `outside-in` \| `inside-out` | Added 2026-09-10 ("Animationen") - staggers each unit's start instead of writing all of them in the same tick. `simultaneous` (the default) behaves exactly like before this existed. |
+| `animationStaggerMs` | `0`-`1000` | Milliseconds between consecutive units' start in a directional mode - meaningless (but still validated) when `animationMode=simultaneous`. `0` also collapses any mode to "all at once". |
 | `inputText` | up to 500 chars | Only takes effect if `deviceMode` is (or becomes) `text` |
 | `scheduleEnabled` | `on` | If present, adds a **new** scheduled message instead of changing `deviceMode`/`inputText` directly - see below |
 | `scheduleShowIndefinitely` | `on` | Only relevant when `scheduleEnabled=on` |
@@ -226,7 +230,7 @@ live display immediately - remove one later via
 
 ```bash
 curl -X POST http://192.168.1.50/api/settings \
-  --data "deviceMode=text&inputText=HELLO&alignment=center&flapSpeed=80"
+  --data "deviceMode=text&inputText=HELLO&alignment=center&flapSpeed=80&animationMode=left-to-right&animationStaggerMs=200"
 ```
 
 ---

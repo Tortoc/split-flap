@@ -616,6 +616,35 @@
 			min-width: 180px;
 		}
 
+		/* Animation ("Animationen" field, added 2026-09-10): needs a bit more room than Ausrichtung
+		   for its select + number input side by side, so Geschwindigkeit (still perfectly usable
+		   narrower - it's a single slider) gives up some of its share for it. */
+		.ls-field-narrow {
+			flex: 0.65;
+			min-width: 140px;
+		}
+
+		.ls-field-wide {
+			flex: 1.3;
+			min-width: 220px;
+		}
+
+		.ls-animation-row {
+			display: flex;
+			gap: 8px;
+			align-items: center;
+		}
+
+		.ls-animation-row select {
+			flex: 1;
+			min-width: 0; /* allow the select to actually shrink below its content width in a flex row */
+		}
+
+		.ls-animation-row input[type=number] {
+			width: 64px;
+			flex: 0 0 auto;
+		}
+
 		/* Alignment: 3-way pill group, hidden native radios (same :has() pattern as .ls-rail-item),
 		   left-aligned under the "Ausrichtung" label. */
 		.ls-align-group {
@@ -1176,13 +1205,29 @@
 									</div>
 								</div>
 
-								<div class="ls-field">
+								<div class="ls-field ls-field-narrow">
 									<label for="rangeFlapSpeed" class="ls-microlabel ls-microlabel-split">
 										<span>Geschwindigkeit</span>
 										<span class="ls-accent-text"><span id="rangeFlapSpeedValue">80 &percnt;</span></span>
 									</label>
 									<input type="range" oninput="updateSpeedSlider(this)" id="rangeFlapSpeed" name="flapSpeed"
 										min="1" max="100" step="1" value="80" class="slider" />
+								</div>
+
+								<div class="ls-field ls-field-wide">
+									<span class="ls-microlabel">Animation</span>
+									<div class="ls-animation-row">
+										<select id="selectAnimationMode" name="animationMode" style="padding: 8px 10px; border-radius: 4px;">
+											<option value="simultaneous">Gleichzeitig</option>
+											<option value="left-to-right">Links &rarr; Rechts</option>
+											<option value="right-to-left">Rechts &rarr; Links</option>
+											<option value="outside-in">Außen &rarr; Mitte</option>
+											<option value="inside-out">Mitte &rarr; Außen</option>
+										</select>
+										<input type="number" id="inputAnimationStaggerMs" name="animationStaggerMs"
+											min="0" max="1000" step="10" value="150" title="Versatz in ms zwischen aufeinanderfolgenden Units" />
+									</div>
+									<p class="note" style="margin: 6px 0 0;">Versatz in ms zwischen den Units, wirkungslos bei "Gleichzeitig"</p>
 								</div>
 							</div>
 						</div>
@@ -1578,9 +1623,9 @@
 						<details class="api-endpoint">
 							<summary>POST /api/settings</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Einstellungen ändern (Modus, Text, Ausrichtung, Tempo, Countdown, geplante Nachricht, Rotation) - das, was das Hauptformular sendet.</p>
+								<p class="api-endpoint-desc">Einstellungen ändern (Modus, Text, Ausrichtung, Tempo, Animation, Countdown, geplante Nachricht, Rotation) - das, was das Hauptformular sendet. <code>animationMode</code> (<code>simultaneous</code>/<code>left-to-right</code>/<code>right-to-left</code>/<code>outside-in</code>/<code>inside-out</code>) + <code>animationStaggerMs</code> (0-1000) steuern den zeitversetzten Start pro Unit - <code>simultaneous</code> ist der Standard und verhält sich wie vor diesem Feature.</p>
 								<pre class="api-code">curl -X POST http://192.168.1.50/api/settings \
-  --data "deviceMode=text&amp;inputText=HELLO&amp;alignment=center&amp;flapSpeed=80"</pre>
+  --data "deviceMode=text&amp;inputText=HELLO&amp;alignment=center&amp;flapSpeed=80&amp;animationMode=left-to-right&amp;animationStaggerMs=200"</pre>
 							</div>
 						</details>
 						<details class="api-endpoint">
@@ -2129,6 +2174,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				setSpeed("80");
 				setSavedMode("text");
 				setAlignment("left");
+				setAnimation("simultaneous", 150);
 				setUnitCount("10");
 				setWiFiStatus("Connected", -65, "192.168.1.100"); // Mock WiFi status for development
 				setCountdownDate((Date.now() / 1000) + (24 * 60 * 60));
@@ -2189,6 +2235,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 									updateCharacterCount();
 								}
 								setAlignment(responseObject.alignment);
+								setAnimation(responseObject.animationMode, responseObject.animationStaggerMs);
 								setUnitCount(responseObject.unitCount);
 								setCountdownDate(responseObject.countdownToDateUnix);
 								if (pendingCountdownDateOverride !== null) {
@@ -2424,6 +2471,12 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 		function setSpeed(speed) {
 			document.getElementById("rangeFlapSpeedValue").innerHTML = speed + " %";
 			document.getElementById("rangeFlapSpeed").value = speed;
+		}
+
+		//Sets the animation mode/stagger fields ("Animationen", added 2026-09-10)
+		function setAnimation(mode, staggerMs) {
+			document.getElementById("selectAnimationMode").value = mode || "simultaneous";
+			document.getElementById("inputAnimationStaggerMs").value = (staggerMs === undefined || staggerMs === null) ? 150 : staggerMs;
 		}
 
 		//Sets alignment by checking corresponding radio button

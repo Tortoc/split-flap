@@ -371,6 +371,8 @@ int pendingBootloaderProbeUnitIndex = -1;
 //Search for parameter in HTTP POST request
 const char* PARAM_ALIGNMENT = "alignment";
 const char* PARAM_FLAP_SPEED = "flapSpeed";
+const char* PARAM_ANIMATION_MODE = "animationMode";
+const char* PARAM_ANIMATION_STAGGER_MS = "animationStaggerMs";
 const char* PARAM_DEVICEMODE = "deviceMode";
 const char* PARAM_INPUT_TEXT = "inputText";
 const char* PARAM_SCHEDULE_ENABLED = "scheduleEnabled";
@@ -403,9 +405,32 @@ const char* ALIGNMENT_MODE_LEFT = "left";
 const char* ALIGNMENT_MODE_CENTER = "center";
 const char* ALIGNMENT_MODE_RIGHT = "right";
 
+//Animation options ("Animationen", found 2026-09-10 on user request) - see
+//computeUnitAnimationDelayMs() (ServiceDisplayJobFunctions.ino) for what each one actually does.
+//Defined here, not in that file, despite being used there too - the Arduino build concatenates
+//.ino files in filename order (ESPMaster.ino before ServiceDisplayJobFunctions.ino), so a #define
+//used by code in THIS file (the ANIMATION_MODES array right below, and POST /api/settings'
+//validation further down) must be declared before that point, same reason mqttClient etc. had to
+//move for the MQTT feature.
+#define ANIMATION_MODE_SIMULTANEOUS   "simultaneous"
+#define ANIMATION_MODE_LEFT_TO_RIGHT  "left-to-right"
+#define ANIMATION_MODE_RIGHT_TO_LEFT  "right-to-left"
+#define ANIMATION_MODE_OUTSIDE_IN     "outside-in"
+#define ANIMATION_MODE_INSIDE_OUT     "inside-out"
+const char* ANIMATION_MODES[] = {
+  ANIMATION_MODE_SIMULTANEOUS, ANIMATION_MODE_LEFT_TO_RIGHT, ANIMATION_MODE_RIGHT_TO_LEFT,
+  ANIMATION_MODE_OUTSIDE_IN, ANIMATION_MODE_INSIDE_OUT
+};
+#define ANIMATION_MODES_COUNT 5
+#define ANIMATION_STAGGER_MS_MAX 1000 //see the plan's own reasoning - 10 units * 1000ms is already
+                                       //a ~9s spread for the last unit; more than that stops being
+                                       //a display effect and starts being just slow.
+
 //File paths to save input values permanently
 const char* alignmentPath = "/alignment.txt";
 const char* flapSpeedPath = "/flapspeed.txt";
+const char* animationModePath = "/animationmode.txt";
+const char* animationStaggerMsPath = "/animationstagger.txt";
 const char* deviceModePath = "/devicemode.txt";
 const char* countdownPath = "/countdown.txt";
 const char* scheduledMessagesPath = "/scheduled-messages.txt";
@@ -426,6 +451,8 @@ const char* countupSuffixPath = "/countupsuffix.txt";
 //Variables for storing things for checking and use in normal running
 String alignment = "";
 String flapSpeed = "";
+String animationMode = ANIMATION_MODE_SIMULTANEOUS; //default - see the user's own confirmation
+unsigned long animationStaggerMs = 150; //ms between consecutive units' start, see ANIMATION_MODES
 String inputText = "";
 String deviceMode = "";
 String countdownToDateUnix = "";
@@ -941,6 +968,8 @@ void setup() {
       minimalDoc["unitCount"] = unitsAmount;
       minimalDoc["alignment"] = alignment;
       minimalDoc["flapSpeed"] = flapSpeed;
+      minimalDoc["animationMode"] = animationMode;
+      minimalDoc["animationStaggerMs"] = animationStaggerMs;
       minimalDoc["deviceMode"] = deviceMode;
       //Found 2026-09-10 (live user report): a browser reload always left the main Text field
       //empty - this response never included inputText at all, so the client had nothing to
@@ -1055,6 +1084,8 @@ void setup() {
       bool newMessageScheduleShowIndefinitely = false;
       long newMessageScheduleDateTimeUnixValue = -1;
       String newAlignmentValue, newDeviceModeValue, newFlapSpeedValue, newInputTextValue, newCountdownToDateUnixValue = "";
+      String newAnimationModeValue = "";
+      String newAnimationStaggerMsValue = "";
       bool hasNewInputTextValue = false;
       String newClockFormatValue = "";
       String newDateFormatValue = "";
@@ -1110,6 +1141,35 @@ void setup() {
               submissionError = true;
             } else {
               newFlapSpeedValue = rawFlapSpeed.c_str();
+            }
+          }
+
+          //HTTP POST Animation mode value ("Animationen", found 2026-09-10 on user request)
+          if (p->name() == PARAM_ANIMATION_MODE) {
+            String receivedValue = p->value();
+            bool isValidAnimationMode = false;
+            for (int modeIndex = 0; modeIndex < ANIMATION_MODES_COUNT; modeIndex++) {
+              if (receivedValue == ANIMATION_MODES[modeIndex]) {
+                isValidAnimationMode = true;
+                break;
+              }
+            }
+            if (isValidAnimationMode) {
+              newAnimationModeValue = receivedValue;
+            } else {
+              SerialPrintln(F("animationMode provided was not valid. Value: ") + receivedValue);
+              submissionError = true;
+            }
+          }
+
+          //HTTP POST Animation stagger (ms between consecutive units' start) value
+          if (p->name() == PARAM_ANIMATION_STAGGER_MS) {
+            String rawAnimationStaggerMs = p->value();
+            if (!isNumber(rawAnimationStaggerMs) || rawAnimationStaggerMs.toInt() < 0 || rawAnimationStaggerMs.toInt() > ANIMATION_STAGGER_MS_MAX) {
+              SerialPrintln(F("animationStaggerMs provided was invalid (must be a number 0-") + String(ANIMATION_STAGGER_MS_MAX) + F("): ") + rawAnimationStaggerMs);
+              submissionError = true;
+            } else {
+              newAnimationStaggerMsValue = rawAnimationStaggerMs;
             }
           }
 
@@ -1275,6 +1335,23 @@ void setup() {
 
           writeFile(LittleFS, flapSpeedPath, flapSpeed.c_str());
           SerialPrintln(F("Flap Speed Updated: ") + flapSpeed);
+        }
+
+        //Only if a new animation mode - doesn't bump displayRenderGeneration, same reasoning as
+        //flapSpeed above: this only affects the TIMING of future writes, not what content counts
+        //as already-shown/cached.
+        if (newAnimationModeValue != "" && animationMode != newAnimationModeValue) {
+          animationMode = newAnimationModeValue;
+
+          writeFile(LittleFS, animationModePath, animationMode.c_str());
+          SerialPrintln(F("Animation Mode Updated: ") + animationMode);
+        }
+
+        if (newAnimationStaggerMsValue != "" && String(animationStaggerMs) != newAnimationStaggerMsValue) {
+          animationStaggerMs = (unsigned long)newAnimationStaggerMsValue.toInt();
+
+          writeFile(LittleFS, animationStaggerMsPath, newAnimationStaggerMsValue.c_str());
+          SerialPrintln(F("Animation Stagger Updated: ") + newAnimationStaggerMsValue);
         }
 
         //Only if countdown date has changed - gated to the countdown tab's own submission (its

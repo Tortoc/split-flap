@@ -14,6 +14,9 @@ void loadValuesFromFileSystem() {
   countupSinceDateUnix = readFile(LittleFS, countupPath, "0");
   alignment = readFile(LittleFS, alignmentPath, ALIGNMENT_MODE_LEFT);
   flapSpeed = readFile(LittleFS, flapSpeedPath, "80");
+  animationMode = readFile(LittleFS, animationModePath, ANIMATION_MODE_SIMULTANEOUS);
+  String animationStaggerMsRaw = readFile(LittleFS, animationStaggerMsPath, "150");
+  animationStaggerMs = isNumber(animationStaggerMsRaw) ? (unsigned long)animationStaggerMsRaw.toInt() : 150;
   deviceMode = readFile(LittleFS, deviceModePath, DEVICE_MODE_TEXT);
   otaPassword = readFile(LittleFS, otaPasswordPath, "splitflap"); //persisted, not a compile-time constant
   mdnsHostname = readFile(LittleFS, mdnsHostnamePath, "split-flap"); //persisted, not a compile-time constant
