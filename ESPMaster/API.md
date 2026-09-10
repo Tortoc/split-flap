@@ -48,7 +48,7 @@ a newly-added category always starts protected):
 | `accessControlText` | `POST /api/text` |
 | `accessControlSettings` | `POST /api/settings`, `POST /api/quiet-hours`, `DELETE /api/scheduled-messages` |
 | `accessControlUnits` | `POST /api/units` with `action=offset` or `action=reset` (`action=rescan` never needs a password) |
-| `accessControlWifi` | `POST /api/wifi` (all actions) |
+| `accessControlWifi` | `POST /api/wifi` (all actions), plus `GET /api/wifi?type=scan-result\|connect-status` (added 2026-09-10, see below) |
 | `accessControlTimezone` | `POST /api/timezone` |
 | `accessControlSystem` | `POST /api/reboot`, `POST /api/debug-mode` |
 
@@ -59,8 +59,13 @@ with `action=push` (`action=probe` needs no password), `POST /api/firmware-start
 (changing the password or any toggle always requires the *current* password - otherwise a
 category opened via one toggle could reopen every other one through this same endpoint).
 
-Every other endpoint (all plain `GET`s, plus `GET /api/i2c-scan`) has no auth check at all - none
-of them reveal a secret or change device state.
+Every other plain `GET`, plus `GET /api/i2c-scan`, has no auth check at all - none of them reveal
+a secret or change device state. **Two exceptions**: `GET /api/wifi?type=scan-result` and
+`GET /api/wifi?type=connect-status` *do* require the password (gated by `accessControlWifi`, same
+toggle as the WiFi `POST`s) - added 2026-09-10 after a locally-cached WiFi scan result was found
+to leak previously-seen network names/signal strength without auth (see `BUGFIX_LOG.md`). This
+statement used to claim all plain `GET`s were exempt; that was true until this fix and is corrected
+here to match.
 
 ## Endpoint index
 
@@ -783,7 +788,8 @@ curl -X POST "http://192.168.1.50/api/wifi?action=connect" --data "ssid=MyNetwor
 ### `GET /api/wifi`
 
 Two WiFi read-endpoints sharing one registered route, picked via `?type=`. Same
-`WIFI_USE_DIRECT == false` gating as `POST /api/wifi` above.
+`WIFI_USE_DIRECT == false` gating as `POST /api/wifi` above. Password-protected like the WiFi
+`POST`s (`accessControlWifi` toggle) since 2026-09-10 - see [Authentication](#authentication).
 
 **Query param** `type` (required): `scan-result` | `connect-status`.
 
@@ -808,8 +814,8 @@ being read.
 `400 text/plain` if `type` is missing or not one of the two values above.
 
 ```bash
-curl "http://192.168.1.50/api/wifi?type=scan-result"
-curl "http://192.168.1.50/api/wifi?type=connect-status"
+curl "http://192.168.1.50/api/wifi?type=scan-result" -H "X-OTA-Password: splitflap"
+curl "http://192.168.1.50/api/wifi?type=connect-status" -H "X-OTA-Password: splitflap"
 ```
 
 ---
