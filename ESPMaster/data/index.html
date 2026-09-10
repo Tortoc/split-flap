@@ -1301,7 +1301,10 @@
 	<div id="adminBannerMessage" class="banner-message admin-toast hidden"></div>
 
 	<div id="modalSystem" class="modal-backdrop hidden" onclick="closeAdminModalOnBackdrop(event, 'system')">
-		<div class="modal-panel" onclick="event.stopPropagation()">
+		<!-- modal-panel-wide (900px, same as the Units modal) - found 2026-09-10: the new Hilfe tab's
+		     curl examples (api-code blocks) no longer fit inside the plain 620px modal-panel without
+		     horizontal scrolling. -->
+		<div class="modal-panel modal-panel-wide" onclick="event.stopPropagation()">
 			<div class="modal-header">
 				<p class="modal-title">System</p>
 				<button type="button" class="modal-close-btn" onclick="closeAdminModal('system')" aria-label="Schließen">&times;</button>
