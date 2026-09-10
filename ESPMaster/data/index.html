@@ -477,6 +477,72 @@
 			color: var(--color-primary);
 		}
 
+		/* Hilfe-Reiter (API-Referenz mit curl-Beispielen) - siehe systemTabHelp weiter unten. */
+		.api-group-title {
+			font-size: 1.1rem;
+			color: var(--color-text);
+			margin: var(--space-xl) 0 var(--space-sm) 0;
+			text-align: left;
+		}
+
+		.api-group-title:first-child {
+			margin-top: 0;
+		}
+
+		.api-endpoint {
+			border: 1px solid var(--color-border);
+			border-radius: var(--radius-sm);
+			margin-bottom: var(--space-sm);
+			background: var(--color-card-bg);
+		}
+
+		.api-endpoint summary {
+			cursor: pointer;
+			padding: var(--space-sm) var(--space-md);
+			font-family: var(--font-mono);
+			font-size: 0.95rem;
+			color: var(--color-primary);
+			list-style: none;
+			text-align: left;
+		}
+
+		.api-endpoint summary::-webkit-details-marker {
+			display: none;
+		}
+
+		.api-endpoint summary::before {
+			content: "▸ ";
+		}
+
+		.api-endpoint[open] summary::before {
+			content: "▾ ";
+		}
+
+		.api-endpoint-body {
+			padding: 0 var(--space-md) var(--space-md) var(--space-md);
+			text-align: left;
+		}
+
+		.api-endpoint-desc {
+			font-size: var(--font-size-note);
+			color: var(--color-text-muted);
+			margin: 0 0 var(--space-sm) 0;
+		}
+
+		.api-code {
+			background: var(--color-input-bg);
+			border: 1px solid var(--color-border);
+			border-radius: var(--radius-sm);
+			padding: var(--space-sm);
+			font-family: var(--font-mono);
+			font-size: 0.8rem;
+			line-height: 1.5;
+			color: var(--color-text);
+			overflow-x: auto;
+			white-space: pre;
+			margin: 0;
+		}
+
 		.card-grid {
 			max-width: 1040px;
 			margin: 0 0 var(--space-xl) 0;
@@ -1247,6 +1313,7 @@
 					<button type="button" id="systemTabBtnQuietHours" class="modal-tab-btn" onclick="setSystemModalTab('quietHours')">Ruhezeiten</button>
 					<button type="button" id="systemTabBtnCrashLog" class="modal-tab-btn" onclick="setSystemModalTab('crashLog')">Crash-Log</button>
 					<button type="button" id="systemTabBtnAccessControl" class="modal-tab-btn" onclick="setSystemModalTab('accessControl')">Zugriffskontrolle</button>
+					<button type="button" id="systemTabBtnHelp" class="modal-tab-btn" onclick="setSystemModalTab('help')">Hilfe</button>
 				</div>
 
 				<div id="systemTabWifi">
@@ -1403,6 +1470,239 @@
 							<button class="btn-primary" onclick="saveAccessControl()">Zugriffskontrolle speichern</button>
 						</p>
 						<p id="accessControlStatus"></p>
+					</div>
+				</div>
+
+				<div id="systemTabHelp" class="hidden">
+					<div style="text-align: left;">
+						<p class="note">
+							Kompakte Referenz aller HTTP-Endpunkte dieses Geräts, mit fertigen
+							<code>curl</code>-Beispielen zum Kopieren. <code>192.168.1.50</code> ist ein
+							Platzhalter - durch die tatsächliche IP dieses Geräts ersetzen. Ausführlichere
+							Erklärungen (Antwortformate, Fehlerfälle, Hintergründe) stehen in
+							<code>ESPMaster/API.md</code> im Quellcode-Repository.
+						</p>
+						<p class="note">
+							<code>X-OTA-Password</code> wird nur gebraucht, wenn ein Passwort gesetzt ist UND
+							der jeweilige Endpunkt nicht als "öffentlich" freigeschaltet wurde (siehe Reiter
+							"Zugriffskontrolle"). Ist kein Passwort gesetzt, kann der Header überall weggelassen
+							werden.
+						</p>
+
+						<p class="api-group-title">Anzeige &amp; Text</p>
+						<details class="api-endpoint">
+							<summary>GET /api/settings</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Aktuelle Geräte-Einstellungen als JSON (Modus, Text, Tempo, WLAN-Status, Zugriffskontrolle, ...).</p>
+								<pre class="api-code">curl http://192.168.1.50/api/settings</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>POST /api/settings</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Einstellungen ändern (Modus, Text, Ausrichtung, Tempo, Countdown, geplante Nachricht, Rotation) - das, was das Hauptformular sendet.</p>
+								<pre class="api-code">curl -X POST http://192.168.1.50/api/settings \
+  --data "deviceMode=text&amp;inputText=HELLO&amp;alignment=center&amp;flapSpeed=80"</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>POST /api/text</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Schlanker Text-Push für Automatisierungen (Webhooks, Home Assistant, Kurzbefehle) - ohne <code>duration</code> dauerhaft, mit <code>duration</code> (Sekunden) nur vorübergehend.</p>
+								<pre class="api-code"># Dauerhaft
+curl -X POST http://192.168.1.50/api/text --data "text=HELLO WORLD"
+
+# 10 Sekunden lang, dann zurück zur vorherigen Anzeige
+curl -X POST http://192.168.1.50/api/text --data "text=BRB&amp;duration=10"</pre>
+							</div>
+						</details>
+
+						<p class="api-group-title">Zeitplan</p>
+						<details class="api-endpoint">
+							<summary>GET /api/scheduled-messages</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Liste aller geplanten Nachrichten.</p>
+								<pre class="api-code">curl http://192.168.1.50/api/scheduled-messages</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>DELETE /api/scheduled-messages?id=</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc"><code>id</code> ist der <code>scheduledDateTimeUnix</code>-Wert aus der Liste oben.</p>
+								<pre class="api-code">curl -X DELETE "http://192.168.1.50/api/scheduled-messages?id=1755331200"</pre>
+							</div>
+						</details>
+
+						<p class="api-group-title">Einheiten (Units)</p>
+						<details class="api-endpoint">
+							<summary>GET /api/units</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Live-Status und Kalibrierungs-Offset jeder Unit. Mit <code>?detail=1</code> zusätzlich Phase/Fortschritt.</p>
+								<pre class="api-code">curl http://192.168.1.50/api/units
+curl "http://192.168.1.50/api/units?detail=1"</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>POST /api/units?action=rescan|offset|reset</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc"><code>rescan</code> braucht kein Passwort; <code>offset</code>/<code>reset</code> schon (sofern ein Passwort gesetzt und diese Kategorie nicht öffentlich ist).</p>
+								<pre class="api-code">curl -X POST "http://192.168.1.50/api/units?action=rescan"
+
+curl -X POST "http://192.168.1.50/api/units?action=offset" \
+  -H "X-OTA-Password: splitflap" --data "id=0&amp;offset=100"
+
+curl -X POST "http://192.168.1.50/api/units?action=reset" \
+  -H "X-OTA-Password: splitflap"</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>GET /api/i2c-scan</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Roher I2C-Bus-Scan (Diagnose auf niedriger Ebene, unabhängig von den bereits bekannten Units).</p>
+								<pre class="api-code">curl http://192.168.1.50/api/i2c-scan</pre>
+							</div>
+						</details>
+
+						<p class="api-group-title">Zeitzone</p>
+						<details class="api-endpoint">
+							<summary>GET /api/timezone</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Aktuell konfigurierte Zeitzone (TZ-Datenbank-Name).</p>
+								<pre class="api-code">curl http://192.168.1.50/api/timezone</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>POST /api/timezone</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Zeitzone ändern - braucht Netzwerkzugriff (fragt live bei ezTimes Zeitzonen-Dienst nach).</p>
+								<pre class="api-code">curl -X POST http://192.168.1.50/api/timezone \
+  -H "X-OTA-Password: splitflap" --data "timezone=Europe/Berlin"</pre>
+							</div>
+						</details>
+
+						<p class="api-group-title">WLAN</p>
+						<details class="api-endpoint">
+							<summary>POST /api/wifi?action=reset|scan|connect</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc"><code>reset</code> löscht die WLAN-Zugangsdaten und startet in den AP-Konfigurationsmodus neu. <code>connect</code> trennt sofort und verbindet mit dem neuen Netzwerk - fällt nach ca. 15s automatisch zurück, falls das nicht klappt.</p>
+								<pre class="api-code">curl -X POST "http://192.168.1.50/api/wifi?action=reset" -H "X-OTA-Password: splitflap"
+curl -X POST "http://192.168.1.50/api/wifi?action=scan" -H "X-OTA-Password: splitflap"
+curl -X POST "http://192.168.1.50/api/wifi?action=connect" \
+  -H "X-OTA-Password: splitflap" --data "ssid=MeinNetzwerk&amp;password=geheim"</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>GET /api/wifi?type=scan-result|connect-status</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Zum Abfragen des Ergebnisses von <code>action=scan</code> bzw. <code>action=connect</code> oben.</p>
+								<pre class="api-code">curl "http://192.168.1.50/api/wifi?type=scan-result" -H "X-OTA-Password: splitflap"
+curl "http://192.168.1.50/api/wifi?type=connect-status" -H "X-OTA-Password: splitflap"</pre>
+							</div>
+						</details>
+
+						<p class="api-group-title">Sicherheit</p>
+						<details class="api-endpoint">
+							<summary>POST /api/ota-password</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Passwort und/oder Zugriffskontroll-Häkchen ändern - <code>currentPassword</code> ist immer Pflicht. Leeres <code>newPassword=</code> deaktiviert den Schutz global.</p>
+								<pre class="api-code"># Nur Passwort ändern
+curl -X POST http://192.168.1.50/api/ota-password \
+  --data "currentPassword=splitflap&amp;newPassword=neuesPasswort"
+
+# Schutz global deaktivieren
+curl -X POST http://192.168.1.50/api/ota-password \
+  --data "currentPassword=splitflap&amp;newPassword="
+
+# /api/text öffentlich machen, alles andere bleibt geschützt
+curl -X POST http://192.168.1.50/api/ota-password \
+  --data "currentPassword=splitflap&amp;accessControlText=on"</pre>
+							</div>
+						</details>
+
+						<p class="api-group-title">System &amp; Diagnose</p>
+						<details class="api-endpoint">
+							<summary>GET /api/diag?type=health|heap|tcp|test</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Vier Diagnose-Checks: Lebenszeichen, freier Heap, TCP-Verbindungspool, Basis-Konnektivität.</p>
+								<pre class="api-code">curl "http://192.168.1.50/api/diag?type=health"
+curl "http://192.168.1.50/api/diag?type=heap"
+curl "http://192.168.1.50/api/diag?type=tcp"</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>GET /api/crash-log</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Gespeichertes Absturz-Log (siehe auch den Reiter "Crash-Log" oben).</p>
+								<pre class="api-code">curl http://192.168.1.50/api/crash-log</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>DELETE /api/crash-log</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Absturz-Log löschen.</p>
+								<pre class="api-code">curl -X DELETE http://192.168.1.50/api/crash-log</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>POST /api/debug-mode</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Debug-Modus (Boot-Log-Seite, Fehlerstatus, Ladeprotokoll) ein-/ausschalten - bleibt über Neustarts hinweg gespeichert.</p>
+								<pre class="api-code">curl -X POST http://192.168.1.50/api/debug-mode \
+  -H "X-OTA-Password: splitflap" --data "enabled=true"</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>POST /api/reboot</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Gerät neu starten.</p>
+								<pre class="api-code">curl -X POST http://192.168.1.50/api/reboot -H "X-OTA-Password: splitflap"</pre>
+							</div>
+						</details>
+
+						<p class="api-group-title">Firmware-Update</p>
+						<details class="api-endpoint">
+							<summary>POST /api/web-file</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Ersetzt die Web-Oberfläche (<code>index.html.gz</code>) einzeln, ohne komplettes Dateisystem-Reflash.</p>
+								<pre class="api-code">gzip -9 -k -c index.html > index.html.gz
+curl -X POST http://192.168.1.50/api/web-file \
+  -H "X-OTA-Password: splitflap" \
+  -F "file=@index.html.gz;filename=index.html.gz;type=application/gzip"</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>POST /api/units/firmware</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Lädt eine kompilierte Unit-Firmware (<code>.bin</code>) hoch - speichert sie nur, sendet sie noch nicht an eine Unit.</p>
+								<pre class="api-code">curl -X POST http://192.168.1.50/api/units/firmware \
+  -H "X-OTA-Password: splitflap" -F "firmware=@Unit.bin"</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>POST /api/units/firmware-push?action=push|probe</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc"><code>push</code> sendet die zuvor hochgeladene Firmware per I2C an eine Unit. <code>probe</code> prüft nur, ob/wo eine Unit im Bootloader antwortet - schreibt nichts, braucht kein Passwort.</p>
+								<pre class="api-code">curl -X POST http://192.168.1.50/api/units/firmware-push \
+  -H "X-OTA-Password: splitflap" --data "action=push&amp;id=0"
+
+curl -X POST http://192.168.1.50/api/units/firmware-push --data "action=probe&amp;id=0"</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>POST /api/firmware-start / -chunk / -finish</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Browser-/Skript-basiertes ESPMaster-Firmware-Update in drei Schritten - <code>-chunk</code> je Aufruf max. 4096 Byte, erst nach Antwort den nächsten senden.</p>
+								<pre class="api-code">SIZE=$(stat -c%s ESPMaster.ino.bin)
+curl -X POST http://192.168.1.50/api/firmware-start \
+  -H "X-OTA-Password: splitflap" --data "size=$SIZE"
+
+curl -X POST http://192.168.1.50/api/firmware-chunk \
+  -H "X-OTA-Password: splitflap" -H "Content-Type: application/octet-stream" \
+  --data-binary @chunk_aa
+
+curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitflap"</pre>
+							</div>
+						</details>
 					</div>
 				</div>
 			</div>
@@ -2688,18 +2988,20 @@
 			document.getElementById("firmwareTabBtnUnits").classList.toggle("active", tab === "units");
 		}
 
-		//Switches between the System modal's WLAN/Zeitzone/Ruhezeiten/Crash-Log tabs.
+		//Switches between the System modal's WLAN/Zeitzone/Ruhezeiten/Crash-Log/Zugriffskontrolle/Hilfe tabs.
 		function setSystemModalTab(tab) {
 			document.getElementById("systemTabWifi").classList.toggle("hidden", tab !== "wifi");
 			document.getElementById("systemTabTimezone").classList.toggle("hidden", tab !== "timezone");
 			document.getElementById("systemTabQuietHours").classList.toggle("hidden", tab !== "quietHours");
 			document.getElementById("systemTabCrashLog").classList.toggle("hidden", tab !== "crashLog");
 			document.getElementById("systemTabAccessControl").classList.toggle("hidden", tab !== "accessControl");
+			document.getElementById("systemTabHelp").classList.toggle("hidden", tab !== "help");
 			document.getElementById("systemTabBtnWifi").classList.toggle("active", tab === "wifi");
 			document.getElementById("systemTabBtnTimezone").classList.toggle("active", tab === "timezone");
 			document.getElementById("systemTabBtnQuietHours").classList.toggle("active", tab === "quietHours");
 			document.getElementById("systemTabBtnCrashLog").classList.toggle("active", tab === "crashLog");
 			document.getElementById("systemTabBtnAccessControl").classList.toggle("active", tab === "accessControl");
+			document.getElementById("systemTabBtnHelp").classList.toggle("active", tab === "help");
 		}
 
 		function closeAdminModal(name) {

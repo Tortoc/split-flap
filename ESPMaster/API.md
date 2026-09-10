@@ -18,9 +18,11 @@ endpoint layout.
   allocation on a heap-constrained device; see that entry.
 - **CORS**: not configured - calls from a page served by a different origin will be blocked by
   the browser. Fine for `curl`/scripts/same-origin use, not for a third-party web page.
-- All endpoints below are on this ESP8266 build's default flash layout (`eesz=1M128`); nothing
-  here is affected by that choice, it's just how this device happens to be built (see
-  `firmware/README.md`).
+- All endpoints below are on this ESP8266 build's default flash layout (`eesz=4M1M` since
+  2026-08-21, previously `eesz=1M128`); nothing here is affected by that choice, it's just how
+  this device happens to be built (see `firmware/README.md`).
+- A live, in-device version of this reference (curl examples, same conventions) is also available
+  in the web UI itself: System → Hilfe.
 - **curl examples**: every endpoint below has one, using `192.168.1.50` as a placeholder for the
   device's actual IP - substitute your own throughout.
 
