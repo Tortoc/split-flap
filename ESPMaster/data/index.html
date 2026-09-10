@@ -3026,9 +3026,17 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				animationStaggerInput.min = "0";
 				animationStaggerInput.max = "1000";
 				animationStaggerInput.step = "10";
-				animationStaggerInput.title = "Versatz in ms für diesen Eintrag";
 				animationStaggerInput.disabled = item.animationMode === "";
-				animationStaggerInput.value = item.animationMode === "" ? "" : item.animationStaggerMs;
+				//While inheriting (no per-item override), show the current GLOBAL stagger value
+				//instead of leaving the field blank - found 2026-09-10 (live user report): an empty,
+				//greyed-out box looked broken/unconfigured rather than "using the default value
+				//shown here". Read directly from the top-level field rather than a separate global
+				//JS variable - it's already kept in sync with GET /api/settings by setAnimation().
+				var globalStaggerMs = document.getElementById("inputAnimationStaggerMs").value || 150;
+				animationStaggerInput.title = item.animationMode === ""
+					? "Erbt den globalen Versatz (aktuell " + globalStaggerMs + " ms) - erst ein Icon oben aktivieren, um das für diesen Eintrag zu überschreiben"
+					: "Versatz in ms für diesen Eintrag";
+				animationStaggerInput.value = item.animationMode === "" ? globalStaggerMs : item.animationStaggerMs;
 				animationStaggerInput.oninput = (function (i) { return function () { updateRotationItemAnimationStaggerMs(i, this.value); }; })(index);
 				animationWrapper.appendChild(animationStaggerInput);
 				row.appendChild(animationWrapper);
