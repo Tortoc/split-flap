@@ -818,7 +818,10 @@ void setup() {
     blinkLed(6, 200, 100); // 6 blinks = File system init
     initialiseFileSystem();
     loadValuesFromFileSystem();
-    checkAndPersistCrashLog(); // see ServiceCrashLogFunctions.ino - must run after LittleFS mounts
+    //See ServiceCrashLogFunctions.ino - must run after LittleFS mounts. Also called from the
+    //"WiFi didn't come up" else-branch below (found 2026-09-10) - this call here only covers the
+    //case where WiFi succeeded on this exact boot.
+    checkAndPersistCrashLog();
 
     // Must come after loadValuesFromFileSystem() - needs timezoneSetting, populated from there.
     // Was a blocking timezone.setLocation() call - missed in the first pass of the CODE_REVIEW.md
@@ -2948,6 +2951,22 @@ void setup() {
     SerialPrintln(F("#######################################################"));
   }
   else {
+    //Crash-log persistence (and loading the rest of the persisted config) must not depend on WiFi
+    //having succeeded - found 2026-09-10 while auditing previously-unreviewed corners of the
+    //codebase. custom_crash_callback() can only ever hold ONE crash in RTC memory at a time (a
+    //later crash unconditionally overwrites it) - if this boot's own path here is reached because
+    //the crash itself was WiFi-related (e.g. the AUTH_EXPIRE/WiFiManager reconnect issue under
+    //separate investigation), every subsequent boot could ALSO fail to reconnect for the same
+    //underlying reason, and the one crash worth diagnosing would keep getting silently discarded
+    //before ever reaching LittleFS - never actually visible via GET /api/crash-log, since the web
+    //server itself only starts in the branch above. Both calls are pure local filesystem
+    //operations with no WiFi dependency at all, so there's no reason they were ever gated on it in
+    //the first place - this just extends the exact same calls the success branch above already
+    //makes (see the "File System Init" step there) to this path too.
+    initialiseFileSystem();
+    loadValuesFromFileSystem();
+    checkAndPersistCrashLog(); // see ServiceCrashLogFunctions.ino - must run after LittleFS mounts
+
     if (isPendingReboot) {
       SerialPrintln(F("Reboot is pending to be able to continue device function. Hold please..."));
       SerialPrintln(F("#######################################################"));
