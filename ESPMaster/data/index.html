@@ -605,6 +605,29 @@
 			color: var(--color-primary);
 		}
 
+		/* Editable Geschwindigkeit percentage (added 2026-09-10 on user request - was a plain
+		   text label before). Kept visually as unobtrusive as the label it replaces (no border,
+		   inherits the accent color/mono font) with a subtle underline only on hover/focus so it
+		   still reads as interactive. */
+		.ls-speed-input {
+			width: 34px;
+			text-align: right;
+			font: inherit;
+			font-family: var(--font-mono);
+			color: var(--color-primary);
+			background: transparent;
+			border: none;
+			border-bottom: 1px solid transparent;
+			padding: 0;
+			-moz-appearance: textfield;
+		}
+
+		.ls-speed-input:hover,
+		.ls-speed-input:focus {
+			border-bottom-color: var(--color-border);
+			outline: none;
+		}
+
 		.ls-field-grid {
 			display: flex;
 			gap: 28px;
@@ -630,19 +653,6 @@
 			min-width: 180px;
 		}
 
-		/* Animation ("Animationen" field, added 2026-09-10): needs a bit more room than Ausrichtung
-		   for its select + number input side by side, so Geschwindigkeit (still perfectly usable
-		   narrower - it's a single slider) gives up some of its share for it. */
-		.ls-field-narrow {
-			flex: 0.65;
-			min-width: 140px;
-		}
-
-		.ls-field-wide {
-			flex: 1.3;
-			min-width: 220px;
-		}
-
 		/* Alignment: 3-way pill group, hidden native radios (same :has() pattern as .ls-rail-item),
 		   left-aligned under the "Ausrichtung" label. */
 		.ls-align-group {
@@ -652,19 +662,29 @@
 			flex-wrap: wrap;
 		}
 
-		/* Animation ("Animationen" field, added 2026-09-10, switched from a <select> to icon
-		   buttons + tooltips on user request): 5 icon-only buttons instead of Ausrichtung's 3
-		   text-labelled ones, so they get their own narrower min-width - icons alone don't need
-		   .ls-align-btn's default 78px. The stagger-ms number input rides along in the same flex
-		   row/wrap as a 6th item. */
-		.ls-animation-icons .ls-align-btn {
-			min-width: 38px;
+		/* Animation ("Animationen" field): 5 icon-only buttons in a 3-column grid instead of a
+		   single flex row (added 2026-09-10 on user request, so Ausrichtung/Geschwindigkeit/
+		   Animation can all share the same .ls-field width instead of Animation needing extra
+		   room). The stagger-ms input sits in its own full-width row below the grid. */
+		.ls-animation-icon-grid {
+			display: grid;
+			grid-template-columns: repeat(3, 1fr);
+			gap: 6px;
+		}
+
+		.ls-animation-icon-grid .ls-align-btn {
+			width: 100%;
+			min-width: 0;
 			padding: 9px;
 		}
 
-		.ls-animation-icons input[type=number] {
-			width: 64px;
-			flex: 0 0 auto;
+		.ls-animation-stagger-row {
+			margin-top: 6px;
+		}
+
+		.ls-animation-stagger-row input[type=number] {
+			width: 100%;
+			box-sizing: border-box;
 			padding: 9px 10px;
 			border: 1px solid var(--color-border);
 			border-radius: 4px;
@@ -1245,18 +1265,22 @@
 									</div>
 								</div>
 
-								<div class="ls-field ls-field-narrow">
+								<div class="ls-field">
 									<label for="rangeFlapSpeed" class="ls-microlabel ls-microlabel-split">
 										<span>Geschwindigkeit</span>
-										<span class="ls-accent-text"><span id="rangeFlapSpeedValue">80 &percnt;</span></span>
+										<span class="ls-accent-text">
+											<input type="number" id="inputFlapSpeedValue" min="1" max="100" step="1" value="80"
+												oninput="updateSpeedFromInput(this)" onchange="clampSpeedInput(this)"
+												class="ls-speed-input" title="Geschwindigkeit in Prozent (1-100)" />&percnt;
+										</span>
 									</label>
 									<input type="range" oninput="updateSpeedSlider(this)" id="rangeFlapSpeed" name="flapSpeed"
 										min="1" max="100" step="1" value="80" class="slider" />
 								</div>
 
-								<div class="ls-field ls-field-wide">
+								<div class="ls-field">
 									<span class="ls-microlabel">Animation</span>
-									<div class="ls-align-group ls-animation-icons">
+									<div class="ls-align-group ls-animation-icons ls-animation-icon-grid">
 										<label class="ls-align-btn" title="Gleichzeitig - alle Units starten zusammen">
 											<input type="radio" id="radioAnimSimultaneous" name="animationMode" autocomplete="off" value="simultaneous" checked />
 											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 5v14M12 5v14M18 5v14"></path></svg>
@@ -1277,6 +1301,8 @@
 											<input type="radio" id="radioAnimInsideOut" name="animationMode" autocomplete="off" value="inside-out" />
 											<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 12H5M8 8l-3 4 3 4M12 12h7M16 8l3 4-3 4"></path></svg>
 										</label>
+									</div>
+									<div class="ls-animation-stagger-row">
 										<input type="number" id="inputAnimationStaggerMs" name="animationStaggerMs"
 											min="0" max="1000" step="10" value="150" title="Versatz in ms zwischen aufeinanderfolgenden Units" />
 									</div>
@@ -2433,10 +2459,34 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			xhr.send();
 		}
 
-		//Updates slider value while sliding
+		//Updates the number field while sliding
 		function updateSpeedSlider() {
 			var sliderValue = document.getElementById("rangeFlapSpeed").value;
-			document.getElementById("rangeFlapSpeedValue").innerHTML = sliderValue + " %";
+			document.getElementById("inputFlapSpeedValue").value = sliderValue;
+		}
+
+		//Speed % is now also directly editable (added 2026-09-10 on user request) - the slider
+		//follows every keystroke as long as it parses to a number, without forcing the text field
+		//itself back into range mid-type (that happens on blur/Enter, see clampSpeedInput below).
+		function updateSpeedFromInput(el) {
+			var value = parseInt(el.value, 10);
+			if (isNaN(value)) return;
+			if (value < 1) value = 1;
+			if (value > 100) value = 100;
+			document.getElementById("rangeFlapSpeed").value = value;
+		}
+
+		//Snaps the number field itself back into 1-100 (and to the last valid value if left
+		//empty/non-numeric) once the user is done typing.
+		function clampSpeedInput(el) {
+			var value = parseInt(el.value, 10);
+			if (isNaN(value)) {
+				value = document.getElementById("rangeFlapSpeed").value;
+			}
+			if (value < 1) value = 1;
+			if (value > 100) value = 100;
+			el.value = value;
+			document.getElementById("rangeFlapSpeed").value = value;
 		}
 
 		//Sets mode by checking corresponding radio button/tab
@@ -2528,7 +2578,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 		//Sets flap speed by setting the ranges
 		function setSpeed(speed) {
-			document.getElementById("rangeFlapSpeedValue").innerHTML = speed + " %";
+			document.getElementById("inputFlapSpeedValue").value = speed;
 			document.getElementById("rangeFlapSpeed").value = speed;
 		}
 
