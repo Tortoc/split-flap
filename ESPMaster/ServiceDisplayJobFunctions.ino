@@ -98,17 +98,29 @@ struct DisplayJob {
   //UNITS_AMOUNT_MAX (64, ESPMaster.ino) with room to spare.
   uint64_t unitsWrittenMask = 0;
 
-  //Sub-state for the "wait for all units ready" phase - one unit at a time, 90s max-wait / 15s
-  //stuck-timeout, spread non-blockingly across loop() ticks (see pollDisplayJobWaitAllUnitsReady() below).
-  int waitUnitIndex = 0;
-  unsigned long waitUnitStart = 0;
-  unsigned long waitLastProgressAt = 0;
-  unsigned long waitNextPollAt = 0;
-  int waitLastPhase = -1;
-  int waitLastProgress = -1;
-  //Counts polls since resetDisplayJobWaitSubstate() - used to only fetch phase/progress (the
-  //heavy 6-byte read) every Nth poll instead of every poll, see PHASE_READ_EVERY_N_POLLS below.
+  //Sub-state for the "wait for all units ready" phase - sweeps every still-busy unit once per
+  //poll tick, rather than fully resolving one unit's OWN busy status before ever looking at the
+  //next (found 2026-09-11, user-reported live: ~5 units still mid-homing after boot took ~25s to
+  //clear the old sequential-per-unit design, even though each individual unit only needed a few
+  //more seconds - waiting them out one at a time ADDED their remaining times up instead of
+  //overlapping them, since a later unit's own homing keeps progressing in parallel on its own AVR
+  //the whole time this code is only watching an earlier one; see pollDisplayJobWaitAllUnitsReady()'s
+  //own comment for why a one-unit-per-tick round-robin, tried first, didn't actually fix this
+  //either). Same overall I2C poll RATE as before (one sweep per ~1s) and the same 90s max-wait/15s
+  //stuck-timeout safety nets, just applied per-unit via the arrays below instead of to a single
+  //shared cursor - total wait is now bounded by whichever unit takes longest, not their sum.
+  uint64_t waitUnitsReadyMask = 0; //bit i set once unit i is confirmed ready, sleeping, or given up on
+  unsigned long waitPhaseStartedAt = 0; //anchors the shared 90s overall ceiling
+  unsigned long waitNextPollAt = 0; //next tick allowed to do another sweep
+  //Counts sweeps since resetDisplayJobWaitSubstate() - used to only fetch phase/progress (the
+  //heavy 6-byte read) every Nth sweep instead of every sweep, see PHASE_READ_EVERY_N_POLLS below.
   unsigned long waitPollCount = 0;
+  //Per-unit stuck-detection state, sized to the structural max (like displayState[] elsewhere) -
+  //each unit needs its own "have I seen it move" tracking now that they're no longer resolved
+  //one at a time. Reset for every unit on every new wait phase (resetDisplayJobWaitSubstate()).
+  unsigned long waitLastProgressAt[UNITS_AMOUNT_MAX];
+  int waitLastPhase[UNITS_AMOUNT_MAX];
+  int waitLastProgress[UNITS_AMOUNT_MAX];
 };
 
 DisplayJob displayJob;
@@ -117,14 +129,35 @@ bool isDisplayJobBusy() {
   return displayJob.state != DISPLAY_JOB_IDLE;
 }
 
+//Diagnostics only (added 2026-09-11) - lets GET /api/diag?type=heap show which state a slow-to-
+//complete display job is actually stuck in, without ESPMaster.ino needing direct access to
+//displayJob/DisplayJobState (declared here, textually after ESPMaster.ino in the concatenated
+//sketch - only functions get auto-prototyped by the Arduino build, not globals/enums).
+const char* getDisplayJobStateName() {
+  switch (displayJob.state) {
+    case DISPLAY_JOB_IDLE: return "IDLE";
+    case DISPLAY_JOB_WAIT_READY_BEFORE: return "WAIT_READY_BEFORE";
+    case DISPLAY_JOB_WRITE_LINE: return "WRITE_LINE";
+    case DISPLAY_JOB_WRITE_LINE_WAIT_STAGGER: return "WRITE_LINE_WAIT_STAGGER";
+    case DISPLAY_JOB_WAIT_READY_AFTER: return "WAIT_READY_AFTER";
+    case DISPLAY_JOB_PAUSE_BETWEEN_LINES: return "PAUSE_BETWEEN_LINES";
+    case DISPLAY_JOB_PAUSE_AFTER_FINISH: return "PAUSE_AFTER_FINISH";
+    case DISPLAY_JOB_DEBUG_PAUSE: return "DEBUG_PAUSE";
+  }
+  return "UNKNOWN";
+}
+
 void resetDisplayJobWaitSubstate() {
-  displayJob.waitUnitIndex = 0;
-  displayJob.waitUnitStart = millis();
-  displayJob.waitLastProgressAt = millis();
-  displayJob.waitNextPollAt = millis();
-  displayJob.waitLastPhase = -1;
-  displayJob.waitLastProgress = -1;
+  unsigned long now = millis();
+  displayJob.waitUnitsReadyMask = 0;
+  displayJob.waitPhaseStartedAt = now;
+  displayJob.waitNextPollAt = now;
   displayJob.waitPollCount = 0;
+  for (int i = 0; i < UNITS_AMOUNT_MAX; i++) {
+    displayJob.waitLastProgressAt[i] = now;
+    displayJob.waitLastPhase[i] = -1;
+    displayJob.waitLastProgress[i] = -1;
+  }
 }
 
 //How long unit `unitIndex` (of `unitsAmount` total) should wait, relative to the line's own start,
@@ -241,19 +274,41 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   return true;
 }
 
-//Advances the "wait for all units ready" sub-state by at most one I2C read per call. Returns true
-//once every unit has been waited on (ready, or given up on via forceUnitRecoveryReset()).
+//Advances the "wait for all units ready" sub-state. Returns true once every unit has been waited
+//on (ready, or given up on via forceUnitRecoveryReset()).
 //
-//Only fetches the heavy 6-byte read every Nth poll, light 3-byte otherwise - reduces I2C interrupt
-//load on the ATmega328p during calibration.
+//Checks every still-busy unit in one sweep per poll tick, instead of fully resolving one before
+//ever looking at the next (found 2026-09-11, see DisplayJob's own comment on the fields this uses
+//for the full reasoning/repro). The original per-unit-sequential design's own "one I2C read per
+//call" pacing turned out to NOT be what actually bounded its total wait time (a first attempt at
+//this fix that round-robinned one unit per call, keeping that same pacing, was verified - via a
+//standalone simulation of both designs against the same scenarios, not checked in - to often be
+//SLOWER than the original design, not faster: checking only one of several still-busy units per
+//tick means the others' own readiness isn't discovered until the rotation comes back around to
+//them, even though they may have already finished in real time on their own independent AVRs).
+//Sweeping the whole not-yet-ready set every tick instead converges in exactly max(each unit's own
+//remaining time) - the true theoretical best - confirmed against the same simulation. unitsAmount
+//is small in practice (10 today, structurally capped at 64) and each read is a handful of I2C
+//bytes, so a full sweep is not a meaningful per-tick cost.
+//
+//Only fetches the heavy 6-byte read every Nth poll (now: every Nth SWEEP), light 3-byte
+//otherwise - reduces I2C interrupt load on the ATmega328p during calibration.
 const int PHASE_READ_EVERY_N_POLLS = 3; //heavy 6-byte read roughly every 3s instead of every 1s
 
 bool pollDisplayJobWaitAllUnitsReady() {
   const unsigned long maxTotalWaitMs = 90000;
   const unsigned long stuckTimeoutMs = 15000;
 
-  if (displayJob.waitUnitIndex >= unitsAmount) {
-    return true; //nothing to wait on, e.g. unitsAmount == 0
+  if (unitsAmount <= 0) {
+    return true; //nothing to wait on
+  }
+
+  //unitsAmount is capped at UNITS_AMOUNT_MAX (64, ESPMaster.ino) elsewhere, so this shift never
+  //overflows - the ternary only guards the one edge case where unitsAmount itself equals 64,
+  //where "1ULL << 64" would be undefined behavior.
+  uint64_t allUnitsMask = (unitsAmount >= 64) ? ~0ULL : ((1ULL << unitsAmount) - 1);
+  if ((displayJob.waitUnitsReadyMask & allUnitsMask) == allUnitsMask) {
+    return true; //every unit already confirmed ready or given up on
   }
 
   if (!millisReached(displayJob.waitNextPollAt)) {
@@ -263,56 +318,58 @@ bool pollDisplayJobWaitAllUnitsReady() {
   bool wantPhaseRead = (displayJob.waitPollCount % PHASE_READ_EVERY_N_POLLS) == 0;
   displayJob.waitPollCount++;
 
-  int status, offset;
-  int phase = displayJob.waitLastPhase;
-  int progress = displayJob.waitLastProgress;
-  bool ok = wantPhaseRead
-    ? readUnitInfo(displayJob.waitUnitIndex, status, offset, phase, progress)
-    : readUnitInfo(displayJob.waitUnitIndex, status, offset);
-  bool unitDone = false;
+  for (int address = 0; address < unitsAmount; address++) {
+    if (displayJob.waitUnitsReadyMask & (1ULL << address)) {
+      continue; //already confirmed ready or given up on
+    }
 
-  if (ok && status != 1) {
-    unitDone = true; //0 = ready, -1 = sleeping - either way, nothing to wait for
-  } else if (ok) {
-    if (wantPhaseRead) {
-      SerialPrintln(F("Unit ") + String(displayJob.waitUnitIndex) + F(" busy - phase ") + String(phase) +
-        F(", progress ") + String(progress) + F(" (") + String((millis() - displayJob.waitUnitStart) / 1000) + F("s waited)"));
-      if (phase != displayJob.waitLastPhase || progress != displayJob.waitLastProgress) {
-        displayJob.waitLastPhase = phase;
-        displayJob.waitLastProgress = progress;
-        displayJob.waitLastProgressAt = millis();
+    int status, offset;
+    int phase = displayJob.waitLastPhase[address];
+    int progress = displayJob.waitLastProgress[address];
+    bool ok = wantPhaseRead
+      ? readUnitInfo(address, status, offset, phase, progress)
+      : readUnitInfo(address, status, offset);
+    bool unitDone = false;
+
+    if (ok && status != 1) {
+      unitDone = true; //0 = ready, -1 = sleeping - either way, nothing to wait for
+    } else if (ok) {
+      if (wantPhaseRead) {
+        SerialPrintln(F("Unit ") + String(address) + F(" busy - phase ") + String(phase) +
+          F(", progress ") + String(progress) + F(" (") + String((millis() - displayJob.waitPhaseStartedAt) / 1000) + F("s total waited)"));
+        if (phase != displayJob.waitLastPhase[address] || progress != displayJob.waitLastProgress[address]) {
+          displayJob.waitLastPhase[address] = phase;
+          displayJob.waitLastProgress[address] = progress;
+          displayJob.waitLastProgressAt[address] = millis();
+        }
+      } else {
+        SerialPrintln(F("Unit ") + String(address) + F(" busy (light check, ") +
+          String((millis() - displayJob.waitPhaseStartedAt) / 1000) + F("s total waited)"));
       }
     } else {
-      SerialPrintln(F("Unit ") + String(displayJob.waitUnitIndex) + F(" busy (light check, ") +
-        String((millis() - displayJob.waitUnitStart) / 1000) + F("s waited)"));
+      SerialPrintln(F("Unit ") + String(address) + F(" - read failed while waiting, retrying"));
     }
-  } else {
-    SerialPrintln(F("Unit ") + String(displayJob.waitUnitIndex) + F(" - read failed while waiting, retrying"));
+
+    if (!unitDone && (millis() - displayJob.waitLastProgressAt[address] > stuckTimeoutMs)) {
+      SerialPrintln(F("WARNING: Unit ") + String(address) + F(" - no progress for ") + String(stuckTimeoutMs / 1000) + F("s, giving up"));
+      forceUnitRecoveryReset(address);
+      unitDone = true;
+    } else if (!unitDone && (millis() - displayJob.waitPhaseStartedAt >= maxTotalWaitMs)) {
+      SerialPrintln(F("WARNING: Unit ") + String(address) + F(" - hit max wait time (") + String(maxTotalWaitMs / 1000) + F("s), giving up"));
+      forceUnitRecoveryReset(address);
+      unitDone = true;
+    }
+
+    if (unitDone) {
+      displayJob.waitUnitsReadyMask |= (1ULL << address);
+    }
   }
 
-  if (!unitDone && (millis() - displayJob.waitLastProgressAt > stuckTimeoutMs)) {
-    SerialPrintln(F("WARNING: Unit ") + String(displayJob.waitUnitIndex) + F(" - no progress for ") + String(stuckTimeoutMs / 1000) + F("s, giving up"));
-    forceUnitRecoveryReset(displayJob.waitUnitIndex);
-    unitDone = true;
-  } else if (!unitDone && (millis() - displayJob.waitUnitStart >= maxTotalWaitMs)) {
-    SerialPrintln(F("WARNING: Unit ") + String(displayJob.waitUnitIndex) + F(" - hit max wait time (") + String(maxTotalWaitMs / 1000) + F("s), giving up"));
-    forceUnitRecoveryReset(displayJob.waitUnitIndex);
-    unitDone = true;
-  }
+  //Same overall poll rate as before (was strictly per-unit; now applies to the whole sweep) -
+  //preserves the original I2C-load-conscious pacing between sweeps.
+  displayJob.waitNextPollAt = millis() + 1000;
 
-  if (unitDone) {
-    displayJob.waitUnitIndex++;
-    displayJob.waitUnitStart = millis();
-    displayJob.waitLastProgressAt = millis();
-    displayJob.waitNextPollAt = millis(); //move to the next unit right away, don't wait another 1s
-    displayJob.waitLastPhase = -1;
-    displayJob.waitLastProgress = -1;
-    displayJob.waitPollCount = 0;
-  } else {
-    displayJob.waitNextPollAt = millis() + 1000; //match the old 1s poll interval
-  }
-
-  return displayJob.waitUnitIndex >= unitsAmount;
+  return (displayJob.waitUnitsReadyMask & allUnitsMask) == allUnitsMask;
 }
 
 void finishDisplayJob() {

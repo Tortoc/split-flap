@@ -167,6 +167,15 @@ void checkTimezoneLookup() {
       if (recv.substring(0, 3) == "OK ") {
         String posix = recv.substring(recv.indexOf(" ", 4) + 1);
         tzLookupResult = timezone.setPosix(posix);
+        //Cache the resolved POSIX rule for next boot - see cachedTimezonePosix's own comment
+        //(ESPMaster.ino). Only touches flash when it actually changed (a changed timezoneSetting,
+        //or the rop.nl database itself updating a rule) - avoids a pointless write on every boot's
+        //otherwise-identical lookup.
+        if (tzLookupResult && posix != cachedTimezonePosix) {
+          cachedTimezonePosix = posix;
+          writeFile(LittleFS, timezonePosixCachePath, cachedTimezonePosix.c_str());
+          SerialPrintln(F("Timezone lookup: cached new POSIX rule for next boot: ") + posix);
+        }
       } else {
         SerialPrintln(F("Timezone lookup: server rejected '") + tzLookupLocation + F("': ") + recv);
         tzLookupResult = false;

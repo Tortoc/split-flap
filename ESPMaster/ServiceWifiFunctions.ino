@@ -119,6 +119,7 @@ void initWiFi() {
     //Running the config portal and our own webserver together doesn't work reliably - reboot
     //after saving new credentials is the accepted workaround.
     SerialPrintln(F("New WiFi configuration saved. Will need to reboot device to let webserver work..."));
+    checkBootSnapshotFreshness(); //see its own comment (ESPMaster.ino) - keep the snapshot fresh before every intentional reboot
     isPendingReboot = true;
   });
 
