@@ -338,6 +338,13 @@ void checkNtpSync() {
 
       time_t rawUtc = secsSince1900 - 2208988800UL; //subtract 70 years: NTP epoch -> Unix epoch
       ntpSyncApplyResult(rawUtc);
+      //Keep the optional DS3231 RTC (ServiceRtcFunctions.ino) drift-corrected and its Oscillator
+      //Stop Flag cleared - a no-op if none is present. No throttling needed: this only runs once
+      //per successful sync (every NTP_SYNC_INTERVAL_MS, 6h), and RTC time registers are plain
+      //I2C-addressed registers, not wear-limited EEPROM.
+      if (rtcPresent) {
+        writeRtcTime(rawUtc);
+      }
       ntpSyncEverSucceeded = true;
       SerialPrintln(F("NTP sync successful"));
       ntpSyncState = NTP_SYNC_IDLE;

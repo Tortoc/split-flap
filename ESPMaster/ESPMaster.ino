@@ -70,8 +70,17 @@
 #define MAX_SPEED           12
 #define UNIT_STEPS          2038    //must match STEPS in Unit.ino
 #define UNIT_BOOTLOADER_CMD 255     //must match CMD_ENTER_BOOTLOADER in Unit.ino
-#define UNIT_BOOTLOADER_BASE_ADDRESS 0x29 //start of the twiboot bootloader address range (0x29-0x68)
+#define UNIT_BOOTLOADER_BASE_ADDRESS 0x29 //start of the twiboot bootloader address range (0x29-0x68) -
+                                           //NOTE: 0x68 is also RTC_I2C_ADDRESS below - no real conflict
+                                           //at the current 10-unit installation (bootloader addresses
+                                           //only reach 0x29+9=0x32), but would collide if ever expanded
+                                           //to near the structural 64-unit ceiling (UNITS_AMOUNT_MAX).
 #define CRASH_LOG_PATH "/crash-log.jsonl"
+//Optional DS3231 RTC module on the same I2C bus (added 2026-09-11 on user request, see
+//ServiceRtcFunctions.ino) - fixed address per the DS3231 datasheet, not configurable. Entirely
+//optional/auto-detected (probeRtc()) - every other build/device without one attached behaves
+//exactly as before this feature existed.
+#define RTC_I2C_ADDRESS 0x68
 
 //Named so ServiceI2CRecoveryFunctions.ino's bus-recovery routine can reuse the exact same pins.
 #ifdef FAE_MOD
@@ -501,6 +510,11 @@ unsigned long lastRenderedGeneration = 0;
 bool isPendingReboot = false;
 bool isPendingUnitsReset = false;
 bool isWifiConfigured = false;
+//Optional DS3231 RTC (ServiceRtcFunctions.ino) - declared here, not in that file, since
+//setup()/GET /api/diag below (both in this earlier-concatenated main sketch file) need them; see
+//probeRtc()'s own comment for the full reasoning.
+bool rtcPresent = false;
+bool rtcOscillatorStopFlag = false;
 bool showDebugPage = false; //defaults off - the startup debug page can render blank on fresh boots
 volatile bool webRequestActive = false; //skip display updates while a web request is in flight
 LList<ScheduledMessage> scheduledMessages;
@@ -731,6 +745,25 @@ void setup() {
 
   //Proactive bus recovery, not just reactive after a failed read - cheap, no-op if already idle.
   recoverI2CBus();
+
+  //Optional DS3231 RTC (see ServiceRtcFunctions.ino) - probed and, if present and trustworthy,
+  //used to seed the clock RIGHT HERE, deliberately before initWiFi() below and unconditional on
+  //its outcome (not just in the WiFi-succeeded branch further down) - the whole point is a
+  //correct-ish clock independent of WiFi/NTP, so it must not itself depend on WiFi succeeding.
+  //ntpSyncApplyResult() (ServiceAsyncTimeSyncFunctions.ino) is reused as-is rather than
+  //duplicating its careful offset math - same reasoning there applies to a raw UTC value from
+  //the RTC as it does to one from NTP. The timezone RULE (DST-aware offset) isn't resolved from
+  //the network yet at this point - exactly the same brief "shows UTC until the async timezone
+  //lookup catches up" window the existing NTP path already has and already treats as harmless
+  //(see startTimezoneLookup()'s own call site comment further down), no new limitation here.
+  probeRtc();
+  if (rtcPresent) {
+    time_t rtcUtc;
+    if (readRtcTime(rtcUtc)) {
+      ntpSyncApplyResult(rtcUtc);
+      SerialPrintln(F("RTC: seeded clock from DS3231"));
+    }
+  }
 
   // Initialize LED for debugging
 #if LED_ENABLE == true
@@ -1570,13 +1603,16 @@ void setup() {
       }
 
       if (type == "heap") {
-        char buf[220];
+        char buf[250];
         //getFlashChipRealSize() = physical chip's own SPI ID (ground truth); getFlashChipSize() =
         //what the eesz board-menu choice assumes - a mismatch means the compiled layout is wrong.
-        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s")),
+        //rtc/rtcOsf (added 2026-09-11, see ServiceRtcFunctions.ino) - the only way to verify the
+        //optional DS3231's detection/trustworthiness without physically observing the display.
+        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s rtc=%s rtcOsf=%u")),
           ESP.getFreeHeap(), ESP.getHeapFragmentation(), ESP.getMaxFreeBlockSize(),
           ESP.getFlashChipRealSize(), ESP.getFlashChipSize(), ESP.getFlashChipId(), ESP.getChipId(),
-          ESP.getSdkVersion(), ESP.getCoreVersion().c_str());
+          ESP.getSdkVersion(), ESP.getCoreVersion().c_str(),
+          rtcPresent ? "present" : "absent", rtcOscillatorStopFlag ? 1 : 0);
         request->send(200, "text/plain", buf);
         return;
       }
