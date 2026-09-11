@@ -823,9 +823,11 @@ void setup() {
   //fresh only once the SCAN phase happens to finish.
   unitReadinessStartedAt = millis();
 
-  // First I2C scan/unit-readiness wait is deferred to loop() (see unitReadinessPhase further
-  // down) - non-blocking, so WiFi/web server still start immediately regardless, same property
-  // the old fixed-30s version already had.
+  // The I2C scan/unit-readiness wait itself (unitReadinessPhase) is driven synchronously further
+  // down in THIS function, right before initWiFi() - not deferred to loop() as an earlier version
+  // of this comment claimed. loop() cannot run until setup() returns, so anything left waiting
+  // for loop() alone would still sit behind initWiFi()'s own blocking autoConnect() call
+  // regardless - see tickUnitReadiness()'s own comment for the full story.
   SerialPrintln(F(""));
   SerialPrintln(F("#######################################################"));
   SerialPrintln(F("..............Split Flap Display Starting.............."));

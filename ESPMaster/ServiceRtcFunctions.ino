@@ -67,11 +67,13 @@ bool readRtcTime(time_t &outUtc) {
   Wire.beginTransmission(RTC_I2C_ADDRESS);
   Wire.write((uint8_t)0x00);
   if (Wire.endTransmission(true) != 0) {
+    recoverI2CBus(); //keep the shared bus from staying wedged for whatever I2C traffic comes next - see this file's own comment on why every other I2C caller in this project already does this
     return false;
   }
   delayMicroseconds(500);
 
   if (Wire.requestFrom(RTC_I2C_ADDRESS, 7) != 7) {
+    recoverI2CBus();
     return false;
   }
   uint8_t regSeconds = Wire.read();
@@ -86,10 +88,12 @@ bool readRtcTime(time_t &outUtc) {
   Wire.beginTransmission(RTC_I2C_ADDRESS);
   Wire.write((uint8_t)0x0F);
   if (Wire.endTransmission(true) != 0) {
+    recoverI2CBus();
     return false;
   }
   delayMicroseconds(500);
   if (Wire.requestFrom(RTC_I2C_ADDRESS, 1) != 1) {
+    recoverI2CBus();
     return false;
   }
   uint8_t status = Wire.read();
@@ -137,7 +141,13 @@ void writeRtcTime(time_t utc) {
   Wire.write(decToBcd(tm.Day));
   Wire.write(decToBcd(tm.Month));
   Wire.write(decToBcd(rawYear));
-  Wire.endTransmission(true);
+  if (Wire.endTransmission(true) != 0) {
+    //Time write itself failed - don't even attempt the status-register clear below against a bus
+    //that just NACKed, and give the next caller (Unit I2C traffic, or the next writeRtcTime()) a
+    //clean bus to start from instead of whatever state this transaction left it in.
+    recoverI2CBus();
+    return;
+  }
   delayMicroseconds(500);
 
   //Read-modify-write the status register rather than blindly writing 0x00 - registers 0x0E/0x0F
@@ -153,7 +163,11 @@ void writeRtcTime(time_t utc) {
       Wire.write((uint8_t)0x0F);
       Wire.write((uint8_t)(status & 0x7F)); //clear bit7 (OSF), leave the rest untouched
       Wire.endTransmission(true);
+    } else {
+      recoverI2CBus();
     }
+  } else {
+    recoverI2CBus();
   }
   rtcOscillatorStopFlag = false;
 }

@@ -129,7 +129,6 @@ bool isDisplayJobBusy() {
   return displayJob.state != DISPLAY_JOB_IDLE;
 }
 
-
 void resetDisplayJobWaitSubstate() {
   unsigned long now = millis();
   displayJob.waitUnitsReadyMask = 0;

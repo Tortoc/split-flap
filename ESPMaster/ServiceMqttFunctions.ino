@@ -50,7 +50,6 @@ String lastPublishedMqttText = "";
 bool mqttStatePublished = false;
 unsigned long lastMqttHeapPublish = 0;
 unsigned long lastMqttReconnectAttempt = 0;
-bool mqttDiscoveryPublished = false;
 
 //Incoming command - mirrors POST /api/text's permanent (no duration) branch exactly: switches
 //into Text mode if not already there, and calls the same showText() every other permanent text
@@ -118,7 +117,6 @@ void publishHomeAssistantDiscovery() {
   String sensorDiscoveryTopic = "homeassistant/sensor/" + mqttDeviceId() + "/heap/config";
   mqttClient.publish(sensorDiscoveryTopic.c_str(), (const uint8_t*)sensorBuffer, sensorLen, true);
 
-  mqttDiscoveryPublished = true;
   SerialPrintln(F("MQTT: published Home Assistant discovery"));
 }
 
@@ -247,7 +245,6 @@ void applyMqttSettingsChange() {
     mqttClient.setServer(mqttBrokerHost.c_str(), mqttBrokerPort);
   }
   lastMqttReconnectAttempt = 0; //let the next loop() tick retry immediately instead of waiting out the 5s window
-  mqttDiscoveryPublished = false;
 }
 
 #endif
