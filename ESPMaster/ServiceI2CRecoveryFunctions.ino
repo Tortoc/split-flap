@@ -65,7 +65,6 @@ bool recoverI2CBus() {
 //requestUnitEnterBootloader() (the write path stays reliable even when reads fail). Fire-and-forget:
 //twiboot returns to the app after ~1s idle.
 void forceUnitRecoveryReset(int unitIndex) {
-  forcedUnitResetCount++; //diagnostics only, see this global's own comment (ESPMaster.ino)
   SerialPrintln(F("I2C recovery: unit ") + String(unitIndex) + F(" still not responding after bus recovery - forcing it to reboot"));
   requestUnitEnterBootloader(unitIndex);
   //Invalidate the display cache - found 2026-09-10, CODE_REVIEW_V3.md #10: this reboots the unit

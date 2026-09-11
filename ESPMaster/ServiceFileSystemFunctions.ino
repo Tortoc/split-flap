@@ -27,7 +27,6 @@ void loadValuesFromFileSystem() {
     SerialPrintln(F("Loading Scheduled Messages"));
     readScheduledMessagesFromJson(scheduledMessagesJson);
   }
-  loadValuesAfterScheduledMs = millis(); //diagnostics only (added 2026-09-11) - bisecting loadValuesFromFileSystem()'s ~26.6s
 
   //Loaded directly, not via replaceRotationItemsFromJson() - that also resets playback position
   //and re-persists the file, which shouldn't happen on a plain boot load.
@@ -130,7 +129,6 @@ bool loadValuesFromBootSnapshot() {
   accessControlTimezonePublic = doc["accessControlTimezonePublic"] | false;
   accessControlSystemPublic = doc["accessControlSystemPublic"] | false;
 
-  loadValuesBeforeJsonMs = millis(); //diagnostics only (added 2026-09-11)
   SerialPrintln(F("Boot snapshot: loaded (fast path, one file open)"));
   return true;
 }
@@ -179,7 +177,6 @@ void loadValuesFromIndividualFiles() {
   accessControlTimezonePublic = readFile(LittleFS, accessControlTimezonePublicPath, "false") == "true";
   accessControlSystemPublic = readFile(LittleFS, accessControlSystemPublicPath, "false") == "true";
 
-  loadValuesBeforeJsonMs = millis(); //diagnostics only (added 2026-09-11) - bisecting loadValuesFromFileSystem()'s ~26.6s
   SerialPrintln(F("Loaded individual setting files (fallback path)"));
 }
 

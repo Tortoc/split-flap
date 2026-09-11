@@ -129,23 +129,6 @@ bool isDisplayJobBusy() {
   return displayJob.state != DISPLAY_JOB_IDLE;
 }
 
-//Diagnostics only (added 2026-09-11) - lets GET /api/diag?type=heap show which state a slow-to-
-//complete display job is actually stuck in, without ESPMaster.ino needing direct access to
-//displayJob/DisplayJobState (declared here, textually after ESPMaster.ino in the concatenated
-//sketch - only functions get auto-prototyped by the Arduino build, not globals/enums).
-const char* getDisplayJobStateName() {
-  switch (displayJob.state) {
-    case DISPLAY_JOB_IDLE: return "IDLE";
-    case DISPLAY_JOB_WAIT_READY_BEFORE: return "WAIT_READY_BEFORE";
-    case DISPLAY_JOB_WRITE_LINE: return "WRITE_LINE";
-    case DISPLAY_JOB_WRITE_LINE_WAIT_STAGGER: return "WRITE_LINE_WAIT_STAGGER";
-    case DISPLAY_JOB_WAIT_READY_AFTER: return "WAIT_READY_AFTER";
-    case DISPLAY_JOB_PAUSE_BETWEEN_LINES: return "PAUSE_BETWEEN_LINES";
-    case DISPLAY_JOB_PAUSE_AFTER_FINISH: return "PAUSE_AFTER_FINISH";
-    case DISPLAY_JOB_DEBUG_PAUSE: return "DEBUG_PAUSE";
-  }
-  return "UNKNOWN";
-}
 
 void resetDisplayJobWaitSubstate() {
   unsigned long now = millis();

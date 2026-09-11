@@ -268,43 +268,6 @@ int displayState[UNITS_AMOUNT_MAX];
 unsigned long previousMillis = 0;
 int unitsAmount = 0; //auto-detected via I2C scan, sequential from 0 - see scanI2CBus()
 
-//Boot-timing breadcrumbs (added 2026-09-11 while chasing the "~40s until the time shows" report,
-//after live curl-polling proved unreliable for pinning down WHERE the delay actually happens - see
-//GET /api/diag?type=heap's bootMs/readyPhase fields for the other half of this). Read from the
-//device's own millis() once reachable, sidesteps every wall-clock/tool-latency ambiguity a curl
-//poll loop has. 0 = "not reached yet" (never legitimately millis()==0 by the time anything reads it).
-unsigned long wifiConnectedAtMs = 0; //millis() when initWiFi() returned with isWifiConfigured true
-unsigned long ntpWaitLoopExitedAtMs = 0; //millis() when setup()'s blocking NTP-wait loop exited
-bool ntpWaitLoopWasSkipped = false; //true if RTC seed already had time set, so that loop did 0 iterations
-unsigned long preWifiDisplayDoneAtMs = 0; //millis() when the pre-WiFi unit-readiness+display block finished
-//Diagnostics only (added 2026-09-11) - counts every forceUnitRecoveryReset() call (ServiceI2CRecoveryFunctions.ino),
-//which reboots a Unit via twiboot (a real ~8s re-home) whenever pollDisplayJobWaitAllUnitsReady()
-//(ServiceDisplayJobFunctions.ino) decides a unit is stuck (15s without progress) or the overall
-//90s ceiling is hit. A live power-cycle test still showing ~35s despite the pre-WiFi move and a
-//readiness check that itself resolved in a single ~200ms poll points here as the likely real
-//culprit - exposed to confirm/refute without more guessing.
-unsigned long forcedUnitResetCount = 0;
-unsigned long preWifiReadinessDoneAtMs = 0; //diagnostics - splits the pre-WiFi block into its two halves
-//Diagnostics only (added 2026-09-11) - see scanI2CBus()'s own comment for why.
-int scanSlowestAddress = -1;
-unsigned long scanSlowestMs = 0;
-unsigned long scanTotalMs = 0;
-//Diagnostics only (added 2026-09-11) - bisecting setup()'s early boot sequence to find where the
-//~38s pre-WiFi delay actually is, now that it's confirmed NOT to be inside scanI2CBus() itself
-//(scanTotalMs consistently ~650ms) nor the unit-readiness polling (readyPollCount=1).
-unsigned long debugFsBeginDoneAtMs = 0;
-unsigned long debugFlagReadDoneAtMs = 0;
-unsigned long serialBeginDoneAtMs = 0;
-unsigned long beforeRecoverI2CBusMs = 0;
-unsigned long afterRecoverI2CBusMs = 0;
-unsigned long rtcSeedDoneAtMs = 0;
-unsigned long fsInitDoneAtMs = 0;
-unsigned long loadValuesBeforeJsonMs = 0; //set inside loadValuesFromFileSystem(), ServiceFileSystemFunctions.ino
-unsigned long loadValuesAfterScheduledMs = 0; //set inside loadValuesFromFileSystem(), ServiceFileSystemFunctions.ino
-unsigned long valuesLoadedAtMs = 0;
-unsigned long configLoadDoneAtMs = 0;
-unsigned long wifiModeDoneAtMs = 0;
-
 //Replaces a fixed 30s post-boot wait (found 2026-09-11, present since this project's very first
 //commit) with adaptive polling for actual unit readiness - see the loop() block using this for
 //the full reasoning. showText() is a complete no-op while unitsAmount<=0, so this state machine
@@ -313,14 +276,6 @@ enum UnitReadinessPhase { UNIT_READINESS_SCAN, UNIT_READINESS_POLLING, UNIT_READ
 UnitReadinessPhase unitReadinessPhase = UNIT_READINESS_SCAN;
 unsigned long unitReadinessStartedAt = 0; //set in setup(); millisReached() below is overflow-safe
 unsigned long unitReadinessLastPollAt = 0;
-//Diagnostics only (added 2026-09-11, while pinning down why moving this wait before initWiFi()
-//made it consistently hit its own 30s safety ceiling instead of resolving in ~1s like it did when
-//running after WiFi, as it did in two earlier live tests the same day) - which unit (if any)
-//blocked the most recent poll tick from completing, and why. -1 = no blocking unit on the most
-//recent poll (either still SCANning, or the last poll found everything ready).
-int unitReadinessLastBlockingUnit = -1;
-bool unitReadinessLastBlockingWasReadFailure = false; //true = readUnitInfo() itself failed; false = status==1 (genuinely busy)
-unsigned long unitReadinessPollCount = 0;
 #define UNIT_READINESS_POLL_INTERVAL_MS 200
 //Safety ceiling, identical to the fixed wait this replaces - guarantees the worst case (a unit
 //that never finishes/never responds) is never slower than before, while the common case (units
@@ -811,12 +766,9 @@ void setup() {
   //Load the debug-mode flag as early as possible - gates the startup debug page/error panel/
   //page-load log further down, all of which can otherwise render before this is known.
 #if DEBUG_ENABLE == true
-  bool debugFsBeginOk = LittleFS.begin();
-  debugFsBeginDoneAtMs = millis(); //diagnostics only (added 2026-09-11) - bisecting the ~11s before recoverI2CBus()
-  if (debugFsBeginOk) {
+  if (LittleFS.begin()) {
     showDebugPage = (readFile(LittleFS, debugModePath, "false") == "true");
   }
-  debugFlagReadDoneAtMs = millis(); //diagnostics only (added 2026-09-11)
 #endif
 
 #if SERIAL_ENABLE == true
@@ -824,7 +776,6 @@ void setup() {
 #elif !defined(FAE_MOD)
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN); //ESP01 only
 #endif
-  serialBeginDoneAtMs = millis(); //diagnostics only (added 2026-09-11) - bisecting the ~11s before recoverI2CBus()
 
 #ifdef FAE_MOD
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
@@ -837,11 +788,9 @@ void setup() {
   //erase+write duration so it never gets misread as a bus error.
   Wire.setClockStretchLimit(25000);
 #endif
-  beforeRecoverI2CBusMs = millis(); //diagnostics only (added 2026-09-11) - narrowing down where the ~38s pre-WiFi delay actually is
 
   //Proactive bus recovery, not just reactive after a failed read - cheap, no-op if already idle.
   recoverI2CBus();
-  afterRecoverI2CBusMs = millis(); //diagnostics only (added 2026-09-11) - narrowing down where the ~38s pre-WiFi delay actually is
 
   //Optional DS3231 RTC (see ServiceRtcFunctions.ino) - probed and, if present and trustworthy,
   //used to seed the clock RIGHT HERE, deliberately before initWiFi() below and unconditional on
@@ -861,7 +810,6 @@ void setup() {
       SerialPrintln(F("RTC: seeded clock from DS3231"));
     }
   }
-  rtcSeedDoneAtMs = millis(); //diagnostics only (added 2026-09-11) - narrowing down where the ~38s pre-WiFi delay actually is
 
   // Initialize LED for debugging
 #if LED_ENABLE == true
@@ -897,26 +845,23 @@ void setup() {
   debugStatus = "File System Init";
   SerialPrintln(F("DEBUG: Status = ") + debugStatus);
   initialiseFileSystem();
-  fsInitDoneAtMs = millis(); //diagnostics only (added 2026-09-11) - narrowing down where the ~38s pre-WiFi delay actually is
   loadValuesFromFileSystem();
-  valuesLoadedAtMs = millis(); //diagnostics only (added 2026-09-11) - narrowing down where the ~38s pre-WiFi delay actually is
   checkAndPersistCrashLog(); // see ServiceCrashLogFunctions.ino - must run after LittleFS mounts
-  configLoadDoneAtMs = millis(); //diagnostics only (added 2026-09-11) - narrowing down where the ~38s pre-WiFi delay actually is
 
-  //Show the previously configured mode BEFORE WiFi - found 2026-09-11, same day, from the same
-  //investigation as tickUnitReadiness()'s comment: live bootMs/wifiConnectMs diagnostics proved
-  //`wifiManager.autoConnect()` inside initWiFi() (30-40s observed) is the real dominant delay, not
-  //anything downstream of it - and since loop() (where the display update state machine actually
-  //runs) cannot start until setup() returns, NOTHING could ever render before that blocking call
-  //finished, no matter how "non-blocking" the code after it was written to be. Deliberately NOT
-  //attempting to fix WiFi connect time itself here - a prior, unrelated custom WiFi-reconnect
-  //rewrite this same project already tried made things WORSE and had to be reverted (see
-  //BUGFIX_LOG.md) - so this leaves WiFiManager's own connect logic completely untouched and
-  //instead does the one thing available without touching it: gets the unit-readiness wait and one
-  //real display update to happen BEFORE initWiFi()'s blocking call, spun synchronously right here
-  //since nothing else in setup() is waiting on this yet (WiFi/the web server haven't started
-  //regardless of how long this takes). Safety ceiling below matches UNIT_READINESS_MAX_WAIT_MS's
-  //own reasoning - never worse than doing nothing extra here if units never respond.
+  //Show the previously configured mode BEFORE WiFi - found 2026-09-11, same day tickUnitReadiness()
+  //was factored out of loop() for the same reason: loop() (where the display update state machine
+  //actually runs) cannot start until setup() returns, so nothing could ever render before
+  //initWiFi()'s blocking autoConnect() call finished, no matter how "non-blocking" the code after
+  //it was written to be. Deliberately NOT attempting to fix WiFi connect time itself here - a
+  //prior, unrelated custom WiFi-reconnect rewrite this same project already tried made things
+  //WORSE and had to be reverted (see BUGFIX_LOG.md) - so this leaves WiFiManager's own connect
+  //logic completely untouched and instead does the one thing available without touching it: gets
+  //the unit-readiness wait and one real display update to happen BEFORE initWiFi()'s blocking
+  //call, spun synchronously right here since nothing else in setup() is waiting on this yet
+  //(WiFi/the web server haven't started regardless of how long this takes). Safety ceiling below
+  //matches UNIT_READINESS_MAX_WAIT_MS's own reasoning - never worse than doing nothing extra here
+  //if units never respond. (The dominant boot-time cost turned out to be elsewhere entirely - see
+  //BUGFIX_LOG.md #202 - but this move is still correct and worth keeping on its own merits.)
   //Apply the cached POSIX rule (if any) from the LAST successful timezoned.rop.nl lookup, before
   //rendering anything below - see cachedTimezonePosix's own comment. Skipped entirely if empty
   //(fresh device, or a device that has never had network access) - Clock/Date mode then falls
@@ -926,15 +871,6 @@ void setup() {
     SerialPrintln(F("DEBUG: Applied cached timezone POSIX rule (pre-WiFi): ") + cachedTimezonePosix);
   }
 
-  //EXPERIMENTAL diagnostic probe (2026-09-11) - live testing found the I2C scan below runs ~30x
-  //slower here (before initWiFi()) than when the identical scanI2CBus() call ran after WiFi
-  //connected in earlier tests the same day (~1s then vs. ~35-38s now, repeatedly) - same function,
-  //same hardware, only the WiFi-connect state differs. Testing whether WiFi.mode(WIFI_STA) alone
-  //(cheap SDK call, does not itself attempt a connection or block) is what actually matters, not
-  //full association - initWiFi() calls this again itself regardless, harmless to call twice.
-  WiFi.mode(WIFI_STA);
-  wifiModeDoneAtMs = millis(); //diagnostics only (added 2026-09-11) - narrowing down where the ~38s pre-WiFi delay actually is
-
   debugStatus = "Pre-WiFi Display";
   SerialPrintln(F("DEBUG: Status = ") + debugStatus);
   while (unitReadinessPhase != UNIT_READINESS_DONE) {
@@ -942,7 +878,6 @@ void setup() {
     delay(10);
     yield();
   }
-  preWifiReadinessDoneAtMs = millis(); //diagnostics - splits the pre-WiFi block's two halves apart
   performOneSecondDisplayTick();
   unsigned long preWifiDisplayPumpStart = millis();
   while (isDisplayJobBusy() && !millisReached(preWifiDisplayPumpStart + 20000)) {
@@ -951,7 +886,6 @@ void setup() {
     yield();
   }
   previousMillis = millis(); //avoid an immediate duplicate tick the moment loop() starts
-  preWifiDisplayDoneAtMs = millis(); //breadcrumb - see this global's own comment
 
   debugStatus = "WiFi Init";
   SerialPrintln(F("DEBUG: Status = ") + debugStatus);
@@ -961,7 +895,6 @@ void setup() {
   //wifiManager.resetSettings();
 
   if (isWifiConfigured && !isPendingReboot) {
-    wifiConnectedAtMs = millis(); //see this global's own comment - boot-timing breadcrumb
     debugStatus = "WiFi Connected";
     SerialPrintln(F("DEBUG: Status = ") + debugStatus);
 
@@ -991,13 +924,11 @@ void setup() {
     // ServiceAsyncTimeSyncFunctions.ino) never block internally, so this loop's own delay(100)
     // is the only wait happening here, same as before.
     startNtpSync();
-    ntpWaitLoopWasSkipped = (timeStatus() != timeNotSet); //true when the RTC seed already set it
     while (timeStatus() == timeNotSet && (millis() - ntpStartTime) < ntpTimeout) {
       checkNtpSync();
       yield();  // Allow other tasks to run
       delay(100);
     }
-    ntpWaitLoopExitedAtMs = millis(); //see this global's own comment - boot-timing breadcrumb
 
     if (timeStatus() == timeSet) {
       debugStatus = "NTP Sync Success";
@@ -1774,33 +1705,16 @@ void setup() {
       }
 
       if (type == "heap") {
-        char buf[820];
+        char buf[250];
         //getFlashChipRealSize() = physical chip's own SPI ID (ground truth); getFlashChipSize() =
         //what the eesz board-menu choice assumes - a mismatch means the compiled layout is wrong.
         //rtc/rtcOsf (added 2026-09-11, see ServiceRtcFunctions.ino) - the only way to verify the
         //optional DS3231's detection/trustworthiness without physically observing the display.
-        //bootMs/readyPhase/unitsAmount/wifiConnectMs/ntpWaitExitMs/ntpWaitSkipped/preWifiDisplayMs
-        //(added 2026-09-11, same day, while chasing the "still ~40s to show the time" report) -
-        //reading these breadcrumbs straight off the device's own millis() sidesteps every wall-
-        //clock/tool-latency ambiguity a curl-poll loop otherwise has, and pins down WHICH boot
-        //phase (the pre-WiFi unit-readiness+display block vs. WiFi connect vs. the NTP-wait loop)
-        //the delay actually happens in, instead of guessing from human-observed display timing
-        //alone - this is exactly how wifiManager.autoConnect() (30-40s, twice observed) was found
-        //to be the real dominant delay, not anything this project had been chasing before that.
-        const char *readyPhaseStr = (unitReadinessPhase == UNIT_READINESS_SCAN) ? "SCAN"
-          : (unitReadinessPhase == UNIT_READINESS_POLLING) ? "POLLING" : "DONE";
-        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s rtc=%s rtcOsf=%u bootMs=%lu readyPhase=%s unitsAmount=%d debugFsMs=%lu debugFlagMs=%lu serialBeginMs=%lu beforeRecoverI2CMs=%lu afterRecoverI2CMs=%lu rtcSeedMs=%lu fsInitMs=%lu beforeJsonMs=%lu afterScheduledMs=%lu valuesLoadedMs=%lu configLoadMs=%lu wifiModeMs=%lu preWifiReadyMs=%lu preWifiDisplayMs=%lu wifiConnectMs=%lu ntpWaitExitMs=%lu ntpWaitSkipped=%u readyPollCount=%lu readyBlockUnit=%d readyBlockReadFail=%u displayJobState=%s forcedUnitResets=%lu scanTotalMs=%lu scanSlowestAddr=%d scanSlowestMs=%lu")),
+        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s rtc=%s rtcOsf=%u")),
           ESP.getFreeHeap(), ESP.getHeapFragmentation(), ESP.getMaxFreeBlockSize(),
           ESP.getFlashChipRealSize(), ESP.getFlashChipSize(), ESP.getFlashChipId(), ESP.getChipId(),
           ESP.getSdkVersion(), ESP.getCoreVersion().c_str(),
-          rtcPresent ? "present" : "absent", rtcOscillatorStopFlag ? 1 : 0,
-          millis(), readyPhaseStr, unitsAmount,
-          debugFsBeginDoneAtMs, debugFlagReadDoneAtMs, serialBeginDoneAtMs,
-          beforeRecoverI2CBusMs, afterRecoverI2CBusMs, rtcSeedDoneAtMs, fsInitDoneAtMs, loadValuesBeforeJsonMs, loadValuesAfterScheduledMs, valuesLoadedAtMs, configLoadDoneAtMs, wifiModeDoneAtMs,
-          preWifiReadinessDoneAtMs, preWifiDisplayDoneAtMs, wifiConnectedAtMs, ntpWaitLoopExitedAtMs, ntpWaitLoopWasSkipped ? 1 : 0,
-          unitReadinessPollCount, unitReadinessLastBlockingUnit, unitReadinessLastBlockingWasReadFailure ? 1 : 0,
-          getDisplayJobStateName(), forcedUnitResetCount,
-          scanTotalMs, scanSlowestAddress, scanSlowestMs);
+          rtcPresent ? "present" : "absent", rtcOscillatorStopFlag ? 1 : 0);
         request->send(200, "text/plain", buf);
         return;
       }
@@ -1829,29 +1743,7 @@ void setup() {
         return;
       }
 
-      if (type == "fs") {
-        //Diagnostics only (added 2026-09-11) - loadValuesFromFileSystem()'s ~30 plain readFile()
-        //calls were live-measured taking ~800ms EACH (24.6s total) and even LittleFS.begin()
-        //itself took ~10s on this device's first mount of the boot - both point at the filesystem/
-        //flash layer itself, not application logic, so this checks its actual size/health directly
-        //rather than guessing further from application-level timing alone.
-        FSInfo fsInfo;
-        bool ok = LittleFS.info(fsInfo);
-        int fileCount = 0;
-        Dir dir = LittleFS.openDir("/");
-        while (dir.next()) fileCount++;
-        char buf[200];
-        if (ok) {
-          snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("totalBytes=%u usedBytes=%u blockSize=%u pageSize=%u maxOpenFiles=%u maxPathLength=%u fileCount=%d")),
-            fsInfo.totalBytes, fsInfo.usedBytes, fsInfo.blockSize, fsInfo.pageSize, fsInfo.maxOpenFiles, fsInfo.maxPathLength, fileCount);
-        } else {
-          snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("LittleFS.info() failed, fileCount=%d")), fileCount);
-        }
-        request->send(200, "text/plain", buf);
-        return;
-      }
-
-      request->send(400, "text/plain", "Unknown 'type' - use health, heap, tcp, fs, or test");
+      request->send(400, "text/plain", "Unknown 'type' - use health, heap, tcp, or test");
     });
 
     // On-device crash log (see ServiceCrashLogFunctions.ino) - survives even without a live
@@ -3214,16 +3106,16 @@ void setup() {
 //anything even after the RTC fix made the correct time known almost instantly - the RTC fix
 //solved "does the software know the right time", not "when can it physically show it").
 //
-//Factored out of loop() (2026-09-11, same day) once live `bootMs`/`wifiConnectMs` diagnostics
-//(GET /api/diag?type=heap) proved the ACTUAL dominant delay is `wifiManager.autoConnect()` inside
-//`initWiFi()` (30-40s observed, twice, matching this project's older, already-investigated,
-//never-resolved "WiFi ~30s reachability" issue - see BUGFIX_LOG.md) - and that this being "non-
-//blocking in loop()" never actually helped, because loop() itself cannot run until setup()
-//returns, and initWiFi()'s blocking autoConnect() call sits in setup() BEFORE loop() ever gets a
-//chance to. A function called from both setup() (spun synchronously right before initWiFi(), so
-//blocking here is fine - nothing else is waiting on setup() yet) and loop() (ticked once per
-//iteration, as before - a no-op once DONE) actually decouples unit readiness/the first display
-//from WiFi, instead of only looking like it did.
+//Factored out of loop() (2026-09-11, same day) so setup() can also drive it synchronously, right
+//before initWiFi() - loop() itself cannot run until setup() returns, and initWiFi()'s blocking
+//autoConnect() call sits in setup() BEFORE loop() ever gets a chance to, so anything "non-
+//blocking" written into loop() alone was always gated behind it regardless. A function called
+//from both setup() (blocking here is fine - nothing else is waiting on setup() yet) and loop()
+//(ticked once per iteration, as before - a no-op once DONE) actually decouples unit readiness/the
+//first display from WiFi (see BUGFIX_LOG.md #202 - the real bottleneck this whole investigation
+//was chasing turned out to be a slow flash chip in loadValuesFromFileSystem(), not WiFi itself,
+//but this move is still correct and worth keeping: it's what lets the first display render
+//independently of however long WiFi ends up taking).
 void tickUnitReadiness() {
   if (unitReadinessPhase == UNIT_READINESS_SCAN) {
     //One scan attempt (with its own internal not-found retry, unchanged) to learn which
@@ -3254,18 +3146,13 @@ void tickUnitReadiness() {
       unitReadinessPhase = UNIT_READINESS_DONE;
     } else if (millisReached(unitReadinessLastPollAt + UNIT_READINESS_POLL_INTERVAL_MS)) {
       unitReadinessLastPollAt = millis();
-      unitReadinessPollCount++;
       bool anyBusy = false;
-      unitReadinessLastBlockingUnit = -1;
       for (int address = 0; address < unitsAmount; address++) {
         int status, offset;
         //No response yet counts as "not ready" too - a unit whose Wire responder only just came
         //up (or is deep in its own blocking calibrate() call) can legitimately miss a beat here.
-        bool ok = readUnitInfo(address, status, offset);
-        if (!ok || status == 1) { //1 = BUSY/MOVING, see scanI2CBus()'s status comment
+        if (!readUnitInfo(address, status, offset) || status == 1) { //1 = BUSY/MOVING, see scanI2CBus()'s status comment
           anyBusy = true;
-          unitReadinessLastBlockingUnit = address;
-          unitReadinessLastBlockingWasReadFailure = !ok;
           break;
         }
       }
@@ -3899,14 +3786,6 @@ int scanI2CBus() {
   SerialPrintln(F("I2C Bus Scan - Checking addresses 0-") + String(UNITS_AMOUNT_MAX - 1));
   SerialPrintln(F("========================================"));
 
-  //Diagnostics only (added 2026-09-11) - pinning down a live-observed ~35-38s scanI2CBus() call
-  //(same function, ~1s when called after WiFi connects in earlier tests the same day) to a
-  //specific address/step, since a per-address delay(10)+yield() alone can't explain more than
-  //~1s total across all 64 addresses.
-  unsigned long scanTotalStart = millis();
-  scanSlowestAddress = -1;
-  scanSlowestMs = 0;
-
   int foundCount = 0;
   bool foundUnits[UNITS_AMOUNT_MAX] = {false}; // Track which addresses are found
   int unitStatus[UNITS_AMOUNT_MAX]; // Track status of each address (-2 = not found, -1 = sleeping, 0 = ready, 1 = busy)
@@ -3914,7 +3793,6 @@ int scanI2CBus() {
 
   // Scan all possible I2C addresses (0..UNITS_AMOUNT_MAX-1)
   for (int address = 0; address < UNITS_AMOUNT_MAX; address++) {
-    unsigned long addressStart = millis(); //diagnostics only, see scanSlowestAddress's own comment
     Wire.beginTransmission(address);
     byte error = Wire.endTransmission();
 
@@ -3954,16 +3832,9 @@ int scanI2CBus() {
       SerialPrintln(address);
     }
 
-    unsigned long addressElapsed = millis() - addressStart; //diagnostics only
-    if (addressElapsed > scanSlowestMs) {
-      scanSlowestMs = addressElapsed;
-      scanSlowestAddress = address;
-    }
-
     yield();
     delay(10);
   }
-  scanTotalMs = millis() - scanTotalStart; //diagnostics only
 
   // Determine unitsAmount: count contiguous "found" addresses starting at 0
   int detectedAmount = 0;
