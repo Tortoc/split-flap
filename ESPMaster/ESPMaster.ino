@@ -131,6 +131,7 @@
 #include <user_interface.h> //struct rst_info, for the crash reporter
 #include <lwip/priv/tcp_priv.h> //exposes tcp_active_pcbs/etc. for /api/tcp-status
 #include "Classes.h"
+#include "ServiceMemoryReserveFunctions.h"
 #include "LittleFS.h"
 
 //--- User-facing settings ---
@@ -1797,9 +1798,12 @@ void setup() {
       }
 
       if (type == "tcp") {
-        //This board's lwIP build hard-caps MEMP_NUM_TCP_PCB at 5 - only 5 simultaneously *active*
-        //TCP connections, with a separate 5-slot TIME-WAIT pool (every request opens a fresh
-        //connection, "Connection: close" on every response).
+        //MEMP_NUM_TCP_PCB=5 in this board's lwIP build is NOT a hard cap on simultaneous
+        //connections, corrected 2026-09-12 (Punkt 207 investigation) - MEMP_MEM_MALLOC=1 means
+        //these PCBs come from malloc(), not a fixed 5-slot pool, so more than 5 can genuinely be
+        //in flight at once (verified live: a burst of 15 simultaneous connection attempts got
+        //well past 5 before the device crashed elsewhere - see connectionGateRejectedCount
+        //below for the actual defense now in place against that).
         int activeCount = 0;
         for (struct tcp_pcb *p = tcp_active_pcbs; p != NULL; p = p->next) activeCount++;
         int timeWaitCount = 0;
@@ -1809,8 +1813,9 @@ void setup() {
         int listenCount = 0;
         for (struct tcp_pcb_listen *p = tcp_listen_pcbs.listen_pcbs; p != NULL; p = p->next) listenCount++;
 
-        char buf[128];
-        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("active=%d/5 timeWait=%d/5 bound=%d listen=%d")), activeCount, timeWaitCount, boundCount, listenCount);
+        char buf[160];
+        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("active=%d timeWait=%d bound=%d listen=%d gateRejected=%lu")),
+          activeCount, timeWaitCount, boundCount, listenCount, connectionGateRejectedCount);
         request->send(200, "text/plain", buf);
         return;
       }
@@ -3168,6 +3173,9 @@ void setup() {
     });
 
     delay(250);
+    //Established BEFORE the server starts accepting connections - see
+    //ServiceMemoryReserveFunctions.cpp's own comment (Punkt 207).
+    maintainEmergencyMemoryReserve();
     webServer.begin();
 
 #if USE_MULTICAST == true
@@ -3919,6 +3927,9 @@ void loop() {
       lastBootSnapshotCheckAt = millis();
       checkBootSnapshotFreshness();
     }
+
+    //Cheap (no-op unless actually empty) - see ServiceMemoryReserveFunctions.cpp's own comment.
+    maintainEmergencyMemoryReserve();
   }
 }
 

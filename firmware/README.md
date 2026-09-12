@@ -47,8 +47,22 @@ Flash-Adressen schreibt.
 
 **ESPMaster** (`esp8266:esp8266:generic`, Flash-Layout `eesz=4M1M`):
 ```bash
-arduino-cli compile --fqbn "esp8266:esp8266:generic:eesz=4M1M" ESPMaster
+arduino-cli compile --fqbn "esp8266:esp8266:generic:eesz=4M1M" \
+  --build-property "compiler.c.elf.extra_flags=-Wl,--wrap=_Znwj -Wl,--wrap=tcp_accept" \
+  ESPMaster
 ```
+**⚠️ Das `--build-property` mit den beiden `-Wl,--wrap=...`-Flags ist seit Punkt 207/209
+(2026-09-12) ZWINGEND erforderlich, kein optionaler Zusatz.** `ServiceMemoryReserveFunctions.cpp`
+und `ServiceConnectionGateFunctions.cpp` definieren `__wrap__Znwj`/`__wrap_tcp_accept` und
+referenzieren `__real__Znwj`/`__real_tcp_accept` - letztere existieren als linkbare Symbole nur,
+wenn der Linker tatsächlich mit `--wrap=_Znwj`/`--wrap=tcp_accept` aufgerufen wird. Ohne dieses
+Flag schlägt der Build mit "undefined reference to `__real__Znwj`" (bzw. `__real_tcp_accept`) fehl
+- das ist beabsichtigt (ein stiller Fallback auf ungeschütztes Verhalten wäre schlimmer als ein
+lauter Build-Fehler). Der Mechanismus selbst ist nicht neu erfunden: dieser Core nutzt exakt
+dasselbe `-Wl,-wrap,...`-Muster bereits selbst für zwei andere Symbole
+(`compiler.c.elf.flags` in `platform.txt`: `-Wl,-wrap,system_restart_local
+-Wl,-wrap,spi_flash_read`).
+
 **Änderung 2026-08-21:** vorher `eesz=1M128`
 (~438KB OTA-Slot). Per neuem `/api/heap`-Diagnosefeld
 (`ESP.getFlashChipRealSize()`) wurde festgestellt, dass der tatsächlich
