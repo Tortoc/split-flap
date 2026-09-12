@@ -115,12 +115,26 @@ struct DisplayJob {
   //Counts sweeps since resetDisplayJobWaitSubstate() - used to only fetch phase/progress (the
   //heavy 6-byte read) every Nth sweep instead of every sweep, see PHASE_READ_EVERY_N_POLLS below.
   unsigned long waitPollCount = 0;
-  //Per-unit stuck-detection state, sized to the structural max (like displayState[] elsewhere) -
+  //Per-unit stuck-detection state, sized to the structural max (64 units) -
   //each unit needs its own "have I seen it move" tracking now that they're no longer resolved
   //one at a time. Reset for every unit on every new wait phase (resetDisplayJobWaitSubstate()).
-  unsigned long waitLastProgressAt[UNITS_AMOUNT_MAX];
-  int waitLastPhase[UNITS_AMOUNT_MAX];
-  int waitLastProgress[UNITS_AMOUNT_MAX];
+  //
+  //Narrowed from plain `int`/`unsigned long` (found 2026-09-12, RAM-savings review): real values
+  //are tiny (phase is one of 3 states, Unit.ino's PHASE_IDLE/CALIBRATING/ROTATING; progress tops
+  //out at 3*STEPS=6114 on the actual hardware) - but readUnitInfo()'s raw wire bytes are NOT
+  //bounds-checked before landing here, and this project has already documented, live-observed one
+  //specific garbage pattern (an idle/pulled-up I2C bus reads back as 0xFF per byte - see
+  //readUnitInfo()'s 7-arg overload comment) that would decode to phase=255/progress=65535.
+  //pollDisplayJobWaitAllUnitsReady() validates both against UNIT_PHASE_MAX/UNIT_PROGRESS_MAX
+  //BEFORE ever storing into these narrower arrays - without that check, a persistent garbage
+  //reading of 65535 could never be faithfully stored in a uint16_t (it would silently collide with
+  //whatever "no real sample yet" sentinel occupies that same bit pattern) and would keep comparing
+  //as "changed" forever, permanently defeating the stuck-timeout/forceUnitRecoveryReset() safety
+  //net below instead of tripping it - so the array types alone are not the fix, the validation at
+  //the write site is.
+  int8_t waitLastPhase[UNITS_AMOUNT_MAX];    //-1 = no sample yet; else 0..UNIT_PHASE_MAX
+  int16_t waitLastProgress[UNITS_AMOUNT_MAX]; //-1 = no sample yet; else 0..UNIT_PROGRESS_MAX
+  unsigned long waitLastProgressAt[UNITS_AMOUNT_MAX]; //already the platform's native word size - no narrowing available
 };
 
 DisplayJob displayJob;
@@ -277,6 +291,15 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
 //otherwise - reduces I2C interrupt load on the ATmega328p during calibration.
 const int PHASE_READ_EVERY_N_POLLS = 3; //heavy 6-byte read roughly every 3s instead of every 1s
 
+//Plausibility bounds for the raw phase/progress bytes read over I2C, checked before they're
+//narrowed into DisplayJob's uint8_t/int16_t arrays (see that struct's own comment for why this
+//check - not just the narrower types - is the actual fix). PHASE_MAX matches Unit.ino's highest
+//currentPhase constant (PHASE_ROTATING=2); PROGRESS_MAX is a generous ceiling well above the real
+//worst case (Unit.ino's own hard-failure cap is 3*STEPS=6114 with STEPS=2038) but comfortably
+//below the known-bad 65535 "idle bus" reading and int16_t's range.
+const int UNIT_PHASE_MAX = 2;
+const int UNIT_PROGRESS_MAX = 20000;
+
 bool pollDisplayJobWaitAllUnitsReady() {
   const unsigned long maxTotalWaitMs = 90000;
   const unsigned long stuckTimeoutMs = 15000;
@@ -317,12 +340,24 @@ bool pollDisplayJobWaitAllUnitsReady() {
       unitDone = true; //0 = ready, -1 = sleeping - either way, nothing to wait for
     } else if (ok) {
       if (wantPhaseRead) {
-        SerialPrintln(F("Unit ") + String(address) + F(" busy - phase ") + String(phase) +
-          F(", progress ") + String(progress) + F(" (") + String((millis() - displayJob.waitPhaseStartedAt) / 1000) + F("s total waited)"));
-        if (phase != displayJob.waitLastPhase[address] || progress != displayJob.waitLastProgress[address]) {
-          displayJob.waitLastPhase[address] = phase;
-          displayJob.waitLastProgress[address] = progress;
-          displayJob.waitLastProgressAt[address] = millis();
+        //Reject implausible readings (see UNIT_PHASE_MAX/UNIT_PROGRESS_MAX's own comment) before
+        //they ever reach the narrowed waitLastPhase/waitLastProgress arrays - treated the same as
+        //a failed read below (not stored, not compared, timestamp untouched), so a unit stuck
+        //returning garbage still trips the stuck-timeout instead of the comparison silently never
+        //matching again.
+        bool phaseReadingPlausible = phase >= 0 && phase <= UNIT_PHASE_MAX &&
+          progress >= 0 && progress <= UNIT_PROGRESS_MAX;
+        if (!phaseReadingPlausible) {
+          SerialPrintln(F("Unit ") + String(address) + F(" - implausible phase/progress reading (") +
+            String(phase) + F("/") + String(progress) + F("), ignoring this sample"));
+        } else {
+          SerialPrintln(F("Unit ") + String(address) + F(" busy - phase ") + String(phase) +
+            F(", progress ") + String(progress) + F(" (") + String((millis() - displayJob.waitPhaseStartedAt) / 1000) + F("s total waited)"));
+          if (phase != displayJob.waitLastPhase[address] || progress != displayJob.waitLastProgress[address]) {
+            displayJob.waitLastPhase[address] = phase;
+            displayJob.waitLastProgress[address] = progress;
+            displayJob.waitLastProgressAt[address] = millis();
+          }
         }
       } else {
         SerialPrintln(F("Unit ") + String(address) + F(" busy (light check, ") +
@@ -379,6 +414,20 @@ void finishDisplayJob() {
   if (displayJob.hadWriteFailure) {
     displayRenderGeneration++;
   }
+
+  //Release any String heap buffers this job held (found 2026-09-12, RAM-savings review):
+  //originalMessage/lines[]/currentAlignedLine can grow well past the small-string-optimization
+  //threshold for a long message, and the NEXT job re-populating the same slots with SHORTER text
+  //wouldn't free that capacity on its own (String's plain "=" reuses existing capacity rather than
+  //releasing it) - move-assigning a fresh temporary does (String::move()/invalidate(), WString.cpp).
+  //Safe here: lastWrittenText already captured originalMessage above, and nothing reads displayJob's
+  //text fields again until the next startDisplayJob() call, which repopulates them from scratch.
+  displayJob.originalMessage = String();
+  displayJob.currentAlignedLine = String();
+  for (int i = 0; i < DisplayJob::MAX_DISPLAY_LINES; i++) {
+    displayJob.lines[i] = String();
+  }
+
   SerialPrintln(F("Done showing message"));
   displayJob.state = DISPLAY_JOB_IDLE;
 }

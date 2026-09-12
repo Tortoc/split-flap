@@ -298,73 +298,8 @@ bool readUnitInfo(int address, int &statusOut, int &offsetOut, int &phaseOut, in
 
 //The old blocking waitForUnitReady()/waitForAllUnitsReady()/showMessage() wait loop now lives as
 //the non-blocking pollDisplayJobWaitAllUnitsReady() state machine in ServiceDisplayJobFunctions.ino.
-
-//Checks if unit in display is currently moving
-bool isDisplayMoving() {
-  //Request all units moving state and write to array
-  for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
-    displayState[unitIndex] = checkIfMoving(unitIndex);
-    if (displayState[unitIndex] == 1) {
-      SerialPrint(F("Unit "));
-      SerialPrint(unitIndex);
-      SerialPrintln(F(" is busy (moving)"));
-      return true;
-    }
-    //If unit is not available through i2c
-    else if (displayState[unitIndex] == -1) {
-      SerialPrint(F("Unit "));
-      SerialPrint(unitIndex);
-      SerialPrintln(F(" is sleeping/not responding"));
-      return true;
-    }
-  }
-
-  SerialPrintln(F("Display is standing still"));
-  return false;
-}
-
-//Checks if single unit is moving
-int checkIfMoving(int address) {
-  int active;
-  int offsetUnused;
-
-  if (!readUnitInfo(address, active, offsetUnused)) {
-    // Check I2C error
-    Wire.beginTransmission(address);
-    byte error = Wire.endTransmission();
-    SerialPrint(F("  I2C error code: "));
-    SerialPrintln(error);
-
-    if (error == 2) {
-      SerialPrintln(F("  -> Address received NACK (device not found)"));
-    } else if (error == 3) {
-      SerialPrintln(F("  -> Data received NACK"));
-    } else if (error == 4) {
-      SerialPrintln(F("  -> Unknown I2C error"));
-    } else if (error == 5) {
-      SerialPrintln(F("  -> Timeout"));
-    }
-
-    return -1;
-  }
-
-  SerialPrint(F("Unit "));
-  SerialPrint(address);
-  SerialPrint(F(" status: "));
-  SerialPrintln(active);
-
-  if (active == -1) {
-    SerialPrint(F("WARNING: Unit "));
-    SerialPrint(address);
-    SerialPrintln(F(" returned -1 (sleeping), attempting wake-up..."));
-    Wire.beginTransmission(address);
-    byte error = Wire.endTransmission();
-    if (error != 0) {
-      SerialPrint(F("  Wake-up failed, I2C error: "));
-      SerialPrintln(error);
-    }
-  }
-  
-  return active;
-}
+//isDisplayMoving()/checkIfMoving()/the global displayState[] array they used were this wait loop's
+//own leftover helpers - never called by anything else, already silently dropped by the linker
+//(--gc-sections; verified via nm on the built .elf, 2026-09-12 RAM-savings review) but still
+//present, misleadingly, in source. Removed outright.
 

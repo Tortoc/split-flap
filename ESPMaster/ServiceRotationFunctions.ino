@@ -1,3 +1,49 @@
+//Converts RotationItem's compact RotationAlignmentOverride/RotationAnimationModeOverride enums
+//(Classes.h) to/from the ALIGNMENT_MODE_*/ANIMATION_MODE_* strings used everywhere else (JSON in
+//and out, showText()'s alignment/animation parameters) - see the enums' own comment for why this
+//conversion exists instead of storing the String directly.
+String rotationAlignmentOverrideToString(RotationAlignmentOverride value) {
+  switch (value) {
+    case RotationAlignmentOverride::Left: return ALIGNMENT_MODE_LEFT;
+    case RotationAlignmentOverride::Center: return ALIGNMENT_MODE_CENTER;
+    case RotationAlignmentOverride::Right: return ALIGNMENT_MODE_RIGHT;
+    default: return ""; //Inherit
+  }
+}
+
+//Callers validate against ALIGNMENT_MODE_LEFT/CENTER/RIGHT before ever reaching this (see
+//replaceRotationItemsFromJson()'s pre-validation loop) - anything else, including "", falls back
+//to Inherit, matching the previous ""-sentinel behavior exactly.
+RotationAlignmentOverride stringToRotationAlignmentOverride(const String &value) {
+  if (value == ALIGNMENT_MODE_LEFT) return RotationAlignmentOverride::Left;
+  if (value == ALIGNMENT_MODE_CENTER) return RotationAlignmentOverride::Center;
+  if (value == ALIGNMENT_MODE_RIGHT) return RotationAlignmentOverride::Right;
+  return RotationAlignmentOverride::Inherit;
+}
+
+String rotationAnimationModeOverrideToString(RotationAnimationModeOverride value) {
+  switch (value) {
+    case RotationAnimationModeOverride::Simultaneous: return ANIMATION_MODE_SIMULTANEOUS;
+    case RotationAnimationModeOverride::LeftToRight: return ANIMATION_MODE_LEFT_TO_RIGHT;
+    case RotationAnimationModeOverride::RightToLeft: return ANIMATION_MODE_RIGHT_TO_LEFT;
+    case RotationAnimationModeOverride::OutsideIn: return ANIMATION_MODE_OUTSIDE_IN;
+    case RotationAnimationModeOverride::InsideOut: return ANIMATION_MODE_INSIDE_OUT;
+    default: return ""; //Inherit
+  }
+}
+
+//Callers validate via isValidAnimationMode() before ever reaching this (see
+//replaceRotationItemsFromJson()'s pre-validation loop) - anything else, including "", falls back
+//to Inherit, matching the previous ""-sentinel behavior exactly.
+RotationAnimationModeOverride stringToRotationAnimationModeOverride(const String &value) {
+  if (value == ANIMATION_MODE_SIMULTANEOUS) return RotationAnimationModeOverride::Simultaneous;
+  if (value == ANIMATION_MODE_LEFT_TO_RIGHT) return RotationAnimationModeOverride::LeftToRight;
+  if (value == ANIMATION_MODE_RIGHT_TO_LEFT) return RotationAnimationModeOverride::RightToLeft;
+  if (value == ANIMATION_MODE_OUTSIDE_IN) return RotationAnimationModeOverride::OutsideIn;
+  if (value == ANIMATION_MODE_INSIDE_OUT) return RotationAnimationModeOverride::InsideOut;
+  return RotationAnimationModeOverride::Inherit;
+}
+
 //Advances through rotationItems on a per-item timer, wrapping back to the start once the last
 //item's duration elapses. Mirrors checkCountdown()'s "recompute inputText every second" pattern -
 //called once per second from loop(), alongside checkCountdown()/checkScheduledMessages().
@@ -59,10 +105,10 @@ void checkRotation() {
   RotationItem &currentItem = rotationItems[rotationCurrentIndex];
 
   //"" (empty) means "inherit the default alignment" - see showText()/DISPLAY_JOB_WRITE_LINE.
-  rotationCurrentAlignment = currentItem.Alignment;
+  rotationCurrentAlignment = rotationAlignmentOverrideToString(currentItem.Alignment);
   //Same "" / -1 = inherit pattern for the per-item animation override (found 2026-09-10,
   //"Animation pro Rotation-Item") - see the globals' own comment (ESPMaster.ino).
-  rotationCurrentAnimationMode = currentItem.AnimationMode;
+  rotationCurrentAnimationMode = rotationAnimationModeOverrideToString(currentItem.AnimationMode);
   rotationCurrentAnimationStaggerMs = currentItem.AnimationStaggerMs;
 
   //Recompute inputText for whichever item is current every second, not just once when it becomes
@@ -141,6 +187,17 @@ bool replaceRotationItemsFromJson(String rotationItemsJson) {
       return false;
     }
 
+    //Alignment override validated the same way (found 2026-09-12, RAM-savings review: this check
+    //was missing entirely before, unlike its animationMode sibling right below - an unrecognized
+    //value would previously have been stored and passed through as-is to showText(), whatever that
+    //did with it; now rejected upfront like every other invalid field here, and required anyway
+    //once RotationItem.Alignment became an enum - see stringToRotationAlignmentOverride()).
+    String itemAlignment = String((const char*)(value["alignment"] | ""));
+    if (itemAlignment != "" && itemAlignment != ALIGNMENT_MODE_LEFT && itemAlignment != ALIGNMENT_MODE_CENTER && itemAlignment != ALIGNMENT_MODE_RIGHT) {
+      SerialPrintln(F("Rotation items JSON rejected: invalid alignment - keeping the existing list, not touching it"));
+      return false;
+    }
+
     String itemAnimationMode = String((const char*)(value["animationMode"] | ""));
     if (itemAnimationMode != "" && !isValidAnimationMode(itemAnimationMode)) {
       SerialPrintln(F("Rotation items JSON rejected: invalid animationMode - keeping the existing list, not touching it"));
@@ -168,10 +225,20 @@ bool replaceRotationItemsFromJson(String rotationItemsJson) {
     item.Prefix = String((const char*)(value["prefix"] | ""));
     item.Suffix = String((const char*)(value["suffix"] | ""));
     item.DurationSeconds = value["durationSeconds"] | 5;
-    item.Alignment = String((const char*)(value["alignment"] | ""));
-    item.AnimationMode = String((const char*)(value["animationMode"] | ""));
+    item.Alignment = stringToRotationAlignmentOverride(String((const char*)(value["alignment"] | "")));
+    item.AnimationMode = stringToRotationAnimationModeOverride(String((const char*)(value["animationMode"] | "")));
     item.AnimationStaggerMs = value["animationStaggerMs"] | -1;
     rotationItemCount++;
+  }
+
+  //Release any String heap buffers left over in now-unused slots (e.g. a shrink from 20 to 3
+  //items would otherwise leave 17 RotationItems holding their previous content's capacity
+  //indefinitely - String's plain "=" assignment reuses existing capacity rather than freeing it;
+  //only a move-assignment from a fresh temporary actually calls String::invalidate()/frees the
+  //buffer, see WString.cpp. Found 2026-09-12, RAM-savings review). Cheap no-op on slots that were
+  //already empty (SSO strings, no heap involved).
+  for (int i = rotationItemCount; i < ROTATION_ITEMS_MAX; i++) {
+    rotationItems[i] = RotationItem();
   }
 
   //Always start a freshly-submitted sequence from the beginning.
@@ -199,8 +266,8 @@ void writeRotationItemsToFile() {
     itemObject["prefix"] = item.Prefix;
     itemObject["suffix"] = item.Suffix;
     itemObject["durationSeconds"] = item.DurationSeconds;
-    itemObject["alignment"] = item.Alignment;
-    itemObject["animationMode"] = item.AnimationMode;
+    itemObject["alignment"] = rotationAlignmentOverrideToString(item.Alignment);
+    itemObject["animationMode"] = rotationAnimationModeOverrideToString(item.AnimationMode);
     itemObject["animationStaggerMs"] = item.AnimationStaggerMs;
   }
 

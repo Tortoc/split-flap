@@ -5,6 +5,19 @@ struct ScheduledMessage {
   bool ShowIndefinitely;
 };
 
+//Compact representations of RotationItem's Alignment/AnimationMode per-item overrides (found
+//2026-09-12, RAM-savings review): each only ever holds one of a small closed set of values - a
+//String costs 12 bytes per slot regardless of content, an enum backed by uint8_t costs 1. Inherit
+//(0) is the previous ""-sentinel ("use the global default"), preserved exactly. Conversion to/from
+//the wire/persisted string form (rotationAlignmentOverrideToString()/
+//stringToRotationAlignmentOverride() and their AnimationMode equivalents) lives in
+//ServiceRotationFunctions.ino, right next to the ALIGNMENT_MODE_*/ANIMATION_MODE_* string
+//constants they translate against (ESPMaster.ino) - deliberately NOT here, since those constants
+//aren't declared yet at the point this header is included (see ESPMaster.ino's own include-order
+//comment on isReservedI2CAddress() for the general version of this gotcha).
+enum class RotationAlignmentOverride : uint8_t { Inherit, Left, Center, Right };
+enum class RotationAnimationModeOverride : uint8_t { Inherit, Simultaneous, LeftToRight, RightToLeft, OutsideIn, InsideOut };
+
 //One step of a "Rotation" sequence. Type is one of the DEVICE_MODE_* constants; only the fields
 //that type needs are populated.
 struct RotationItem {
@@ -15,12 +28,12 @@ struct RotationItem {
   String Prefix = "";           //countdown/countup: per-item prefix, independent of the standalone mode's setting
   String Suffix = "";           //countdown/countup: per-item suffix, independent of the standalone mode's setting
   int DurationSeconds = 5;      //how long to display this item
-  String Alignment = "";        //per-item override; "" inherits the default alignment
-  //Same "override, empty/sentinel inherits the default" pattern as Alignment above - found
-  //2026-09-10 on user request ("Animation pro Rotation-Item"). AnimationStaggerMs can't use ""
-  //as its own sentinel (it's a number) - -1 is used instead since 0 is itself a real, valid
-  //stagger value (explicitly "no delay" rather than "inherit").
-  String AnimationMode = "";       //per-item override; "" inherits the default animation mode
+  RotationAlignmentOverride Alignment = RotationAlignmentOverride::Inherit; //per-item override; Inherit uses the default alignment
+  //Same "override, Inherit uses the default" pattern as Alignment above - found 2026-09-10 on user
+  //request ("Animation pro Rotation-Item"). AnimationStaggerMs can't use the same enum trick (it's
+  //a number, not a closed set) - -1 is used instead since 0 is itself a real, valid stagger value
+  //(explicitly "no delay" rather than "inherit").
+  RotationAnimationModeOverride AnimationMode = RotationAnimationModeOverride::Inherit; //per-item override
   int AnimationStaggerMs = -1;     //per-item override; -1 inherits the default stagger
 };
 

@@ -3521,14 +3521,23 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						document.getElementById("accessControlSystem").checked = !!responseObject.accessControlSystemPublic;
 						document.getElementById("currentTimezoneDisplay").innerText = responseObject.timezone || "(leer)";
 						document.getElementById("currentMdnsHostnameDisplay").innerText = responseObject.mdnsHostname || "split-flap";
-						document.getElementById("mqttEnabled").checked = !!responseObject.mqttEnabled;
-						document.getElementById("mqttBrokerHost").value = responseObject.mqttBrokerHost || "";
-						document.getElementById("mqttBrokerPort").value = responseObject.mqttBrokerPort || 1883;
-						document.getElementById("mqttUsername").value = responseObject.mqttUsername || "";
-						document.getElementById("mqttPasswordStatus").innerText = responseObject.mqttPasswordSet ? "gesetzt" : "nicht gesetzt";
-						document.getElementById("mqttConnectionStatus").innerHTML = responseObject.mqttConnected
-							? '<span class="status-online-ready">verbunden</span>'
-							: '<span class="status-offline">nicht verbunden</span>';
+						//mqttEnabled (and every other mqtt* field) is only present in this response at
+						//all when MQTT_ENABLE was compiled in (ESPMaster.ino) - hide the tab entirely
+						//rather than leave a dead, non-functional panel (found 2026-09-12, RAM-savings
+						//review: MQTT_ENABLE turned off on this device to reclaim its always-on
+						//PubSubClient buffer).
+						var mqttAvailable = responseObject.mqttEnabled !== undefined;
+						document.getElementById("systemTabBtnMqtt").classList.toggle("hidden", !mqttAvailable);
+						if (mqttAvailable) {
+							document.getElementById("mqttEnabled").checked = !!responseObject.mqttEnabled;
+							document.getElementById("mqttBrokerHost").value = responseObject.mqttBrokerHost || "";
+							document.getElementById("mqttBrokerPort").value = responseObject.mqttBrokerPort || 1883;
+							document.getElementById("mqttUsername").value = responseObject.mqttUsername || "";
+							document.getElementById("mqttPasswordStatus").innerText = responseObject.mqttPasswordSet ? "gesetzt" : "nicht gesetzt";
+							document.getElementById("mqttConnectionStatus").innerHTML = responseObject.mqttConnected
+								? '<span class="status-online-ready">verbunden</span>'
+								: '<span class="status-offline">nicht verbunden</span>';
+						}
 						document.getElementById("quietHoursEnabled").checked = !!responseObject.quietHoursEnabled;
 						document.getElementById("quietHoursStart").value = responseObject.quietHoursStart || "22:00";
 						document.getElementById("quietHoursEnd").value = responseObject.quietHoursEnd || "07:00";

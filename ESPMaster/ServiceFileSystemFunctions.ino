@@ -48,8 +48,8 @@ void loadValuesFromFileSystem() {
         item.Prefix = String((const char*)(value["prefix"] | ""));
         item.Suffix = String((const char*)(value["suffix"] | ""));
         item.DurationSeconds = value["durationSeconds"] | 5;
-        item.Alignment = String((const char*)(value["alignment"] | ""));
-        item.AnimationMode = String((const char*)(value["animationMode"] | ""));
+        item.Alignment = stringToRotationAlignmentOverride(String((const char*)(value["alignment"] | "")));
+        item.AnimationMode = stringToRotationAnimationModeOverride(String((const char*)(value["animationMode"] | "")));
         item.AnimationStaggerMs = value["animationStaggerMs"] | -1;
         rotationItemCount++;
       }

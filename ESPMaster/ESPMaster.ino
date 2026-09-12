@@ -30,14 +30,19 @@
 #define DEBUG_ENABLE true  //startup debug page, error panel, page-load log, serial debug log -
                            //gated at runtime by showDebugPage (POST /api/debug-mode, persisted
                            //in /debugmode.txt)
-#define MQTT_ENABLE true   //MQTT + Home Assistant auto-discovery (found 2026-09-10 in two
+#define MQTT_ENABLE false  //MQTT + Home Assistant auto-discovery (found 2026-09-10 in two
                            //independent forks, see
                            //ServiceMqttFunctions.ino). This flag alone decides whether the
                            //feature exists in the firmware AT ALL - PubSubClient's own buffer is
-                           //malloc()'d from its constructor, so a compile-time false here is the
-                           //only way to avoid that cost entirely. The separate, persisted
-                           //mqttEnabled (runtime, via POST /api/mqtt) controls whether it actually
-                           //connects - false by default, changeable without a reflash.
+                           //malloc()'d from its constructor (initMqtt() grows it to 600 bytes, see
+                           //that function's own comment), so a compile-time false here is the only
+                           //way to avoid that cost entirely; the separate, persisted mqttEnabled
+                           //(runtime, via POST /api/mqtt) never actually prevented it. Turned off
+                           //2026-09-12 (RAM-savings review) - this device has never had
+                           //mqttEnabled=true, reclaims ~700 bytes (108 static + the 600-byte
+                           //buffer). Flip back to true (+ rebuild/redeploy) if MQTT/Home-Assistant
+                           //integration is ever actually wanted here; nothing is lost by turning it
+                           //back on later, mqttBrokerHost/etc. stay persisted either way.
 
 #define WIFI_STATIC_IP      false //try a router-assigned static IP instead of DHCP
 #define FAE_MOD                   //modified PCB with an ESP-12F module
@@ -286,7 +291,6 @@ const char* espVersion = "2.3.0-Scott";
 
 //All the letters on the units that we have to be displayed. You can change these if it so pleases at your own risk
 const char letters[] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '$', '&', '#', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', '-', '?', '!'};
-int displayState[UNITS_AMOUNT_MAX];
 unsigned long previousMillis = 0;
 int unitsAmount = 0; //auto-detected via I2C scan, sequential from 0 - see scanI2CBus()
 
@@ -1753,8 +1757,8 @@ void setup() {
         itemObject["prefix"] = item.Prefix;
         itemObject["suffix"] = item.Suffix;
         itemObject["durationSeconds"] = item.DurationSeconds;
-        itemObject["alignment"] = item.Alignment;
-        itemObject["animationMode"] = item.AnimationMode;
+        itemObject["alignment"] = rotationAlignmentOverrideToString(item.Alignment);
+        itemObject["animationMode"] = rotationAnimationModeOverrideToString(item.AnimationMode);
         itemObject["animationStaggerMs"] = item.AnimationStaggerMs;
       }
 
