@@ -1910,11 +1910,12 @@ curl -X POST http://192.168.1.50/api/web-file \
 						<details class="api-endpoint">
 							<summary>POST /api/units/firmware-push?action=push|probe</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc"><code>push</code> sendet die zuvor hochgeladene Firmware per I2C an eine Unit. <code>probe</code> prüft nur, ob/wo eine Unit im Bootloader antwortet - schreibt nichts, braucht kein Passwort.</p>
+								<p class="api-endpoint-desc"><code>push</code> sendet die zuvor hochgeladene Firmware per I2C an eine Unit. <code>probe</code> prüft nur, ob/wo eine Unit im Bootloader antwortet und schreibt selbst nichts an sie - erfordert aber seit Code_REVIEW_V5.md #03 dasselbe Passwort wie <code>push</code>, weil es die Unit über <code>requestUnitEnterBootloader()</code> tatsächlich neu startet.</p>
 								<pre class="api-code">curl -X POST http://192.168.1.50/api/units/firmware-push \
   -H "X-OTA-Password: splitflap" --data "action=push&amp;id=0"
 
-curl -X POST http://192.168.1.50/api/units/firmware-push --data "action=probe&amp;id=0"</pre>
+curl -X POST http://192.168.1.50/api/units/firmware-push \
+  -H "X-OTA-Password: splitflap" --data "action=probe&amp;id=0"</pre>
 							</div>
 						</details>
 						<details class="api-endpoint">
