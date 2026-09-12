@@ -1783,16 +1783,28 @@ void setup() {
       }
 
       if (type == "heap") {
-        char buf[250];
+        char buf[300];
         //getFlashChipRealSize() = physical chip's own SPI ID (ground truth); getFlashChipSize() =
         //what the eesz board-menu choice assumes - a mismatch means the compiled layout is wrong.
         //rtc/rtcOsf (added 2026-09-11, see ServiceRtcFunctions.ino) - the only way to verify the
         //optional DS3231's detection/trustworthiness without physically observing the display.
-        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s rtc=%s rtcOsf=%u")),
+        //resetReason/uptimeSec (added 2026-09-12, while investigating whether the WiFiManager/
+        //AUTH_EXPIRE disconnect issue - BUGFIX_LOG "Offene Punkte" - still occurs): the existing
+        //crash reporter (ServiceCrashLogFunctions.ino) only captures genuine exceptions/panics via
+        //custom_crash_callback() - a CLEAN reset (external/brownout/hardware-watchdog, exactly
+        //what a WiFiManager-driven reconnect gone wrong could cause without ever hitting that
+        //callback) leaves no trace there at all. ESP.getResetInfoPtr()->reason is the SDK's own
+        //boot-time record of the true last reset cause, independent of our crash reporter -
+        //reuses the same crashResetReasonText() decode table. uptimeSec lets repeated external
+        //polls (e.g. the established periodic stability check) notice ANY reboot between two
+        //checks (crashed or clean) even without a matching crash-log entry, by seeing a smaller
+        //uptime than the elapsed real time since the last check would imply.
+        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s rtc=%s rtcOsf=%u resetReason=%s uptimeSec=%lu")),
           ESP.getFreeHeap(), ESP.getHeapFragmentation(), ESP.getMaxFreeBlockSize(),
           ESP.getFlashChipRealSize(), ESP.getFlashChipSize(), ESP.getFlashChipId(), ESP.getChipId(),
           ESP.getSdkVersion(), ESP.getCoreVersion().c_str(),
-          rtcPresent ? "present" : "absent", rtcOscillatorStopFlag ? 1 : 0);
+          rtcPresent ? "present" : "absent", rtcOscillatorStopFlag ? 1 : 0,
+          crashResetReasonText(ESP.getResetInfoPtr()->reason), millis() / 1000);
         request->send(200, "text/plain", buf);
         return;
       }
