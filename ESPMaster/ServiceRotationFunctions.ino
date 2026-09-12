@@ -44,6 +44,31 @@ RotationAnimationModeOverride stringToRotationAnimationModeOverride(const String
   return RotationAnimationModeOverride::Inherit;
 }
 
+//Converts RotationItem's compact RotationItemType enum (Classes.h) to/from the DEVICE_MODE_*
+//strings used at the JSON boundary - see the enum's own comment for why Type is narrowed but the
+//global deviceMode isn't.
+String rotationItemTypeToString(RotationItemType value) {
+  switch (value) {
+    case RotationItemType::Clock: return DEVICE_MODE_CLOCK;
+    case RotationItemType::Date: return DEVICE_MODE_DATE;
+    case RotationItemType::Countdown: return DEVICE_MODE_COUNTDOWN;
+    case RotationItemType::Countup: return DEVICE_MODE_COUNTUP;
+    default: return DEVICE_MODE_TEXT;
+  }
+}
+
+//Anything unrecognized falls back to Text - matches the previous behavior exactly: an
+//unrecognized type string was already stored and displayed as plain text before this enum
+//existed, since checkRotation()'s dispatch chain (below) only special-cases Clock/Date/Countdown/
+//Countup and treats everything else as Text in its final `else` branch.
+RotationItemType stringToRotationItemType(const String &value) {
+  if (value == DEVICE_MODE_CLOCK) return RotationItemType::Clock;
+  if (value == DEVICE_MODE_DATE) return RotationItemType::Date;
+  if (value == DEVICE_MODE_COUNTDOWN) return RotationItemType::Countdown;
+  if (value == DEVICE_MODE_COUNTUP) return RotationItemType::Countup;
+  return RotationItemType::Text;
+}
+
 //Advances through rotationItems on a per-item timer, wrapping back to the start once the last
 //item's duration elapses. Mirrors checkCountdown()'s "recompute inputText every second" pattern -
 //called once per second from loop(), alongside checkCountdown()/checkScheduledMessages().
@@ -113,16 +138,16 @@ void checkRotation() {
 
   //Recompute inputText for whichever item is current every second, not just once when it becomes
   //current - keeps a clock/date/countdown item live for as long as it stays on screen.
-  if (currentItem.Type == DEVICE_MODE_CLOCK || currentItem.Type == DEVICE_MODE_DATE) {
+  if (currentItem.Type == RotationItemType::Clock || currentItem.Type == RotationItemType::Date) {
     inputText = timezone.dateTime(convertUserDateFormatToEzTime(currentItem.Format));
-  } else if (currentItem.Type == DEVICE_MODE_COUNTDOWN) {
+  } else if (currentItem.Type == RotationItemType::Countdown) {
     long differenceSeconds = currentItem.TargetDateTimeUnix - (long)nowSeconds;
     long days = differenceSeconds > 0 ? (long)ceil(differenceSeconds / 60.0 / 60.0 / 24.0) : 0;
 
     //Per-item prefix/suffix, independent of the standalone Countdown mode's own setting - see
     //buildDayCountText() (ServiceCountdownFunctions.ino).
     inputText = buildDayCountText(days, currentItem.Prefix, currentItem.Suffix);
-  } else if (currentItem.Type == DEVICE_MODE_COUNTUP) {
+  } else if (currentItem.Type == RotationItemType::Countup) {
     long differenceSeconds = (long)nowSeconds - currentItem.TargetDateTimeUnix;
     long days = differenceSeconds > 0 ? (long)floor(differenceSeconds / 60.0 / 60.0 / 24.0) : 0;
 
@@ -218,7 +243,7 @@ bool replaceRotationItemsFromJson(String rotationItemsJson) {
     }
 
     RotationItem &item = rotationItems[rotationItemCount];
-    item.Type = value["type"] | DEVICE_MODE_TEXT;
+    item.Type = stringToRotationItemType(String((const char*)(value["type"] | DEVICE_MODE_TEXT)));
     item.Value = String((const char*)(value["value"] | ""));
     item.Format = String((const char*)(value["format"] | ""));
     item.TargetDateTimeUnix = value["targetDateTimeUnix"] | 0;
@@ -259,7 +284,7 @@ void writeRotationItemsToFile() {
     RotationItem &item = rotationItems[rotationItemIndex];
 
     JsonObject itemObject = rotationItemsArray.add<JsonObject>();
-    itemObject["type"] = item.Type;
+    itemObject["type"] = rotationItemTypeToString(item.Type);
     itemObject["value"] = item.Value;
     itemObject["format"] = item.Format;
     itemObject["targetDateTimeUnix"] = item.TargetDateTimeUnix;

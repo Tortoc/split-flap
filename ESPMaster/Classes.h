@@ -18,10 +18,21 @@ struct ScheduledMessage {
 enum class RotationAlignmentOverride : uint8_t { Inherit, Left, Center, Right };
 enum class RotationAnimationModeOverride : uint8_t { Inherit, Simultaneous, LeftToRight, RightToLeft, OutsideIn, InsideOut };
 
-//One step of a "Rotation" sequence. Type is one of the DEVICE_MODE_* constants; only the fields
-//that type needs are populated.
+//Same reasoning for RotationItem's own Type field (found 2026-09-12, same review, done as a
+//second pass after Alignment/AnimationMode above): a rotation item can only ever be one of these
+//5 kinds (never "rotation" itself - that would be self-referential, and DEVICE_MODE_ROTATION is
+//deliberately not a value here). This is NARROWER in scope than converting the global `deviceMode`
+//String itself, which shares these same DEVICE_MODE_* constants but is threaded through file I/O,
+//JSON (de)serialization and the boot-snapshot signature string all over ESPMaster.ino/
+//ServiceFileSystemFunctions.ino - left as String, not worth that much larger blast radius for 11
+//bytes of savings on a single global. rotationItemTypeToString()/stringToRotationItemType()
+//(ServiceRotationFunctions.ino) convert at the same JSON boundaries as the enums above.
+enum class RotationItemType : uint8_t { Text, Clock, Date, Countdown, Countup };
+
+//One step of a "Rotation" sequence. Type is one of the DEVICE_MODE_* constants (as
+//RotationItemType); only the fields that type needs are populated.
 struct RotationItem {
-  String Type;
+  RotationItemType Type = RotationItemType::Text;
   String Value;                //text: the literal text to show
   String Format;                //clock/date: user format string, translated in convertUserDateFormatToEzTime()
   long TargetDateTimeUnix = 0;  //countdown: target date; countup: since-date (same field, meaning depends on Type)

@@ -41,7 +41,7 @@ void loadValuesFromFileSystem() {
           break;
         }
         RotationItem &item = rotationItems[rotationItemCount];
-        item.Type = value["type"] | DEVICE_MODE_TEXT;
+        item.Type = stringToRotationItemType(String((const char*)(value["type"] | DEVICE_MODE_TEXT)));
         item.Value = String((const char*)(value["value"] | ""));
         item.Format = String((const char*)(value["format"] | ""));
         item.TargetDateTimeUnix = value["targetDateTimeUnix"] | 0;

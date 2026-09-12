@@ -1750,7 +1750,7 @@ void setup() {
       for (int i = 0; i < rotationItemCount && (millis() - rotationRequestStart) < 1000; i++) {
         RotationItem &item = rotationItems[i]; //plain array indexing, see rotationItems' declaration
         JsonObject itemObject = rotationArray.add<JsonObject>();
-        itemObject["type"] = item.Type;
+        itemObject["type"] = rotationItemTypeToString(item.Type);
         itemObject["value"] = item.Value;
         itemObject["format"] = item.Format;
         itemObject["targetDateTimeUnix"] = item.TargetDateTimeUnix;
