@@ -432,6 +432,17 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
     serializeJson(result, resultJsonOut);
     return false;
   }
+  //Separate, fixed collision - see isReservedI2CAddress()'s own comment (ESPMaster.ino,
+  //Code_REVIEW_V5.md #04). Independent of unitsAmount: reachable even without a real Unit 63
+  //installed, since this check above only guards against ANOTHER UNIT's live app address.
+  if (isReservedI2CAddress(expectedBootAddressForCollisionCheck)) {
+    firmwareFile.close();
+    result["success"] = false;
+    result["error"] = F("Refusing to update Unit ") + String(unitIndex) + F(": its bootloader address (0x") +
+      String(expectedBootAddressForCollisionCheck, HEX) + F(") is permanently reserved for the RTC module. Nothing was written.");
+    serializeJson(result, resultJsonOut);
+    return false;
+  }
 
   SerialPrintln(F("Requesting Unit ") + String(unitIndex) + F(" to enter bootloader mode..."));
   unsigned long bootloaderSearchStart = millis();

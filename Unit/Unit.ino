@@ -63,6 +63,13 @@ const uint8_t addressPins[ADDRESS_PIN_COUNT] = {A0, A1, A2, A3, 3, 4}; //bit 0..
 //Starting value, not a measured one - see the plan's own "Unsicherheiten" section.
 #define EXPECTED_HOME_SEARCH_MAX_STEPS (STEPS + STEPS / 2)
 
+//Chunk size for calibrate()'s post-marker offset move - see that call site's own comment
+//(Code_REVIEW_V5.md #05). 20 steps keeps every chunk well under a second even at the slowest
+//allowed speed (1 RPM, ~29ms/step -> ~0.6s/chunk), so currentPhaseProgress updates far more often
+//than the master's 15s stuck-detection window, while still being coarse enough not to add
+//meaningful per-chunk call overhead over the previous single stepper.step() call.
+#define CALIBRATION_OFFSET_STEP_CHUNK 20
+
 //constants others
 #define BAUDRATE 115200
 //Valid stepperSpeed range - must stay in sync with ESPMaster.ino's MIN_SPEED/MAX_SPEED
@@ -728,7 +735,21 @@ int calibrate(bool initialCalibration) {
       ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         offsetSnapshot = calOffset;
       }
-      stepper.step(ROTATIONDIRECTION * offsetSnapshot);
+      //Chunk the offset move instead of one single blocking stepper.step(offsetSnapshot) call -
+      //found via Code_REVIEW_V5.md #05: at the slowest allowed speed (1 RPM) and the largest
+      //allowed offset (STEPS-1), that single call blocks for up to ~60s with currentPhaseProgress
+      //never updating in between. ESPMaster's own stuck-detection (pollDisplayJobWaitAllUnitsReady(),
+      //15s without a progress change) then force-reboots a unit that was actually still correctly,
+      //if slowly, homing - reproduced via the installed Stepper library's own timing math (~29.44s
+      //for a 1000-step offset at 1 RPM, already over the 15s threshold). Same per-chunk progress
+      //update idea as stepLetters()'s own per-letter-position tracking, just applied here too.
+      uint16_t offsetStepsRemaining = offsetSnapshot;
+      while (offsetStepsRemaining > 0) {
+        uint16_t thisChunk = offsetStepsRemaining < CALIBRATION_OFFSET_STEP_CHUNK ? offsetStepsRemaining : CALIBRATION_OFFSET_STEP_CHUNK;
+        stepper.step(ROTATIONDIRECTION * thisChunk);
+        offsetStepsRemaining -= thisChunk;
+        currentPhaseProgress = (uint16_t)(offsetSnapshot - offsetStepsRemaining); //steps done so far - keeps the master's stuck-detection seeing real, live progress
+      }
       displayedLetter = 0;
       positionKnown = true; //see positionKnown's declaration comment - this 0 is now confirmed real
       missedSteps = 0;

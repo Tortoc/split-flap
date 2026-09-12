@@ -2368,11 +2368,12 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 								//default "0" and wipe the stored date (see the matching backend gate in ESPMaster.ino).
 								document.getElementById('inputHiddenCountdownDateTimeUnix').value = responseObject.countdownToDateUnix || 0;
 								document.getElementById('inputHiddenCountupDateTimeUnix').value = responseObject.countupSinceDateUnix || 0;
-								//Rotation items aren't part of this response - load them now too if rotation is
-								//the saved mode, so the list isn't empty until the user re-clicks the tab.
-								if (responseObject.deviceMode === "rotation") {
-									loadRotationItems();
-								}
+								//Rotation items aren't part of this response, but a separate fetch is NOT needed
+								//here - found via Code_REVIEW_V5.md #09: setSavedMode(responseObject.deviceMode)
+								//just above already calls setDeviceModeTab(), which itself calls
+								//loadRotationItems() whenever the (saved or current) mode is "rotation". This used
+								//to duplicate that same fetch, firing it twice for every page load where rotation
+								//is the saved mode.
 
 								//Scheduled messages aren't part of this response either (see BUGFIX_LOG #117 -
 								//moved to its own endpoint, same reasoning as rotation items above) - load them
@@ -2570,7 +2571,21 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			if (mode === "rotation") {
 				loadRotationItems();
 			}
+
+			//The blanket re-enable just above would otherwise also re-enable the schedule-options
+			//sub-panel's own fields inside the Text tab regardless of the "Nachricht planen"
+			//checkbox's actual state, undoing showHideScheduledMessageInput()'s own disabled-state
+			//(see Code_REVIEW_V5.md #08) - re-sync it to match the checkbox right after.
+			if (mode === "text") {
+				showHideScheduledMessageInput();
+			}
 		}
+
+		//Guards against a late/out-of-order response overwriting a newer one - found via
+		//Code_REVIEW_V5.md #09: every call applied whatever it got back unconditionally, so two
+		//overlapping fetches (e.g. the tab closed and reopened before the first one returned) could
+		//let the FIRST request's response land AFTER the second and silently stomp the fresher one.
+		var rotationItemsRequestGeneration = 0;
 
 		//Fetches the current rotation sequence and renders it.
 		function loadRotationItems() {
@@ -2578,9 +2593,15 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				return;
 			}
 
+			rotationItemsRequestGeneration++;
+			var thisGeneration = rotationItemsRequestGeneration;
+
 			var xhrRequest = new XMLHttpRequest();
 			xhrRequest.onreadystatechange = function () {
 				if (this.readyState == 4 && this.status == 200) {
+					if (thisGeneration !== rotationItemsRequestGeneration) {
+						return; //a newer loadRotationItems() call has since started - this response is stale
+					}
 					try {
 						setRotationItems(JSON.parse(this.responseText));
 					} catch (e) {
@@ -3239,9 +3260,23 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 			if (checkboxScheduled.checked) {
 				scheduleOptionsElement.classList.remove("hidden")
+				scheduleOptionsElement.querySelectorAll("input").forEach(function (field) {
+					field.disabled = false;
+				});
 			}
 			else {
 				scheduleOptionsElement.classList.add("hidden")
+				//Found via Code_REVIEW_V5.md #08: CSS-hiding alone does NOT exclude a field from the
+				//form's native constraint validation in the browsers this project actually tested
+				//against - setDeviceModeTab() already found and fixed the identical problem for
+				//whole tabs (see its own comment, CODE_REVIEW_V4.md #10) by disabling fields, not just
+				//hiding them; this sub-panel inside the still-visible Text tab never got the same
+				//treatment. Without this, e.g. entering a past datetime, then unchecking "Nachricht
+				//planen" and submitting normal text can be silently blocked by the now-invisible,
+				//still-invalid, still-enabled date field.
+				scheduleOptionsElement.querySelectorAll("input").forEach(function (field) {
+					field.disabled = true;
+				});
 			}
 		}
 
@@ -4106,10 +4141,16 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				statusEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
 			};
 
-			xhrRequest.open("POST", "/api/wifi", true);
+			//action must be in the URL, not the POST body - found via Code_REVIEW_V5.md #07: the
+			//server reads it with hasParam("action") (no `post=true`), matching every OTHER action on
+			//this same endpoint (?action=reset/scan/connect below), which only ever put it in the URL.
+			//This one used to send it in the body instead, so the server never found it at all and
+			//always answered "Unknown 'action'" - verified against the ESPAsyncWebSrv source
+			//(hasParam's post flag must match exactly how the param actually arrived).
+			xhrRequest.open("POST", "/api/wifi?action=set-hostname", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
-			xhrRequest.send("action=set-hostname&hostname=" + encodeURIComponent(newHostname));
+			xhrRequest.send("hostname=" + encodeURIComponent(newHostname));
 		}
 
 		//POST /api/mqtt: `password` is only sent when the field isn't empty (leaving it blank means

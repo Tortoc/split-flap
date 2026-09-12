@@ -73,6 +73,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   if (deviceMode != DEVICE_MODE_TEXT) {
     deviceMode = DEVICE_MODE_TEXT;
     writeFile(LittleFS, deviceModePath, deviceMode.c_str());
+    checkBootSnapshotFreshness(); //see its own comment (ESPMaster.ino) - re-sync right after this confirmed change, not just on the periodic 30s check
   }
   inputText = message;
   showText(message);

@@ -157,6 +157,21 @@ void checkTimezoneLookup() {
         }
         return;
       }
+      //Found via Code_REVIEW_V5.md #15: nothing here previously checked WHO the reply actually
+      //came from - any UDP datagram landing on this device's fixed local port during the ~2s
+      //window a lookup happens to be pending, satisfying only the loose "starts with OK "/length
+      //checks below, would have been accepted and applied via timezone.setPosix() (and cached to
+      //flash for every future boot - see the write further down). Only trust a reply from the
+      //exact IP/port this request was actually sent to. Not cryptographic authentication - just
+      //rules out random/unrelated traffic and off-path guesses, matching this project's existing
+      //"ignore one bad datagram, keep waiting" pattern (see the NTP receive path's identical
+      //short-packet handling) rather than treating it as a hard failure.
+      if (tzLookupUdp.remoteIP() != tzDnsLookup.resultIp || tzLookupUdp.remotePort() != TIMEZONED_PORT) {
+        SerialPrintln(F("Timezone lookup: ignoring UDP packet from an unexpected sender"));
+        while (tzLookupUdp.available()) tzLookupUdp.read(); //discard it, keep the socket open for the real reply
+        return;
+      }
+
       String recv;
       recv.reserve(60);
       while (tzLookupUdp.available()) recv += (char)tzLookupUdp.read();
@@ -306,6 +321,18 @@ void checkNtpSync() {
         }
         return;
       }
+
+      //Same sender check as the timezone lookup's own UDP receive - see its comment
+      //(Code_REVIEW_V5.md #15). An accepted NTP reply here is applied directly as the system time
+      //(and written to the RTC, if present) - a spoofed/unrelated packet satisfying only the
+      //content-plausibility checks further down would otherwise be able to set an arbitrary clock,
+      //which countdown/countup/scheduled-messages/Quiet Hours all then trust.
+      if (ntpSyncUdp.remoteIP() != ntpDnsLookup.resultIp || ntpSyncUdp.remotePort() != 123) {
+        SerialPrintln(F("NTP sync: ignoring UDP packet from an unexpected sender"));
+        while (ntpSyncUdp.available()) ntpSyncUdp.read(); //discard it, keep the socket open for the real reply
+        return;
+      }
+
       byte buffer[NTP_SYNC_PACKET_SIZE]; //deliberately NOT pre-zeroed - see the length check below
       int bytesRead = ntpSyncUdp.read(buffer, NTP_SYNC_PACKET_SIZE);
       //A short/malformed datagram must be dropped, not parsed - found 2026-09-09,

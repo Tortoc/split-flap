@@ -153,6 +153,28 @@ String otaPassword = "";
 const char* otaPasswordPath = "/otapassword.txt";
 const char* mdnsHostnamePath = "/mdnsname.txt";
 
+//Unit 63's bootloader address is UNIT_BOOTLOADER_BASE_ADDRESS(0x29) + 63 = 0x68 - EXACTLY
+//RTC_I2C_ADDRESS. Found via Code_REVIEW_V5.md #04: every existing bootloader-address collision
+//check (pushFirmwareToUnit(), the /api/units/firmware-push "probe" action) only compared against
+//unitsAmount (the live app-address scan result) to catch unit-vs-unit address overlap - none of
+//them knew about this SEPARATE, fixed collision with the RTC, reachable even with fewer than 64
+//units actually installed. twibootReadChipInfo() alone sent to the RTC's address writes a
+//register pointer of 0x02 (hours) followed by three zero bytes (day-of-week, date) via the DS3231's
+//own register auto-increment - a "read-only diagnostic" against the wrong device that actually
+//corrupts its time registers. Checked at every bootloader-address entry point, independent of
+//unitsAmount, alongside (not instead of) the existing unitsAmount check.
+//
+//Must live here, AFTER this file's own #include block above - found the hard way: a real function
+//definition placed BEFORE those includes (where RTC_I2C_ADDRESS itself is #defined, much earlier
+//in this file) confuses arduino-cli's auto-prototype-generator into inserting its whole generated
+//prototype block (String/AsyncWebServerRequest*/time_t/... signatures included) ahead of the
+//#include lines that actually declare those types - breaking the ENTIRE sketch's compile with
+//"'String' was not declared in this scope" and similar, everywhere, not just here. #defines don't
+//have this problem (pure text substitution), only real function/variable definitions do.
+bool isReservedI2CAddress(int address) {
+  return address == RTC_I2C_ADDRESS;
+}
+
 #if MQTT_ENABLE == true
 //WiFiClient/PubSubClient objects declared here, not in ServiceMqttFunctions.ino - the Arduino
 //build concatenates .ino files in filename order (ESPMaster.ino before ServiceMqttFunctions.ino),
@@ -556,6 +578,10 @@ unsigned long lastRenderedGeneration = 0;
 bool isPendingReboot = false;
 bool isPendingUnitsReset = false;
 bool isWifiConfigured = false;
+//Background offline-recovery retry (loop()'s `if (!isWifiConfigured)` block) - see that block's
+//own comment (Code_REVIEW_V5.md #02) for why this exists at all.
+unsigned long lastOfflineReconnectAttempt = 0;
+#define OFFLINE_RECONNECT_RETRY_MS (5UL * 60UL * 1000UL) //5 minutes
 //Optional DS3231 RTC (ServiceRtcFunctions.ino) - declared here, not in that file, since
 //setup()/GET /api/diag below (both in this earlier-concatenated main sketch file) need them; see
 //probeRtc()'s own comment for the full reasoning.
@@ -569,6 +595,17 @@ LList<ScheduledMessage> scheduledMessages;
 #define ROTATION_ITEMS_MAX 20
 RotationItem rotationItems[ROTATION_ITEMS_MAX];
 int rotationItemCount = 0;
+
+//Found via Code_REVIEW_V5.md #11: scheduledMessages (an LList<ScheduledMessage>, ServiceScheduledMessageFunctions.ino)
+//had no size cap at all, unlike rotationItems above - each entry's own message text is already
+//capped (same 500-byte limit as /api/text), but the COUNT of entries was unbounded, and
+//writeScheduledMessagesToFile() builds one JsonDocument plus one full serialized String for the
+//WHOLE list on every add/remove - real, unbounded heap pressure on this already heap-constrained
+//device, reachable through normal, authenticated API use (or unauthenticated too, if
+//accessControlSettingsPublic is toggled on). Same order of magnitude as ROTATION_ITEMS_MAX above -
+//generous for the device's actual use case (a handful of upcoming scheduled messages), while
+//keeping the worst-case JSON blob a small, bounded size.
+#define SCHEDULED_MESSAGES_MAX 20
 int rotationCurrentIndex = 0;
 //Counts seconds the CURRENT rotation item was actually accepted by showText() (loop()'s
 //mode-dispatch block increments this after a successful call), not wall-clock seconds since its
@@ -1256,6 +1293,10 @@ void setup() {
       //addAndPersistScheduledMessage()'s new return value below, CODE_REVIEW_V4.md #12) that
       //deserve different explanations in the final response.
       String scheduledMessageRejectionReason = "";
+      //Set if a direct (non-scheduled) text submission needs more lines than fit - see
+      //Code_REVIEW_V5.md #06, where this is actually checked, further down. Mutually exclusive
+      //with scheduledMessageRejected (gated on the same newMessageScheduleEnabledValue branch).
+      bool directTextRejected = false;
 
       //Separate declarations - `bool a, b = false;` only initializes b, not a.
       bool newMessageScheduleEnabledValue = false;
@@ -1617,9 +1658,12 @@ void setup() {
             //scheduled. Can happen with a maliciously/accidentally crafted request, or legitimately
             //if a very soon deadline passes in the time between the browser prefilling the field
             //and this request actually being processed (see CODE_REVIEW_V4.md #9's related fix).
-            SerialPrintln(F("Scheduled Message rejected: date/time is not in the future"));
+            //A `false` here can now also mean SCHEDULED_MESSAGES_MAX was already reached
+            //(Code_REVIEW_V5.md #11, addScheduledMessage()'s own comment) - the message below
+            //covers both without needing a richer return type just to distinguish them.
+            SerialPrintln(F("Scheduled Message rejected: date/time is not in the future, or too many are already scheduled"));
             scheduledMessageRejected = true;
-            scheduledMessageRejectionReason = "the scheduled date/time has already passed and was NOT scheduled - pick a time in the future.";
+            scheduledMessageRejectionReason = "the scheduled date/time has already passed, or the maximum number of scheduled messages is already reached - it was NOT scheduled.";
           } else {
             SerialPrintln(F("New Scheduled Message added"));
           }
@@ -1642,18 +1686,45 @@ void setup() {
 
           //Only if we are showing text
           if (hasNewInputTextValue && deviceMode == DEVICE_MODE_TEXT) {
-            inputText = newInputTextValue;
+            //Found via Code_REVIEW_V5.md #06: the scheduled-message branch above already checks
+            //isMessageTooLongToRender() before accepting a submission, but this immediate-text
+            //branch didn't - a message needing more than DisplayJob::MAX_DISPLAY_LINES lines was
+            //accepted with 200 "OK" and applied to inputText/deviceMode, even though
+            //startDisplayJob() (ServiceDisplayJobFunctions.ino) would then refuse to ever actually
+            //render it, every single tick, forever. Reject clearly instead, same as /api/text
+            //already does for this exact case.
+            if (isMessageTooLongToRender(newInputTextValue)) {
+              SerialPrintln(F("Direct text rejected: needs more lines than fit to display"));
+              directTextRejected = true;
+            } else {
+              inputText = newInputTextValue;
+            }
           }
         }
 
-        if (rotationItemsUpdateRejected && scheduledMessageRejected) {
-          request->send(400, "text/plain", "OK, but the submitted rotation items were rejected (invalid JSON, or a text item needs more lines than fit) AND " + scheduledMessageRejectionReason);
+        //Re-sync the boot snapshot right after this request's writes, not just on the periodic
+        //30s check - found via Code_REVIEW_V5.md #01: a snapshot that's only ever caught up by a
+        //background timer leaves a real, if narrow, window where a confirmed-saved change is lost
+        //to a power cut before the next periodic tick. A no-op (no flash access) if nothing this
+        //request touched actually changed, since computeSettingsSignature() would already match.
+        checkBootSnapshotFreshness();
+
+        //scheduledMessageRejected and directTextRejected can never both be true for the same
+        //request (they're set in mutually exclusive if/else branches above, gated on
+        //newMessageScheduleEnabledValue) - safe to fold into one combined reason.
+        bool anyTextRejected = scheduledMessageRejected || directTextRejected;
+        String textRejectionReason = scheduledMessageRejected
+          ? scheduledMessageRejectionReason
+          : "the text needs more lines than fit to display and was NOT applied - the previous mode/text is unchanged.";
+
+        if (rotationItemsUpdateRejected && anyTextRejected) {
+          request->send(400, "text/plain", "OK, but the submitted rotation items were rejected (invalid JSON, or a text item needs more lines than fit) AND " + textRejectionReason);
         } else if (rotationItemsUpdateRejected) {
           request->send(400, "text/plain", "OK, but the submitted rotation items were rejected (invalid JSON, or a text item needs more lines than fit to ever display) and were NOT applied - the existing rotation list is unchanged.");
-        } else if (scheduledMessageRejected) {
+        } else if (anyTextRejected) {
           //scheduledMessageRejectionReason (found 2026-09-10, CODE_REVIEW_V4.md #12) now carries
           //one of two distinct explanations - see where it's set above.
-          request->send(400, "text/plain", "OK, but " + scheduledMessageRejectionReason);
+          request->send(400, "text/plain", "OK, but " + textRejectionReason);
         } else {
           request->send(200, "text/plain", "OK");
         }
@@ -1763,6 +1834,11 @@ void setup() {
       }
 
       // request->method() == HTTP_DELETE
+      //Found via Code_REVIEW_V5.md #16: unlike every other state-changing endpoint in this file,
+      //this DELETE had no password/access-control check at all, even with a password set and every
+      //category protected - anyone with HTTP access could erase the persisted crash history.
+      //Reading (GET, above) deliberately stays open regardless - only clearing needs protecting.
+      if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return;
       if (LittleFS.exists(CRASH_LOG_PATH)) {
         LittleFS.remove(CRASH_LOG_PATH);
       }
@@ -1995,6 +2071,21 @@ void setup() {
       }
 
       if (action == "probe") {
+        //Same always-required password check as "push" above, NOT the toggleable
+        //accessControlUnitsPublic - found via Code_REVIEW_V5.md #03: this branch was completely
+        //unauthenticated even with a password set, despite calling requestUnitEnterBootloader()
+        //below, which genuinely reboots the unit's running app (forced re-homing) exactly like
+        //"push" does before it ever gets this far. A read-only-sounding "probe" name doesn't make
+        //it a safe, unauthenticated diagnostic - it's the same disruptive operation.
+        if (String(otaPassword) != "") {
+          String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
+          if (!constantTimeEquals(providedPassword, String(otaPassword))) {
+            SerialPrintln(F("Unit bootloader probe rejected: invalid password"));
+            request->send(401, "text/plain", "Invalid password");
+            return;
+          }
+        }
+
         if (pendingBootloaderProbeSlot.request != nullptr) {
           request->send(503, "text/plain", "Another bootloader probe is already in progress, try again shortly");
           return;
@@ -2263,13 +2354,21 @@ void setup() {
             LittleFS.remove(webUploadTmpPath); //don't leave a corrupt temp file lying around
             SerialPrintln(F("DEBUG: Web file upload failed, previous file (if any) left untouched"));
           } else {
-            //A leftover uncompressed "/index.html" would take precedence over "/index.html.gz" -
-            //only now, right before the atomic swap, not eagerly at the start.
-            if (LittleFS.exists("/index.html")) {
-              LittleFS.remove("/index.html");
-            }
+            //Rename the new file into place FIRST, only remove the old uncompressed "/index.html"
+            //AFTER that's confirmed - found via Code_REVIEW_V5.md #13: the old order removed
+            //"/index.html" unconditionally, then attempted the rename - if THAT failed (e.g. a
+            //power cut between the two), the previously-working uncompressed UI was already gone
+            //while the new ".gz" never actually landed, even though the error response claims "the
+            //previous file (if any) is unchanged". The two paths never collide with each other
+            //("/index.html" vs "/index.html.gz"), so there was never a need to clear the old one
+            //first.
             if (LittleFS.rename(webUploadTmpPath, "/" + filename)) {
               SerialPrintln(F("DEBUG: Web file upload finished: ") + filename + F(", total bytes: ") + String(index + len));
+              //A leftover uncompressed "/index.html" would take precedence over "/index.html.gz" -
+              //only remove it now that the new file is confirmed safely in place.
+              if (LittleFS.exists("/index.html")) {
+                LittleFS.remove("/index.html");
+              }
             } else {
               SerialPrintln(F("Web file upload: failed to move temp file into place"));
               webFileUploadWriteFailed = true;
@@ -2632,6 +2731,7 @@ void setup() {
         }
         inputText = newText;
         showText(newText);
+        checkBootSnapshotFreshness(); //see its own comment (ESPMaster.ino) - re-sync right after a confirmed deviceMode change, not just on the periodic 30s check
       }
 
       request->send(200, "text/plain", "OK");
@@ -2835,6 +2935,7 @@ void setup() {
         }
 #endif
 
+        checkBootSnapshotFreshness(); //see its own comment (ESPMaster.ino) - re-sync right after this confirmed change, not just on the periodic 30s check
         request->send(200, "text/plain", "Hostname updated");
         return;
       }
@@ -2892,6 +2993,9 @@ void setup() {
       writeFile(LittleFS, accessControlTimezonePublicPath, accessControlTimezonePublic ? "true" : "false");
       writeFile(LittleFS, accessControlSystemPublicPath, accessControlSystemPublic ? "true" : "false");
 
+      //Especially important here (Code_REVIEW_V5.md #01) - without this, a power cut shortly after
+      //a confirmed password change could let the OLD password become valid again on the next boot.
+      checkBootSnapshotFreshness();
       request->send(200, "text/plain", "Security settings updated");
     });
 
@@ -3008,6 +3112,7 @@ void setup() {
       }
 
       applyMqttSettingsChange();
+      checkBootSnapshotFreshness(); //see its own comment (ESPMaster.ino) - re-sync right after this confirmed change, not just on the periodic 30s check
       request->send(200, "text/plain", "MQTT settings updated");
     });
 #endif
@@ -3043,6 +3148,7 @@ void setup() {
       writeFile(LittleFS, quietHoursEndPath, quietHoursEnd.c_str());
       SerialPrintln(F("Quiet Hours updated: enabled=") + String(quietHoursEnabled ? F("true") : F("false")) +
         F(" start=") + quietHoursStart + F(" end=") + quietHoursEnd);
+      checkBootSnapshotFreshness(); //see its own comment (ESPMaster.ino) - re-sync right after this confirmed change, not just on the periodic 30s check
       request->send(200, "text/plain", "Quiet Hours updated");
     });
 
@@ -3313,6 +3419,7 @@ void loop() {
       //went - stops a still-pending boot-retry (CODE_REVIEW_V3.md #12) from redundantly
       //re-resolving a value that's already correct (harmless either way, just unnecessary).
       bootTimezoneRuleResolved = true;
+      checkBootSnapshotFreshness(); //see its own comment (ESPMaster.ino) - re-sync right after this confirmed change, not just on the periodic 30s check
     } else {
       SerialPrintln(F("Timezone change rejected: '") + timezoneLookupDeferredValue + F("' not recognized"));
     }
@@ -3629,16 +3736,19 @@ void loop() {
     doc["unitIndex"] = unitIndex;
 
     //Same structural-collision guard as pushFirmwareToUnit() - see its comment
-    //(ServiceUnitFirmwareFunctions.ino, CODE_REVIEW_V2.md #16). This probe is read-only so a
-    //collision here can't corrupt anything, but a "successful" read against a colliding address
-    //could still be silently-wrong garbage from whichever unit happens to win the bus - reject
-    //clearly instead, without ever sending the enter-bootloader command.
-    bool collisionRisk = expectedBootAddress < unitsAmount;
+    //(ServiceUnitFirmwareFunctions.ino, CODE_REVIEW_V2.md #16). Corrected 2026-09-12
+    //(Code_REVIEW_V5.md #03/#04): this probe is NOT actually read-only - requestUnitEnterBootloader()
+    //below genuinely reboots whatever answers at this address, and twibootReadChipInfo() itself is
+    //a 4-byte WRITE (register-pointer + address bytes) before its read, not a pure read either. A
+    //colliding address is a real hazard here, not just "silently-wrong garbage" - also checked
+    //against the separate, fixed RTC collision (isReservedI2CAddress(), ESPMaster.ino), independent
+    //of unitsAmount.
+    bool collisionRisk = (expectedBootAddress < unitsAmount) || isReservedI2CAddress(expectedBootAddress);
 
     if (collisionRisk) {
       doc["success"] = false;
       doc["error"] = F("Refusing to probe Unit ") + String(unitIndex) + F(": its bootloader address would collide with "
-        "another unit's live app address at this installation's current size. See CODE_REVIEW_V2.md #16.");
+        "another unit's live app address, or is permanently reserved for the RTC module.");
     } else {
       SerialPrintln(F("Bootloader probe: requesting Unit ") + String(unitIndex) + F(" to enter bootloader..."));
       unsigned long bootloaderSearchStart = millis();
@@ -3721,18 +3831,45 @@ void loop() {
   }
 #endif
 
-  //No custom WiFi reconnect-monitoring here deliberately - a prior version fought the SDK's own
-  //auto-reconnect and caused instability.
-
-  //Do nothing if WiFi is not configured
+  //isWifiConfigured only ever LATCHES true, once, inside initWiFi() (setup()) - it never gets
+  //corrected back if the initial connect attempt genuinely failed (as opposed to a brief drop
+  //after a successful connect, which the SDK's own auto-reconnect already handles - see the
+  //comment above this block). Found via Code_REVIEW_V5.md #02: this used to mean a router/AP
+  //outage that happens to overlap exactly with THIS device's boot window left it permanently
+  //stuck showing "OFFLINE" until a manual power cycle - overwriting deviceMode/alignment/flapSpeed
+  //in the process, which also stopped the RTC-seeded clock from ever being shown again even though
+  //the whole point of that feature is to keep working without WiFi. Fixed in two parts: (1) render
+  //"OFFLINE" as a transient overlay via showText()'s own alignment-override parameter instead of
+  //mutating the user's real settings - once WiFi recovers, the original deviceMode was never
+  //actually touched; (2) periodically retry the STA connection ourselves in the background
+  //(WiFiManager's own portal has already given up for good by the time control reaches loop() -
+  //see initWiFi()'s comment - so nothing else would ever retry this on its own) and, on success,
+  //perform a single controlled reboot to run the exact same successful-boot sequence a normal
+  //connect would have - far lower-risk than trying to duplicate the ~2000 lines of one-time web
+  //server/NTP/MQTT setup that normally only ever runs once, inline, from within setup() itself.
   if (!isWifiConfigured) {
-    //Show there is an error via text on display
-    deviceMode = DEVICE_MODE_TEXT;
-    alignment = ALIGNMENT_MODE_CENTER;
-    flapSpeed = "80";
-
-    showText("OFFLINE");
+    showText("OFFLINE", 0, ALIGNMENT_MODE_CENTER);
     delay(100);
+
+    if (millisReached(lastOfflineReconnectAttempt + OFFLINE_RECONNECT_RETRY_MS)) {
+      lastOfflineReconnectAttempt = millis();
+      SerialPrintln(F("Still offline - retrying WiFi with the stored credentials..."));
+      WiFi.mode(WIFI_STA); //in case autoConnect()'s own now-abandoned portal left AP_STA behind
+      WiFi.begin(); //no args = reconnect with whatever the SDK already has persisted (WiFi.persistent(true) is the core default)
+      unsigned long retryStart = millis();
+      while (WiFi.status() != WL_CONNECTED && !millisReached(retryStart + 15000)) {
+        delay(250);
+        yield();
+      }
+      if (WiFi.status() == WL_CONNECTED) {
+        SerialPrintln(F("WiFi recovered - rebooting to complete normal startup"));
+        checkBootSnapshotFreshness(); //see its own comment further down - keep the snapshot fresh before every intentional reboot
+        delay(100);
+        ESP.restart();
+      } else {
+        SerialPrintln(F("Still offline - will retry again in ") + String(OFFLINE_RECONNECT_RETRY_MS / 60000) + F(" minutes"));
+      }
+    }
     return;
   }
 

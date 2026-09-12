@@ -185,7 +185,16 @@ void loadValuesFromIndividualFiles() {
 //scheduledMessagesPath/rotationItemsPath are NOT included (already their own single files, written
 //by their own existing, unchanged code paths - replaceRotationItemsFromJson(),
 //writeScheduledMessagesToFile()).
-void saveBootSnapshot() {
+//
+//Returns whether the write actually succeeded - found via Code_REVIEW_V5.md #12:
+//lastSavedSettingsSignature used to be updated unconditionally right after calling writeFile(),
+//regardless of whether the write itself succeeded. A failed write (flash full/unwritable at that
+//moment) then looked identical to a successful one to every later checkBootSnapshotFreshness()
+//check - the stale, never-actually-saved snapshot would sit there un-retried until some OTHER,
+//unrelated setting changed again. Only advance the signature on confirmed success now, so a
+//failed save keeps looking "dirty" and gets retried on the very next periodic check (or reboot
+//hook) instead of silently going quiet.
+bool saveBootSnapshot() {
   JsonDocument doc;
   doc["countdownToDateUnix"] = countdownToDateUnix;
   doc["countupSinceDateUnix"] = countupSinceDateUnix;
@@ -223,9 +232,13 @@ void saveBootSnapshot() {
 
   String snapshotJson;
   serializeJson(doc, snapshotJson);
-  writeFile(LittleFS, bootSnapshotPath, snapshotJson.c_str());
+  if (!writeFile(LittleFS, bootSnapshotPath, snapshotJson.c_str())) {
+    SerialPrintln(F("Boot snapshot: write FAILED - will retry on the next freshness check"));
+    return false;
+  }
   lastSavedSettingsSignature = computeSettingsSignature();
   SerialPrintln(F("Boot snapshot: (re)written"));
+  return true;
 }
 
 //Cheap (no flash access) string built from every field saveBootSnapshot() persists - lets
@@ -299,20 +312,29 @@ String readFile(fs::FS &fs, const char * path, String defaultValue) {
   return fileContent;
 }
 
-//Write file to LittleFS
-void writeFile(fs::FS &fs, const char * path, const char * message) {
+//Write file to LittleFS. Returns whether the FULL message was actually written - found via
+//Code_REVIEW_V5.md #12: this used to be void and only checked `if (file.print(message))`, which
+//is truthy for ANY nonzero return, i.e. a short/partial write (flash full, unplugged mid-write)
+//still looked like success to every caller. Every existing caller that ignores the return value
+//keeps behaving exactly as before (a bool return is silently discardable) - only callers that now
+//check it (readFile()'s own default-value write, saveBootSnapshot()) actually change behavior.
+bool writeFile(fs::FS &fs, const char * path, const char * message) {
   SerialPrintf(F("Writing file: %s\r\n"), path);
 
   File file = fs.open(path, "w");
   if (!file) {
     SerialPrintln(F("- Failed to open file for writing"));
-    return;
+    return false;
   }
 
-  if (file.print(message)) {
+  size_t expectedLen = strlen(message);
+  size_t written = file.print(message);
+  file.close();
+
+  if (written == expectedLen) {
     SerialPrintln(F("- File written"));
+    return true;
   }
-  else {
-    SerialPrintln(F("- Write failed"));
-  }
+  SerialPrintln(F("- Write failed (wrote ") + String(written) + F(" of ") + String(expectedLen) + F(" expected bytes)"));
+  return false;
 }

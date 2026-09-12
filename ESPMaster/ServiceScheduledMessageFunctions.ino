@@ -41,14 +41,23 @@ bool addScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool 
     //check on a stale/invalid index; .get() returns a default-constructed value instead. See
     //BUGFIX_LOG #117 - this loop itself never yields mid-iteration so isn't the reproduced hang,
     //but kept consistent with the other scheduledMessages accessors as a precaution.
+    bool replacedExisting = false;
     for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
       ScheduledMessage scheduledMessage = scheduledMessages.get(scheduledMessageIndex);
 
       if (scheduledDateTimeUnix == scheduledMessage.ScheduledDateTimeUnix) {
         SerialPrintln(F("Removing Existing Scheduled Message due to be shown, it will be replaced"));
         scheduledMessages.remove(scheduledMessageIndex);
+        replacedExisting = true;
         break;
       }
+    }
+
+    //Found via Code_REVIEW_V5.md #11 - only a genuinely NEW entry (not a same-timestamp replace,
+    //which the removal above already made room for) needs to be checked against the cap.
+    if (!replacedExisting && scheduledMessages.size() >= SCHEDULED_MESSAGES_MAX) {
+      SerialPrintln(F("Not adding Scheduled Message - already at SCHEDULED_MESSAGES_MAX"));
+      return false;
     }
 
     SerialPrintln(F("Adding new Scheduled Message"));
@@ -59,6 +68,22 @@ bool addScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool 
     SerialPrintln(F("Not adding Scheduled Message as it is in the past"));
     return false;
   }
+}
+
+//Restores one PERSISTED scheduled message at boot, unconditionally - unlike addScheduledMessage()
+//above, this does NOT reject a timestamp that's already due/in the past. Found via
+//Code_REVIEW_V5.md #10: readScheduledMessagesFromJson() used to call addScheduledMessage() for
+//this too, applying brand-new-submission validation to messages being RESTORED from disk. Before
+//the DS3231 RTC feature, the clock was never actually set yet at this point in boot, so
+//"scheduledDateTimeUnix > getRealUtcNow()" was trivially true for everything and this bug had no
+//real effect - now that the RTC seeds an accurate time before loadValuesFromFileSystem() even
+//runs (see setup(), ESPMaster.ino), a message that's already due (or one deferred by Quiet Hours
+//across a restart) gets silently dropped here instead of ever reaching checkScheduledMessages()'s
+//own, correct "show it now" handling. No replace-if-same-timestamp logic needed here either - a
+//freshly-loaded list from this device's own file was never going to contain a duplicate timestamp
+//already caught by that logic elsewhere.
+void restoreScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool showIndefinitely) {
+  scheduledMessages.add({scheduledText, scheduledDateTimeUnix, showIndefinitely});
 }
 
 //Remove and delete a existing scheduled message if found
@@ -140,29 +165,35 @@ void checkScheduledMessages() {
   }
 }
 
-//Parse JSON scheduled messages into the current known scheduled messages
+//Parse JSON scheduled messages into the current known scheduled messages - called once at boot
+//(loadValuesFromFileSystem()), restoring whatever was persisted from the last session.
 void readScheduledMessagesFromJson(String scheduledMessagesJson) {
-  if (scheduledMessagesJson != "") {    
-    int addedScheduledMessageCount = 0;
-
+  if (scheduledMessagesJson != "") {
     JsonDocument jsonDocument;
     DeserializationError deserialisationError = deserializeJson(jsonDocument, scheduledMessagesJson);
 
     if (!deserialisationError) {
       if (jsonDocument.is<JsonArray>()) {
         for (JsonVariant value : jsonDocument.as<JsonArray>()) {
+          //Same restore-time cap as rotationItems' own restore loop (ESPMaster.ino,
+          //replaceRotationItemsFromJson()) - see SCHEDULED_MESSAGES_MAX's own comment
+          //(Code_REVIEW_V5.md #11). Only reachable if the persisted file itself somehow holds more
+          //than the cap (e.g. from before this limit existed) - addScheduledMessage() already
+          //enforces it for every new submission from here on.
+          if (scheduledMessages.size() >= SCHEDULED_MESSAGES_MAX) {
+            SerialPrintln(F("Scheduled messages file has more than SCHEDULED_MESSAGES_MAX entries - dropping the rest"));
+            break;
+          }
+
           long scheduledDateTimeUnix = value["scheduledDateTimeUnix"];
           String message = value["message"];
           bool showIndefinitely = value["showIndefinitely"];
 
-          addScheduledMessage(message, scheduledDateTimeUnix, showIndefinitely);
-          addedScheduledMessageCount++;
-        }
-        
-        //If there is a difference in scheduled messages, re-write the messages
-        if (addedScheduledMessageCount != scheduledMessages.size()) {
-          SerialPrintln(F("Read message count and scheduled message count differ, writing updated messages"));
-          writeScheduledMessagesToFile();
+          //restoreScheduledMessage(), not addScheduledMessage() - see that function's own comment
+          //(Code_REVIEW_V5.md #10) for why restoring a persisted entry must never be rejected just
+          //because it's already due; checkScheduledMessages() (ticked every second regardless)
+          //picks up and fires anything genuinely due on its own very next tick.
+          restoreScheduledMessage(message, scheduledDateTimeUnix, showIndefinitely);
         }
       }
       else {

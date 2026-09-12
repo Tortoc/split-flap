@@ -222,13 +222,29 @@ LList<String> processSentenceToLines(String sentence) {
 
       if (wordItemLetter == '\n')
       {
-        lines.add(inProgressLine);
-        inProgressLine = "";
+        //Guard against a spurious empty line (found while fixing Code_REVIEW_V5.md #14 below): a
+        //word that happens to fill the display width EXACTLY, right before an explicit line break,
+        //already flushed inProgressLine (and reset it to "") one letter earlier via the
+        //unitsAmount-length check further down - adding it again here would insert an empty line
+        //between two real ones. Matches the rest of this function's own "\n\n collapses to a
+        //single \n" preprocessing further up - a deliberately blank line was never a supported
+        //feature to begin with.
+        if (inProgressLine != "")
+        {
+          lines.add(inProgressLine);
+          inProgressLine = "";
+        }
       }
       else
       {
-        //If we need to break up the word as its too long, then we need to add a "-"
-        if (inProgressLine.length() == unitsAmount - 1 && letterIndex < currentWordLength - 1)
+        //If we need to break up the word as its too long, then we need to add a "-" - but NOT if
+        //the very next character is just this word's own trailing line break (found via
+        //Code_REVIEW_V5.md #14, reproduced against this exact function: "HELLO\nX" at
+        //unitsAmount=5 wrongly split into "HELL-"/"O"/"X" instead of "HELLO"/"X", since reaching
+        //the display width one letter before an explicit newline looked identical to genuinely
+        //needing to break the word, even though nothing was actually left to fit afterward).
+        bool moreWordContentFollows = (letterIndex < currentWordLength - 1) && (wordItem[letterIndex + 1] != '\n');
+        if (inProgressLine.length() == unitsAmount - 1 && moreWordContentFollows)
         {
           inProgressLine = inProgressLine + "-";
           lines.add(inProgressLine);

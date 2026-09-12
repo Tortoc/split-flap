@@ -153,6 +153,16 @@ void writeRtcTime(time_t utc) {
   //Read-modify-write the status register rather than blindly writing 0x00 - registers 0x0E/0x0F
   //also carry alarm-interrupt-enable/square-wave-frequency bits this project doesn't use but
   //shouldn't silently reset either.
+  //
+  //rtcOscillatorStopFlag is only cleared below once EVERY one of these three transactions is
+  //confirmed to have actually succeeded - found via Code_REVIEW_V5.md #17: it used to be set
+  //false unconditionally after this whole block regardless of whether the pointer-set, the read,
+  //or even the final write-back (whose result wasn't checked AT ALL before) actually worked. The
+  //diagnostic (`rtcOsf` in GET /api/diag?type=heap) could then claim the flag was cleared while
+  //the DS3231's real hardware register still had it set - and the NEXT boot's readRtcTime() reads
+  //that real register, not our cache, so it would then correctly refuse to trust the RTC time
+  //anyway. The cache just silently lied about it in the meantime.
+  bool statusClearOk = false;
   Wire.beginTransmission(RTC_I2C_ADDRESS);
   Wire.write((uint8_t)0x0F);
   if (Wire.endTransmission(true) == 0) {
@@ -162,12 +172,20 @@ void writeRtcTime(time_t utc) {
       Wire.beginTransmission(RTC_I2C_ADDRESS);
       Wire.write((uint8_t)0x0F);
       Wire.write((uint8_t)(status & 0x7F)); //clear bit7 (OSF), leave the rest untouched
-      Wire.endTransmission(true);
+      if (Wire.endTransmission(true) == 0) {
+        statusClearOk = true;
+      } else {
+        recoverI2CBus();
+      }
     } else {
       recoverI2CBus();
     }
   } else {
     recoverI2CBus();
   }
-  rtcOscillatorStopFlag = false;
+  if (statusClearOk) {
+    rtcOscillatorStopFlag = false;
+  }
+  //else: leave rtcOscillatorStopFlag exactly as readRtcTime() last found it - unknown-but-possibly-
+  //still-set is the honest answer, not a false "cleared".
 }
