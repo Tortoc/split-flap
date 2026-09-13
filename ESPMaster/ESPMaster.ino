@@ -587,6 +587,13 @@ bool isWifiConfigured = false;
 //own comment (Code_REVIEW_V5.md #02) for why this exists at all.
 unsigned long lastOfflineReconnectAttempt = 0;
 #define OFFLINE_RECONNECT_RETRY_MS (5UL * 60UL * 1000UL) //5 minutes
+//Makes the WiFiManager/AUTH_EXPIRE disconnect question observable over HTTP - see
+//ServiceWifiFunctions.ino's own comment (Punkt 210-adjacent, 2026-09-13) for the full reasoning.
+//Declared here (not in that file) so /api/diag?type=heap (ESPMaster.ino, concatenated before
+//ServiceWifiFunctions.ino by Arduino's alphabetical build order) can see them.
+unsigned long wifiDisconnectCount = 0;
+String lastWifiDisconnectReason = "";
+unsigned long lastWifiDisconnectAt = 0;
 //Optional DS3231 RTC (ServiceRtcFunctions.ino) - declared here, not in that file, since
 //setup()/GET /api/diag below (both in this earlier-concatenated main sketch file) need them; see
 //probeRtc()'s own comment for the full reasoning.
@@ -1783,7 +1790,7 @@ void setup() {
       }
 
       if (type == "heap") {
-        char buf[300];
+        char buf[420]; //worst-case length checked by hand incl. the longest wifiDisconnectReason string
         //getFlashChipRealSize() = physical chip's own SPI ID (ground truth); getFlashChipSize() =
         //what the eesz board-menu choice assumes - a mismatch means the compiled layout is wrong.
         //rtc/rtcOsf (added 2026-09-11, see ServiceRtcFunctions.ino) - the only way to verify the
@@ -1799,12 +1806,18 @@ void setup() {
         //polls (e.g. the established periodic stability check) notice ANY reboot between two
         //checks (crashed or clean) even without a matching crash-log entry, by seeing a smaller
         //uptime than the elapsed real time since the last check would imply.
-        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s rtc=%s rtcOsf=%u resetReason=%s uptimeSec=%lu")),
+        //wifiDisconnects/lastWifiDisconnectReason/lastWifiDisconnectSecAgo (added 2026-09-13,
+        //ServiceWifiFunctions.ino) - makes the AUTH_EXPIRE/ASSOC_EXPIRE disconnect question
+        //observable over HTTP even without a live serial capture; see that file's own comment.
+        const char* lastDisconnectReasonForDiag = wifiDisconnectCount > 0 ? lastWifiDisconnectReason.c_str() : "none";
+        long lastDisconnectSecAgo = wifiDisconnectCount > 0 ? (long)((millis() - lastWifiDisconnectAt) / 1000) : -1;
+        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s rtc=%s rtcOsf=%u resetReason=%s uptimeSec=%lu wifiDisconnects=%lu lastWifiDisconnectReason=%s lastWifiDisconnectSecAgo=%ld")),
           ESP.getFreeHeap(), ESP.getHeapFragmentation(), ESP.getMaxFreeBlockSize(),
           ESP.getFlashChipRealSize(), ESP.getFlashChipSize(), ESP.getFlashChipId(), ESP.getChipId(),
           ESP.getSdkVersion(), ESP.getCoreVersion().c_str(),
           rtcPresent ? "present" : "absent", rtcOscillatorStopFlag ? 1 : 0,
-          crashResetReasonText(ESP.getResetInfoPtr()->reason), millis() / 1000);
+          crashResetReasonText(ESP.getResetInfoPtr()->reason), millis() / 1000,
+          wifiDisconnectCount, lastDisconnectReasonForDiag, lastDisconnectSecAgo);
         request->send(200, "text/plain", buf);
         return;
       }

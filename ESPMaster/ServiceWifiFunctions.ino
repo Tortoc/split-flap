@@ -2,6 +2,17 @@
 //once a local variable inside initWiFi() goes out of scope.
 WiFiEventHandler wifiDisconnectEventHandler;
 
+//Makes the long-suspected WiFiManager/AUTH_EXPIRE disconnect issue (BUGFIX_LOG "Offene Punkte")
+//observable over HTTP, not just via a live serial capture (found 2026-09-13: the existing
+//disconnect handler below already decodes the real reason, but only ever SerialPrintln()s it -
+//invisible unless a programmer happens to be connected at the exact moment it happens). A real
+//AUTH_EXPIRE/ASSOC_EXPIRE disconnect is usually just a brief, self-healing hiccup (WiFiManager's
+//own auto-reconnect handles it) - it doesn't necessarily cause a reboot, so resetReason/uptimeSec
+//(added the same day, GET /api/diag?type=heap) wouldn't catch it either. wifiDisconnectCount/
+//lastWifiDisconnectReason/lastWifiDisconnectAt (declared in ESPMaster.ino, see its own comment for
+//why) let the established periodic stability monitoring see disconnect frequency/cause over
+//time, cheaply (one counter + one short String + one timestamp, no Serial/programmer needed).
+
 //Translates a WiFi disconnect reason into a readable string for the serial log, so "full signal but
 //won't connect" can be pinned to a concrete cause instead of just "FAILED".
 String wifiDisconnectReasonToString(WiFiDisconnectReason reason) {
@@ -89,6 +100,9 @@ void initWiFi() {
   //pinned to a concrete cause instead of WiFiManager's generic "AutoConnect: FAILED".
   wifiDisconnectEventHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected &event) {
     SerialPrintln(F("DEBUG: WiFi Disconnected - SSID: \"") + event.ssid + F("\", Reason: ") + wifiDisconnectReasonToString(event.reason));
+    wifiDisconnectCount++;
+    lastWifiDisconnectReason = wifiDisconnectReasonToString(event.reason);
+    lastWifiDisconnectAt = millis();
   });
 
   //No WiFi.setSleepMode(WIFI_NONE_SLEEP) here deliberately - forcing the radio always-on was a
