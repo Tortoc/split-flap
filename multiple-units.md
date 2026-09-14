@@ -68,6 +68,15 @@ Primärgerät bereits aus der Gesamtzeile herausgeschnitten. Das Erweiterungsger
 über seinen bestehenden, bereits vorhandenen Low-Level-I2C-Schreibpfad auf seine eigenen Units
 (Wiederverwendung, kein Parallel-Code).
 
+**Kein SSL/TLS** - reines HTTP im lokalen WLAN, wie jeder andere interne Endpunkt dieses Projekts.
+Auf Nutzerfrage (2026-09-14) verifiziert: **IRAM-neutral.** Zwei isolierte Test-Sketches (nur
+`WiFiClient` mit von Hand gebautem Request vs. komplette `HTTPClient`-Bibliothek) kompilierten auf
+Byte identisches IRAM (26.375 Byte) - der gesamte IRAM-Fußabdruck kommt vollständig vom
+WiFi/SDK-Unterbau, den dieses Projekt bereits zu 100% bezahlt; die HTTP-Client-Schicht selbst
+(roh oder komfortabel) trägt nichts weiter bei. `WiFiClientSecure`/BearSSL (für HTTPS) wäre der
+Punkt, an dem IRAM tatsächlich eng werden könnte (bekannt rechenintensive Kryptoroutinen) - aber
+genau das ist hier bewusst nicht vorgesehen.
+
 **Wichtig:** Ein Erweiterungsgerät behält seine eigene, vollständig nutzbare Web-Oberfläche/API
 (Kalibrierung, Unit-Verwaltung, Firmware-Updates, WLAN-Einstellungen) - nur die "was wird gerade
 angezeigt"-Entscheidung wird im Erweiterungsgerät-Modus an das Primärgerät abgetreten
