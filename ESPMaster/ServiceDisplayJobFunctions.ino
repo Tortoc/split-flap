@@ -205,7 +205,7 @@ unsigned long computeUnitAnimationDelayMs(int unitIndex, int unitsAmount, String
 //actually have fit once actually rendered (reproduced: 250x 'ä' counted as 56 lines raw vs. 28
 //lines normalized, at a 50-line limit - accepted once normalized, wrongly rejected before).
 bool isMessageTooLongToRender(String message) {
-  return processSentenceToLines(normalizeUmlautsForDisplay(message)).size() > DisplayJob::MAX_DISPLAY_LINES;
+  return processSentenceToLines(normalizeUmlautsForDisplay(message), combinedUnitsAmount()).size() > DisplayJob::MAX_DISPLAY_LINES;
 }
 
 //Starts a new display job. Returns false (does nothing) if one is already running - callers that
@@ -224,7 +224,7 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   //parsedLines is a plain local here, used and discarded entirely within this function - safe.
   //See the long comment on DisplayJob::lines for why the LList itself must never be copied out
   //of a scope like this one, only its individual String elements.
-  LList<String> parsedLines = processSentenceToLines(message);
+  LList<String> parsedLines = processSentenceToLines(message, combinedUnitsAmount());
   //MAX_DISPLAY_LINES (50) was sized for "500 chars fits comfortably" assuming a fairly large
   //unitsAmount - with fewer units (or many explicit line breaks packed into the 500-char budget),
   //a fully within-limits message can genuinely need more lines than that. Previously silently
@@ -573,13 +573,16 @@ void updateDisplayJob() {
       displayJob.lastUsedEffectiveAlignment = effectiveAlignment; //see the field's own comment
       displayJob.lastUsedRenderGeneration = displayRenderGeneration; //see the field's own comment
 
+      //combinedUnitsAmount() (ServiceExtensionFunctions.ino) - own unitsAmount unless this is a
+      //primary device with reachable extensions, see multiple-units.md point 4.
+      int effectiveWidth = combinedUnitsAmount();
       String aligned = line;
       if (effectiveAlignment == ALIGNMENT_MODE_LEFT) {
-        aligned = leftString(aligned);
+        aligned = leftString(aligned, effectiveWidth);
       } else if (effectiveAlignment == ALIGNMENT_MODE_RIGHT) {
-        aligned = rightString(aligned);
+        aligned = rightString(aligned, effectiveWidth);
       } else if (effectiveAlignment == ALIGNMENT_MODE_CENTER) {
-        aligned = centerString(aligned);
+        aligned = centerString(aligned, effectiveWidth);
       }
 
       SerialPrint(F("Showing Aligned Message: \""));
@@ -602,6 +605,10 @@ void updateDisplayJob() {
 
       SerialPrintln(F("Unit calls are enabled. Will display message"));
       writeDueAnimatedUnits();
+      //Once per new line (not from the WAIT_STAGGER re-poll below) - Phase 1 doesn't coordinate
+      //animation timing across devices, see multiple-units.md point 5; a no-op unless this is a
+      //primary device with reachable extensions configured.
+      pushExtensionSegments();
 
       if (allAnimatedUnitsWritten()) {
         //The common case (animationModeValue == simultaneous, or staggerMs == 0): every unit's

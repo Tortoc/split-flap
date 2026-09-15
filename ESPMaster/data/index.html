@@ -1440,6 +1440,7 @@
 					<button type="button" id="systemTabBtnCrashLog" class="modal-tab-btn" onclick="setSystemModalTab('crashLog')">Crash-Log</button>
 					<button type="button" id="systemTabBtnAccessControl" class="modal-tab-btn" onclick="setSystemModalTab('accessControl')">Zugriffskontrolle</button>
 					<button type="button" id="systemTabBtnMqtt" class="modal-tab-btn" onclick="setSystemModalTab('mqtt')">MQTT</button>
+					<button type="button" id="systemTabBtnMultiDevice" class="modal-tab-btn" onclick="setSystemModalTab('multiDevice')">Mehrgeräte-Verbund</button>
 					<button type="button" id="systemTabBtnHelp" class="modal-tab-btn" onclick="setSystemModalTab('help')">Hilfe</button>
 				</div>
 
@@ -1670,6 +1671,70 @@
 							<span id="mqttConnectionStatus" style="font-family: monospace; font-size: 1.1rem;">wird geladen...</span>
 						</p>
 						<p id="mqttSettingsChangeStatus"></p>
+					</div>
+				</div>
+
+				<div id="systemTabMultiDevice" class="hidden">
+					<div style="text-align: left;">
+						<p class="note">
+							Verbindet dieses Gerät mit einem oder mehreren anderen Split-Flap-Geräten im selben
+							WLAN, sodass ein <strong>Primärgerät</strong> seinen Anzeigetext über die eigenen
+							Units hinaus auf zusätzliche <strong>Erweiterungsgeräte</strong> ausdehnt. Standalone
+							(Standard) entspricht dem bisherigen Verhalten unverändert. Details: <code>multiple-units.md</code>
+							im Projekt-Repository.
+						</p>
+						<p>
+							<label for="deviceRoleSelect">Rolle dieses Geräts</label>
+							<br>
+							<select id="deviceRoleSelect" style="width: 250px;" onchange="document.getElementById('extensionDevicesSection').classList.toggle('hidden', this.value !== 'primary')">
+								<option value="standalone">Eigenständig (Standard)</option>
+								<option value="primary">Primärgerät</option>
+								<option value="extension">Erweiterungsgerät</option>
+							</select>
+						</p>
+						<p>
+							<button class="btn-primary" onclick="saveDeviceRole()">Rolle speichern</button>
+						</p>
+						<p id="deviceRoleChangeStatus"></p>
+
+						<div id="extensionDevicesSection" class="hidden">
+							<hr>
+							<p class="note">
+								Bis zu 4 Erweiterungsgeräte, je per Hostname (z.B. <code>split-flap.local</code>)
+								oder IP-Adresse. Leere Felder bleiben unbelegt. Ein Erweiterungsgerät braucht keine
+								eigene Konfiguration außer der Rolle "Erweiterungsgerät" - dieses Gerät fragt
+								dessen Unit-Anzahl selbst periodisch ab.
+							</p>
+							<p>
+								<label for="extensionHost0">Erweiterungsgerät 1</label>
+								<br>
+								<input type="text" id="extensionHost0" style="width: 250px;" placeholder="z.B. 192.168.1.51 oder split-flap-2.local" />
+							</p>
+							<p>
+								<label for="extensionHost1">Erweiterungsgerät 2</label>
+								<br>
+								<input type="text" id="extensionHost1" style="width: 250px;" />
+							</p>
+							<p>
+								<label for="extensionHost2">Erweiterungsgerät 3</label>
+								<br>
+								<input type="text" id="extensionHost2" style="width: 250px;" />
+							</p>
+							<p>
+								<label for="extensionHost3">Erweiterungsgerät 4</label>
+								<br>
+								<input type="text" id="extensionHost3" style="width: 250px;" />
+							</p>
+							<p>
+								<button class="btn-primary" onclick="saveExtensionDevices()">Erweiterungsgeräte speichern</button>
+							</p>
+							<p id="extensionDevicesChangeStatus"></p>
+							<p>
+								<label>Status</label>
+								<br>
+								<span id="extensionDevicesStatus" style="font-family: monospace; font-size: 0.95rem; white-space: pre-line;">wird geladen...</span>
+							</p>
+						</div>
 					</div>
 				</div>
 
@@ -3457,6 +3522,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			document.getElementById("systemTabCrashLog").classList.toggle("hidden", tab !== "crashLog");
 			document.getElementById("systemTabAccessControl").classList.toggle("hidden", tab !== "accessControl");
 			document.getElementById("systemTabMqtt").classList.toggle("hidden", tab !== "mqtt");
+			document.getElementById("systemTabMultiDevice").classList.toggle("hidden", tab !== "multiDevice");
 			document.getElementById("systemTabHelp").classList.toggle("hidden", tab !== "help");
 			document.getElementById("systemTabBtnWifi").classList.toggle("active", tab === "wifi");
 			document.getElementById("systemTabBtnTimezone").classList.toggle("active", tab === "timezone");
@@ -3464,7 +3530,11 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			document.getElementById("systemTabBtnCrashLog").classList.toggle("active", tab === "crashLog");
 			document.getElementById("systemTabBtnAccessControl").classList.toggle("active", tab === "accessControl");
 			document.getElementById("systemTabBtnMqtt").classList.toggle("active", tab === "mqtt");
+			document.getElementById("systemTabBtnMultiDevice").classList.toggle("active", tab === "multiDevice");
 			document.getElementById("systemTabBtnHelp").classList.toggle("active", tab === "help");
+			if (tab === "multiDevice") {
+				loadExtensionDevicesStatus();
+			}
 		}
 
 		function closeAdminModal(name) {
@@ -3521,6 +3591,8 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						document.getElementById("accessControlSystem").checked = !!responseObject.accessControlSystemPublic;
 						document.getElementById("currentTimezoneDisplay").innerText = responseObject.timezone || "(leer)";
 						document.getElementById("currentMdnsHostnameDisplay").innerText = responseObject.mdnsHostname || "split-flap";
+						document.getElementById("deviceRoleSelect").value = responseObject.deviceRole || "standalone";
+						document.getElementById("extensionDevicesSection").classList.toggle("hidden", responseObject.deviceRole !== "primary");
 						//mqttEnabled (and every other mqtt* field) is only present in this response at
 						//all when MQTT_ENABLE was compiled in (ESPMaster.ino) - hide the tab entirely
 						//rather than leave a dead, non-functional panel (found 2026-09-12, RAM-savings
@@ -4217,6 +4289,121 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send(body);
+		}
+
+		//Multi-device role (multiple-units.md) - own small endpoint, see POST /api/device-role.
+		function saveDeviceRole() {
+			var statusEl = document.getElementById("deviceRoleChangeStatus");
+			var role = document.getElementById("deviceRoleSelect").value;
+
+			if (localDevelopment) {
+				statusEl.innerHTML = '<span class="status-online-ready">Rolle gespeichert (simuliert).</span>';
+				return;
+			}
+
+			statusEl.innerHTML = "";
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						statusEl.innerHTML = '<span class="status-online-ready">Rolle gespeichert.</span>';
+					} else if (this.status == 401) {
+						clearAdminPassword();
+						statusEl.innerHTML = '<span class="status-offline">Falsches Administrator-Passwort.</span>';
+					} else {
+						statusEl.innerHTML = '<span class="status-offline">Fehlgeschlagen: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
+					}
+				}
+			};
+			xhrRequest.onerror = function () {
+				statusEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
+			};
+			xhrRequest.open("POST", "/api/device-role", true);
+			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
+			xhrRequest.send("role=" + encodeURIComponent(role));
+		}
+
+		//Full-replace, same convention as saving Rotation Items - collects the up-to-4 fixed host
+		//fields (matching the firmware's own fixed EXTENSION_DEVICES_MAX array, see
+		///api/extension-devices' own comment) into a JSON array, skipping empty fields.
+		function saveExtensionDevices() {
+			var statusEl = document.getElementById("extensionDevicesChangeStatus");
+			var hosts = [];
+			for (var i = 0; i < 4; i++) {
+				var value = document.getElementById("extensionHost" + i).value.trim();
+				if (value) {
+					hosts.push(value);
+				}
+			}
+			var hostsJson = JSON.stringify(hosts);
+
+			if (localDevelopment) {
+				statusEl.innerHTML = '<span class="status-online-ready">Erweiterungsgeräte gespeichert (simuliert).</span>';
+				return;
+			}
+
+			statusEl.innerHTML = "";
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						statusEl.innerHTML = '<span class="status-online-ready">Erweiterungsgeräte gespeichert.</span>';
+						loadExtensionDevicesStatus();
+					} else if (this.status == 401) {
+						clearAdminPassword();
+						statusEl.innerHTML = '<span class="status-offline">Falsches Administrator-Passwort.</span>';
+					} else {
+						statusEl.innerHTML = '<span class="status-offline">Fehlgeschlagen: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
+					}
+				}
+			};
+			xhrRequest.onerror = function () {
+				statusEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
+			};
+			xhrRequest.open("POST", "/api/extension-devices", true);
+			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
+			xhrRequest.send("hosts=" + encodeURIComponent(hostsJson));
+		}
+
+		//Populates both the 4 host input fields and the human-readable status line, called when the
+		//Mehrgeräte-Verbund tab is opened (setSystemModalTab()) - GET /api/extension-devices returns
+		//an empty array harmlessly on a device that has none configured yet.
+		function loadExtensionDevicesStatus() {
+			var statusEl = document.getElementById("extensionDevicesStatus");
+			if (localDevelopment) {
+				statusEl.innerText = "(keine Erweiterungsgeräte konfiguriert - simuliert)";
+				return;
+			}
+
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4 && this.status == 200) {
+					try {
+						var devices = JSON.parse(this.responseText);
+						for (var i = 0; i < 4; i++) {
+							document.getElementById("extensionHost" + i).value = devices[i] ? devices[i].host : "";
+						}
+						if (devices.length === 0) {
+							statusEl.innerText = "Keine Erweiterungsgeräte konfiguriert.";
+						} else {
+							var lines = devices.map(function (d) {
+								var age = d.lastCheckedSecAgo < 0 ? "noch nicht geprüft" : (d.lastCheckedSecAgo + "s her");
+								return d.host + ": " + (d.reachable ? ("erreichbar, " + d.unitsAmount + " Units") : "nicht erreichbar") + " (" + age + ")";
+							});
+							statusEl.innerText = lines.join("\n");
+						}
+					} catch (e) {
+						statusEl.innerText = "Fehler beim Laden.";
+					}
+				}
+			};
+			xhrRequest.open("GET", "/api/extension-devices", true);
+			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
+			xhrRequest.send();
 		}
 
 		//Used only to refresh after a save - reuses /api/settings (same fields loadAdminSettings()

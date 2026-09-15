@@ -113,6 +113,10 @@
 #include <ESPAsyncTCP.h>
 #include <ESPAsyncWebSrv.h>
 #include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h> //Primary->Extension push/health-check (ServiceExtensionFunctions.ino,
+                               //multiple-units.md) - verified IRAM-neutral vs. plain WiFiClient
+                               //before adding this dependency (two isolated test builds, byte-
+                               //identical IRAM usage; see multiple-units.md's own note).
 #if USE_MULTICAST == true
 #include <ESP8266mDNS.h>
 #endif
@@ -469,6 +473,18 @@ const char* DEVICE_MODE_COUNTDOWN = "countdown";
 const char* DEVICE_MODE_COUNTUP = "countup";
 const char* DEVICE_MODE_ROTATION = "rotation";
 
+//Multi-device roles ("Primärgerät"/"Erweiterungsgerät", see multiple-units.md for the full design -
+//Master/Slave terminology deliberately avoided). standalone (default) is exactly today's behavior,
+//unaffected by anything below - this whole feature is opt-in. primary owns the display logic and
+//stretches it across its own units plus any configured, reachable extensionDevices[]
+//(ServiceExtensionFunctions.ino). extension does no display-logic of its own while acting as one -
+//performOneSecondDisplayTick() no-ops for it, its units are driven entirely by
+//POST /api/extension-display pushes from whichever primary is configured to reach it. An extension
+//keeps its own full web UI/API (calibration, firmware updates, WiFi settings) usable throughout.
+const char* DEVICE_ROLE_STANDALONE = "standalone";
+const char* DEVICE_ROLE_PRIMARY = "primary";
+const char* DEVICE_ROLE_EXTENSION = "extension";
+
 //Alignment options
 const char* ALIGNMENT_MODE_LEFT = "left";
 const char* ALIGNMENT_MODE_CENTER = "center";
@@ -515,6 +531,10 @@ const char* flapSpeedPath = "/flapspeed.txt";
 const char* animationModePath = "/animationmode.txt";
 const char* animationStaggerMsPath = "/animationstagger.txt";
 const char* deviceModePath = "/devicemode.txt";
+const char* deviceRolePath = "/devicerole.txt";
+//Own file, like rotationItemsPath/scheduledMessagesPath - a short JSON array of hostnames, not a
+//scalar, so it doesn't belong in the boot-snapshot blob (see that constant's own comment).
+const char* extensionDevicesPath = "/extensiondevices.json";
 //Combined boot-time settings cache (added 2026-09-11) - see saveBootSnapshot()/loadValuesFromFileSystem()'s
 //own comments (ServiceFileSystemFunctions.ino) for the full story: this device's flash chip (a
 //Zbit Semiconductor part, identified via GET /api/diag?type=heap's flashChipId - see BUGFIX_LOG)
@@ -557,6 +577,22 @@ String animationMode = ANIMATION_MODE_SIMULTANEOUS; //default - see the user's o
 unsigned long animationStaggerMs = 150; //ms between consecutive units' start, see ANIMATION_MODES
 String inputText = "";
 String deviceMode = "";
+String deviceRole = "standalone"; //standalone|primary|extension - see DEVICE_ROLE_* constants' own comment
+//Phase 1 (multiple-units.md): a fixed, small array like rotationItems - not a dynamic list, same
+//"no per-entry heap allocation, no LinkedList operator[] risk" reasoning as that struct's own
+//comment. 4 is a deliberately generous ceiling for a feature Phase 1 only ever tests with 1.
+//ExtensionDevice itself is declared in Classes.h, not here - see that header's own comment on
+//TwibootChipInfo for why a struct used as a function PARAMETER type
+//(ServiceExtensionFunctions.ino) must be visible before Arduino's auto-generated prototype block,
+//which is emitted well before this point in the file.
+#define EXTENSION_DEVICES_MAX 4
+ExtensionDevice extensionDevices[EXTENSION_DEVICES_MAX];
+int extensionDeviceCount = 0;
+//POST /api/extension-display's small, single-shot body-callback state - deliberately not the
+//elaborate multi-fragment ownership pattern /api/firmware-chunk needs (see that endpoint's own
+//registration comment for why a segment this small doesn't need it).
+String pendingExtensionSegment = "";
+bool pendingExtensionSegmentReceived = false;
 String countdownToDateUnix = "";
 String countupSinceDateUnix = "";
 String lastWrittenText = "";
@@ -1212,6 +1248,7 @@ void setup() {
       minimalDoc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
       minimalDoc["wifiSettingsResettable"] = true;
       minimalDoc["mdnsHostname"] = mdnsHostname; //user-editable, see POST /api/wifi's "set-hostname" action
+      minimalDoc["deviceRole"] = deviceRole; //user-editable, see POST /api/device-role (multiple-units.md)
 #if MQTT_ENABLE == true
       //Folded in here too, same "one fetch covers the whole System modal" reasoning as
       //mdnsHostname above - the password itself is never included, see POST /api/mqtt's own GET.
@@ -2771,6 +2808,108 @@ void setup() {
       request->send(200, "text/plain", "OK");
     });
 
+    //Extension-side receiver for a primary's already-sliced, already-aligned display segment - see
+    //multiple-units.md point 3 and ServiceExtensionFunctions.ino's own comments. A segment is at
+    //most UNITS_AMOUNT_MAX (64) characters, always arriving as a single body-callback invocation
+    //in practice (comfortably under any realistic TCP MTU) - deliberately does NOT need
+    ///api/firmware-chunk's multi-fragment/ownership machinery, built for multi-KB uploads that
+    //genuinely can arrive in several pieces and from genuinely concurrent requests. The work
+    //happens in the body callback (which streams in first); the outer request handler below only
+    //sends the final response, once the whole (small) body has already been captured - same
+    //division of labor as every other body-driven endpoint in this file.
+    webServer.on("/api/extension-display", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (String(otaPassword) != "") {
+        String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
+        if (!constantTimeEquals(providedPassword, String(otaPassword))) {
+          request->send(401, "text/plain", "Invalid password");
+          return;
+        }
+      }
+      if (deviceRole != DEVICE_ROLE_EXTENSION) {
+        request->send(400, "text/plain", "This device is not configured as an extension (System -> deviceRole)");
+        return;
+      }
+      if (!pendingExtensionSegmentReceived) {
+        request->send(400, "text/plain", "Missing, oversized, or fragmented body");
+        pendingExtensionSegment = "";
+        return;
+      }
+      String segment = pendingExtensionSegment;
+      pendingExtensionSegment = "";
+      pendingExtensionSegmentReceived = false;
+      applyExtensionDisplaySegment(segment);
+      request->send(200, "text/plain", "OK");
+    }, nullptr, [](AsyncWebServerRequest * request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (index == 0) {
+        pendingExtensionSegmentReceived = false;
+        pendingExtensionSegment = "";
+      }
+      if (total > UNITS_AMOUNT_MAX) {
+        return; //oversized - outer handler sees Received==false and rejects
+      }
+      for (size_t i = 0; i < len; i++) {
+        pendingExtensionSegment += (char)data[i];
+      }
+      if (index + len == total) {
+        pendingExtensionSegmentReceived = true;
+      }
+    });
+
+    //Primary-side extension host list (multiple-units.md point 1) - GET returns the configured
+    //hosts plus their last-known health-check status, POST replaces the whole list (same "client
+    //always submits the complete list" convention as /api/rotation-items).
+    webServer.on("/api/extension-devices", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
+
+      if (request->method() == HTTP_GET) {
+        JsonDocument doc;
+        JsonArray arr = doc.to<JsonArray>();
+        for (int i = 0; i < extensionDeviceCount; i++) {
+          JsonObject entry = arr.add<JsonObject>();
+          entry["host"] = extensionDevices[i].Host;
+          entry["reachable"] = extensionDevices[i].Reachable;
+          entry["unitsAmount"] = extensionDevices[i].UnitsAmount;
+          entry["lastCheckedSecAgo"] = extensionDevices[i].LastCheckedAt == 0 ? -1 : (long)((millis() - extensionDevices[i].LastCheckedAt) / 1000);
+        }
+        AsyncResponseStream *response = request->beginResponseStream("application/json");
+        serializeJson(doc, *response);
+        request->send(response);
+        return;
+      }
+
+      // HTTP_POST
+      if (!request->hasParam("hosts", true)) {
+        request->send(400, "text/plain", "'hosts' (JSON array of hostnames/IPs) is required");
+        return;
+      }
+      if (!replaceExtensionDevicesFromJson(request->getParam("hosts", true)->value())) {
+        request->send(400, "text/plain", "'hosts' must be a JSON array");
+        return;
+      }
+      request->send(200, "text/plain", "OK");
+    });
+
+    //Device role (multiple-units.md) - own small endpoint, same pattern as mDNS hostname/quiet
+    //hours/MQTT rather than folding a fourth, independent concern into the already-large
+    ///api/settings handler.
+    webServer.on("/api/device-role", HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return;
+      if (!request->hasParam("role", true)) {
+        request->send(400, "text/plain", "'role' is required");
+        return;
+      }
+      String newRole = request->getParam("role", true)->value();
+      if (newRole != DEVICE_ROLE_STANDALONE && newRole != DEVICE_ROLE_PRIMARY && newRole != DEVICE_ROLE_EXTENSION) {
+        request->send(400, "text/plain", "'role' must be standalone, primary, or extension");
+        return;
+      }
+      if (deviceRole != newRole) {
+        deviceRole = newRole;
+        writeFile(LittleFS, deviceRolePath, deviceRole.c_str());
+        checkBootSnapshotFreshness();
+      }
+      request->send(200, "text/plain", "OK");
+    });
 
 #if WIFI_USE_DIRECT == false
     //Consolidates all five former WiFi endpoints (/api/wifi/reset, /api/wifi/scan,
@@ -3331,6 +3470,16 @@ void checkBootSnapshotFreshness() {
 //checkWifiConnectAttempt()/checkMqttState() - all meaningless before WiFi/the web server exist,
 //and still called separately, only from loop(), right after this.
 void performOneSecondDisplayTick() {
+  //An extension's own display content decisions are entirely ceded to whichever primary is
+  //configured to reach it (multiple-units.md point 3) - its units are driven only by
+  //POST /api/extension-display, never by this device's own deviceMode/scheduled-messages/
+  //rotation/etc. Everything below this stays fully live and unaffected for every other role
+  //(including the default standalone), and an extension's own web UI/API remain fully usable -
+  //only this one per-second content-decision loop is skipped.
+  if (deviceRole == DEVICE_ROLE_EXTENSION) {
+    return;
+  }
+
   checkScheduledMessages();
   checkCountdown();
   checkCountup();
@@ -3947,6 +4096,12 @@ void loop() {
 #endif
 
     performOneSecondDisplayTick();
+
+    //No-op for every role except primary (and even then, only once per
+    //EXTENSION_HEALTH_CHECK_INTERVAL_MS) - see ServiceExtensionFunctions.ino's own top comment for
+    //why a short-bounded blocking call here is an accepted, documented exception to this project's
+    //usual "no blocking network calls" rule.
+    checkExtensionHealth();
 
     if (millisReached(lastBootSnapshotCheckAt + BOOT_SNAPSHOT_CHECK_INTERVAL_MS)) {
       lastBootSnapshotCheckAt = millis();

@@ -53,11 +53,16 @@ String normalizeUmlautsForDisplay(String text) {
   return result;
 }
 
-//Aligns string on center of array and fills empty chars with spaces
-String centerString(String message) {
+//Aligns string on center of array and fills empty chars with spaces. Callers pass unitsAmount
+//(every standalone/extension device) or combinedUnitsAmount() for a primary device with reachable
+//extensions (ServiceDisplayJobFunctions.ino) - see multiple-units.md point 4. No default value
+//here deliberately: Arduino's ctags-based auto-prototype generator re-emits this whole signature
+//as a forward declaration, and a default argument specified in two places (that declaration AND
+//this definition) is a C++ redefinition error - found by testing, not assumed.
+String centerString(String message, int width) {
   //message.length() is unsigned - cast to int first, or a too-long message wraps the subtraction
   //to a huge positive pad amount instead of negative, driving the loop below into an OOM crash.
-  int padTotal = unitsAmount - (int)message.length();
+  int padTotal = width - (int)message.length();
   if (padTotal > 0) {
     //Takes care of the left side
     int leftSpaceAmount = padTotal / 2;
@@ -66,7 +71,7 @@ String centerString(String message) {
     }
 
     //Take care of the right side
-    for (int spaceIndex = message.length(); spaceIndex < unitsAmount; spaceIndex++) {
+    for (int spaceIndex = message.length(); spaceIndex < width; spaceIndex++) {
       message = message + " ";
     }
   }
@@ -85,10 +90,11 @@ String createRepeatingString(char character) {
   return newMessage;  
 }
 
-//Aligns string on right side of array and fills empty chars with spaces
-String rightString(String message) {
+//Aligns string on right side of array and fills empty chars with spaces. width - see
+//centerString()'s own comment.
+String rightString(String message, int width) {
   //Same unsigned-underflow issue as centerString() above.
-  int rightSpaceAmount = unitsAmount - (int)message.length();
+  int rightSpaceAmount = width - (int)message.length();
   for (int spaceIndex = 0; spaceIndex < rightSpaceAmount; spaceIndex++) {
     message = " " + message;
   }
@@ -98,10 +104,11 @@ String rightString(String message) {
   return message;
 }
 
-//Aligns string on left side of array and fills empty chars with spaces
-String leftString(String message) {
+//Aligns string on left side of array and fills empty chars with spaces. width - see
+//centerString()'s own comment.
+String leftString(String message, int width) {
   //Same unsigned-underflow issue as centerString() above.
-  int leftSpaceAmount = unitsAmount - (int)message.length();
+  int leftSpaceAmount = width - (int)message.length();
   for (int spaceIndex = 0; spaceIndex < leftSpaceAmount; spaceIndex++) {
     message = message + " ";
   }
@@ -130,7 +137,8 @@ int convertSpeed(String flapSpeed) {
   return flapSpeedInt;
 }
 
-LList<String> processSentenceToLines(String sentence) {    
+//width - see centerString()'s own comment (same reasoning, same no-default-argument caveat).
+LList<String> processSentenceToLines(String sentence, int width) {
   SerialPrintln(F("Processing Sentence to lines"));
   
   //Remove trailing and preceding whitespace
@@ -201,7 +209,7 @@ LList<String> processSentenceToLines(String sentence) {
       int wordLength = indexOfFirstNewline == -1 ? wordItem.length() : indexOfFirstNewline;
 
       //If we cannot fit everything on the same line, start a new line
-      if (inProgressLine != "" && inProgressLine.length() + wordLength + 1 > unitsAmount)
+      if (inProgressLine != "" && inProgressLine.length() + wordLength + 1 > width)
       {
           lines.add(inProgressLine);
           inProgressLine = "";
@@ -225,7 +233,7 @@ LList<String> processSentenceToLines(String sentence) {
         //Guard against a spurious empty line (found while fixing Code_REVIEW_V5.md #14 below): a
         //word that happens to fill the display width EXACTLY, right before an explicit line break,
         //already flushed inProgressLine (and reset it to "") one letter earlier via the
-        //unitsAmount-length check further down - adding it again here would insert an empty line
+        //width-length check further down - adding it again here would insert an empty line
         //between two real ones. Matches the rest of this function's own "\n\n collapses to a
         //single \n" preprocessing further up - a deliberately blank line was never a supported
         //feature to begin with.
@@ -239,12 +247,12 @@ LList<String> processSentenceToLines(String sentence) {
       {
         //If we need to break up the word as its too long, then we need to add a "-" - but NOT if
         //the very next character is just this word's own trailing line break (found via
-        //Code_REVIEW_V5.md #14, reproduced against this exact function: "HELLO\nX" at
-        //unitsAmount=5 wrongly split into "HELL-"/"O"/"X" instead of "HELLO"/"X", since reaching
-        //the display width one letter before an explicit newline looked identical to genuinely
-        //needing to break the word, even though nothing was actually left to fit afterward).
+        //Code_REVIEW_V5.md #14, reproduced against this exact function: "HELLO\nX" at width=5
+        //wrongly split into "HELL-"/"O"/"X" instead of "HELLO"/"X", since reaching the display
+        //width one letter before an explicit newline looked identical to genuinely needing to
+        //break the word, even though nothing was actually left to fit afterward).
         bool moreWordContentFollows = (letterIndex < currentWordLength - 1) && (wordItem[letterIndex + 1] != '\n');
-        if (inProgressLine.length() == unitsAmount - 1 && moreWordContentFollows)
+        if (inProgressLine.length() == width - 1 && moreWordContentFollows)
         {
           inProgressLine = inProgressLine + "-";
           lines.add(inProgressLine);
@@ -253,7 +261,7 @@ LList<String> processSentenceToLines(String sentence) {
 
         //Business as usual, add the letter onto the in progress line
         inProgressLine = inProgressLine + wordItemLetter;
-        if (inProgressLine.length() == unitsAmount)
+        if (inProgressLine.length() == width)
         {  
           lines.add(inProgressLine);
           inProgressLine = "";

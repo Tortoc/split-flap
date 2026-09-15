@@ -56,6 +56,30 @@ void loadValuesFromFileSystem() {
     }
   }
 
+  //Extension device list (Primary role, multiple-units.md Phase 1) - own file like
+  //rotationItemsPath, not part of the boot snapshot (not a scalar). Loaded regardless of the
+  //current deviceRole, same as rotationItems being loaded regardless of deviceMode - a role switch
+  //shouldn't require re-entering the list.
+  String extensionDevicesJson = readFile(LittleFS, extensionDevicesPath, "[]");
+  if (extensionDevicesJson != "" && extensionDevicesJson != "[]") {
+    SerialPrintln(F("Loading Extension Devices"));
+    JsonDocument extensionDevicesDoc;
+    if (!deserializeJson(extensionDevicesDoc, extensionDevicesJson) && extensionDevicesDoc.is<JsonArray>()) {
+      for (JsonVariant value : extensionDevicesDoc.as<JsonArray>()) {
+        if (extensionDeviceCount >= EXTENSION_DEVICES_MAX) {
+          break;
+        }
+        String host = String((const char*)(value | ""));
+        host.trim();
+        if (host == "") {
+          continue;
+        }
+        extensionDevices[extensionDeviceCount].Host = host;
+        extensionDeviceCount++;
+      }
+    }
+  }
+
   SerialPrintln(F("Loaded Settings:"));
   SerialPrintln(F("   Alignment: ") + alignment);
   SerialPrintln(F("   Flap Speed: ") + flapSpeed);
@@ -100,6 +124,7 @@ bool loadValuesFromBootSnapshot() {
   animationMode = String((const char*)(doc["animationMode"] | ANIMATION_MODE_SIMULTANEOUS));
   animationStaggerMs = doc["animationStaggerMs"] | 150;
   deviceMode = String((const char*)(doc["deviceMode"] | DEVICE_MODE_TEXT));
+  deviceRole = String((const char*)(doc["deviceRole"] | DEVICE_ROLE_STANDALONE));
   otaPassword = String((const char*)(doc["otaPassword"] | "splitflap"));
   mdnsHostname = String((const char*)(doc["mdnsHostname"] | "split-flap"));
 #if MQTT_ENABLE == true
@@ -145,6 +170,7 @@ void loadValuesFromIndividualFiles() {
   String animationStaggerMsRaw = readFile(LittleFS, animationStaggerMsPath, "150");
   animationStaggerMs = isNumber(animationStaggerMsRaw) ? (unsigned long)animationStaggerMsRaw.toInt() : 150;
   deviceMode = readFile(LittleFS, deviceModePath, DEVICE_MODE_TEXT);
+  deviceRole = readFile(LittleFS, deviceRolePath, DEVICE_ROLE_STANDALONE);
   otaPassword = readFile(LittleFS, otaPasswordPath, "splitflap"); //persisted, not a compile-time constant
   mdnsHostname = readFile(LittleFS, mdnsHostnamePath, "split-flap"); //persisted, not a compile-time constant
 #if MQTT_ENABLE == true
@@ -203,6 +229,7 @@ bool saveBootSnapshot() {
   doc["animationMode"] = animationMode;
   doc["animationStaggerMs"] = animationStaggerMs;
   doc["deviceMode"] = deviceMode;
+  doc["deviceRole"] = deviceRole;
   doc["otaPassword"] = otaPassword;
   doc["mdnsHostname"] = mdnsHostname;
 #if MQTT_ENABLE == true
@@ -257,6 +284,7 @@ String computeSettingsSignature() {
   sig += animationMode; sig += '|';
   sig += animationStaggerMs; sig += '|';
   sig += deviceMode; sig += '|';
+  sig += deviceRole; sig += '|';
   sig += otaPassword; sig += '|';
   sig += mdnsHostname; sig += '|';
 #if MQTT_ENABLE == true

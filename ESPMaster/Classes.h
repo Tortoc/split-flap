@@ -57,6 +57,20 @@ struct TwibootChipInfo {
   uint16_t eepromSize;
 };
 
+//One configured Primary->Extension device (multiple-units.md, Phase 1) - same "lives in a header"
+//reasoning as TwibootChipInfo above: ServiceExtensionFunctions.ino's pushSegmentToExtension() takes
+//this as a function parameter, so it must be visible before Arduino's auto-generated prototype
+//block (emitted near the top of the concatenated sketch) references it - declaring it later in
+//ESPMaster.ino, alongside the actual extensionDevices[] array it's used for, broke the build the
+//same way TwibootChipInfo once did (found 2026-09-15, verified by the actual compiler error, not
+//assumed from precedent alone).
+struct ExtensionDevice {
+  String Host = "";              //hostname or IP; "" = unconfigured slot
+  bool Reachable = false;        //last health-check result (ServiceExtensionFunctions.ino)
+  int UnitsAmount = 0;           //that device's own unitsAmount, as of the last successful health check
+  unsigned long LastCheckedAt = 0;
+};
+
 //Workaround for LinkedList conflicting with other libraries.
 //From https://github.com/vortigont/LinkedList/commit/39c2628a7794fc6e88e024d7fc82d52bc833c332
 namespace LL {
