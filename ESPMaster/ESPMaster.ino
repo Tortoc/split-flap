@@ -340,52 +340,38 @@ PendingRequestSlot pendingLegacyI2CScanSlot;
 bool pendingUnitsInfoRequestDetail = false; //captured from the "detail" query param at request time
 
 //writeOffsetToUnit() used to be called directly from the /api/units?action=offset handler - the
-//only I2C write anywhere in this file NOT deferred to loop() like every other one, for no
-//documented reason (found 2026-09-09, CODE_REVIEW.md #30). Same deferred-request pattern as
-//pendingRescanSlot above.
+//only I2C write anywhere in this file NOT deferred to loop() like every other one. Same
+//deferred-request pattern as pendingRescanSlot above.
 PendingRequestSlot pendingUnitOffsetSlot;
 int pendingUnitOffsetUnitId = -1;
 uint16_t pendingUnitOffsetValue = 0;
 
 //timezone.setLocation() does a synchronous network lookup against ezTime's timezoned service -
 //was called directly from the /api/timezone POST handler, blocking that AsyncWebServer callback
-//on network I/O instead of the response-stream/deferred-to-loop() pattern used everywhere else in
-//this file (found 2026-09-09, CODE_REVIEW.md #30). Same deferred-request pattern as
-//pendingRescanSlot/pendingUnitOffsetSlot above.
+//on network I/O. Same deferred-request pattern as pendingRescanSlot/pendingUnitOffsetSlot above.
 PendingRequestSlot pendingTimezoneSlot;
 String pendingTimezoneValue = "";
-//The actual lookup (checkTimezoneLookup(), ServiceAsyncTimeSyncFunctions.ino) now spans MULTIPLE
+//The actual lookup (checkTimezoneLookup(), ServiceAsyncTimeSyncFunctions.ino) spans MULTIPLE
 //loop() ticks instead of completing within the one tick that takes the request out of
-//pendingTimezoneSlot - these hold the deferred request across that whole span. See the loop()
-//block that processes them for the full explanation.
+//pendingTimezoneSlot - these hold the deferred request across that whole span.
 AsyncWebServerRequest* timezoneLookupDeferredRequest = nullptr;
 std::shared_ptr<std::atomic<bool>> timezoneLookupDeferredFlag;
 //Snapshot of pendingTimezoneValue taken at kickoff time, NOT re-read from that shared global at
-//finish time (found 2026-09-09, CODE_REVIEW_V2.md #14/Nachtrag: pendingTimezoneValue is a single
-//global - a second request accepted into the slot while the first's async lookup is still running
-//would overwrite it before the first one's result gets persisted, saving the SECOND request's
-//value under the FIRST request's successful lookup). The lookup itself (startTimezoneLookup())
-//already took its own internal copy correctly; this is specifically for what gets written to
-//timezoneSetting/the settings file once the lookup completes.
+//finish time - a second request accepted into the slot while the first's async lookup is still
+//running would otherwise overwrite it before the first one's result gets persisted.
 String timezoneLookupDeferredValue = "";
 //Declared here (not in ServiceAsyncTimeSyncFunctions.ino, where they're actually driven from) -
-//ESPMaster.ino is concatenated/compiled before that file in the sketch, and loop() above
-//references them directly; global variables (unlike functions) aren't auto-forward-declared
-//across .ino files, only within the same one (same reasoning as debugSimulateWriteFailureForUnit
-//elsewhere in this file, from an earlier P2 fix).
+//ESPMaster.ino is concatenated before that file, and loop() above references them directly;
+//global variables aren't auto-forward-declared across .ino files.
 bool tzLookupDone = false;
 bool tzLookupResult = false;
 
 //Retry tracking for the ONE-SHOT boot-time timezone lookup (started once in setup(), entirely
-//fire-and-forget - see the comment there) - found 2026-09-10, CODE_REVIEW_V3.md #12: a transient
-//DNS/network failure during that single attempt permanently left the active timezone RULE
-//unresolved (ezTime's own 'UTC' default) until either an explicit POST /api/timezone or a luckier
-//boot - the later periodic NTP resync only refreshes the CLOCK, never re-resolves the zone RULE.
-//bootTimezoneLookupPending tracks "a boot/retry attempt is currently in flight, its own result not
-//yet consumed" so the retry logic below reacts to each completion exactly once (tzLookupDone
-//itself stays true indefinitely once set, so it alone can't distinguish a fresh completion from
-//an already-handled one - same reasoning as timezoneLookupDeferredRequest's nulling above, just
-//without an HTTP request to null).
+//fire-and-forget) - a transient DNS/network failure during that single attempt would otherwise
+//permanently leave the active timezone RULE unresolved until an explicit POST /api/timezone or a
+//luckier boot, since the periodic NTP resync only refreshes the CLOCK, never the zone RULE.
+//bootTimezoneLookupPending tracks "a boot/retry attempt is currently in flight" so the retry logic
+//reacts to each completion exactly once.
 bool bootTimezoneRuleResolved = false;
 bool bootTimezoneLookupPending = false;
 unsigned long nextBootTimezoneRetryAt = 0; //0 = no retry currently scheduled
@@ -429,14 +415,12 @@ const char* DEVICE_MODE_COUNTDOWN = "countdown";
 const char* DEVICE_MODE_COUNTUP = "countup";
 const char* DEVICE_MODE_ROTATION = "rotation";
 
-//Multi-device roles ("Primärgerät"/"Erweiterungsgerät", see multiple-units.md for the full design -
-//Master/Slave terminology deliberately avoided). standalone (default) is exactly today's behavior,
-//unaffected by anything below - this whole feature is opt-in. primary owns the display logic and
-//stretches it across its own units plus any configured, reachable extensionDevices[]
-//(ServiceExtensionFunctions.ino). extension does no display-logic of its own while acting as one -
-//performOneSecondDisplayTick() no-ops for it, its units are driven entirely by
-//POST /api/extension-display pushes from whichever primary is configured to reach it. An extension
-//keeps its own full web UI/API (calibration, firmware updates, WiFi settings) usable throughout.
+//Multi-device roles ("Primärgerät"/"Erweiterungsgerät", see multiple-units.md - Master/Slave
+//terminology deliberately avoided). standalone (default) is exactly today's behavior, unaffected
+//by anything below. primary owns the display logic and stretches it across its own units plus any
+//configured, reachable extensionDevices[]. extension does no display-logic of its own - its units
+//are driven entirely by POST /api/extension-display pushes from its configured primary, but it
+//keeps its own full web UI/API usable throughout.
 const char* DEVICE_ROLE_STANDALONE = "standalone";
 const char* DEVICE_ROLE_PRIMARY = "primary";
 const char* DEVICE_ROLE_EXTENSION = "extension";
@@ -446,13 +430,9 @@ const char* ALIGNMENT_MODE_LEFT = "left";
 const char* ALIGNMENT_MODE_CENTER = "center";
 const char* ALIGNMENT_MODE_RIGHT = "right";
 
-//Animation options ("Animationen", found 2026-09-10 on user request) - see
-//computeUnitAnimationDelayMs() (ServiceDisplayJobFunctions.ino) for what each one actually does.
-//Defined here, not in that file, despite being used there too - the Arduino build concatenates
-//.ino files in filename order (ESPMaster.ino before ServiceDisplayJobFunctions.ino), so a #define
-//used by code in THIS file (the ANIMATION_MODES array right below, and POST /api/settings'
-//validation further down) must be declared before that point, same reason mqttClient etc. had to
-//move for the MQTT feature.
+//Animation options - see computeUnitAnimationDelayMs() (ServiceDisplayJobFunctions.ino) for what
+//each one actually does. Defined here, not in that file, despite being used there too - a #define
+//used by code in THIS file must be declared before that point in Arduino's concatenated build.
 #define ANIMATION_MODE_SIMULTANEOUS   "simultaneous"
 #define ANIMATION_MODE_LEFT_TO_RIGHT  "left-to-right"
 #define ANIMATION_MODE_RIGHT_TO_LEFT  "right-to-left"
@@ -468,10 +448,8 @@ const char* ANIMATION_MODES[] = {
                                        //a display effect and starts being just slow.
 
 //Shared by POST /api/settings' own validation and replaceRotationItemsFromJson()'s per-item
-//validation (found 2026-09-10, "Animation pro Rotation-Item") - one place for the "which values
-//are valid" list rather than two independently-maintained copies. Functions (unlike the #defines/
-//globals above) are auto-prototyped by the Arduino build regardless of file order, so this is
-//safe to call from any other .ino file despite being defined here.
+//validation - one place for the "which values are valid" list. Functions (unlike #defines/
+//globals) are auto-prototyped regardless of file order, so this is safe to call from any file.
 bool isValidAnimationMode(String value) {
   for (int modeIndex = 0; modeIndex < ANIMATION_MODES_COUNT; modeIndex++) {
     if (value == ANIMATION_MODES[modeIndex]) {
@@ -491,31 +469,23 @@ const char* deviceRolePath = "/devicerole.txt";
 //Own file, like rotationItemsPath/scheduledMessagesPath - a short JSON array of hostnames, not a
 //scalar, so it doesn't belong in the boot-snapshot blob (see that constant's own comment).
 const char* extensionDevicesPath = "/extensiondevices.json";
-//Combined boot-time settings cache (added 2026-09-11) - see saveBootSnapshot()/loadValuesFromFileSystem()'s
-//own comments (ServiceFileSystemFunctions.ino) for the full story: this device's flash chip (a
-//Zbit Semiconductor part, identified via GET /api/diag?type=heap's flashChipId)
-//was live-measured taking ~800ms per LittleFS file open regardless of file size, and
-//loadValuesFromFileSystem() used to make ~30 of those (one per individual setting) on every single
-//boot - ~25s of the ~35-40s delay this whole multi-day investigation was chasing, more than
-//WiFi/unit-readiness/RTC combined. This file mirrors those ~30 scalar settings (NOT
-//scheduledMessagesPath/rotationItemsPath - already single files each, not worth migrating) into
-//one JSON blob, cutting boot-time loading down to ONE file open in the common case. The individual
-//files remain the actual source of truth and are completely untouched by every existing write path
-//(every settings POST handler still writes them exactly as before) - this is a derived, redundant
-//read-side cache only.
+//Combined boot-time settings cache - this device's flash chip was live-measured taking ~800ms per
+//LittleFS file open regardless of file size, and loadValuesFromFileSystem() used to make ~30 of
+//those on every boot. This file mirrors those ~30 scalar settings into one JSON blob, cutting
+//boot-time loading down to ONE file open in the common case. The individual files remain the
+//actual source of truth, untouched by every existing write path - this is a derived, read-side
+//cache only.
 const char* bootSnapshotPath = "/boot-snapshot.json";
-//Set once right after boot (loadValuesFromFileSystem()) and kept current by
-//checkBootSnapshotFreshness() (ticked periodically from loop()) - see computeSettingsSignature()'s
-//own comment (ServiceFileSystemFunctions.ino) for why a signature comparison, not a dedicated
-//per-setting dirty flag.
+//Set once right after boot and kept current by checkBootSnapshotFreshness() (ticked periodically
+//from loop()) - see computeSettingsSignature()'s own comment for why a signature comparison, not
+//a dedicated per-setting dirty flag.
 String lastSavedSettingsSignature = "";
 #define BOOT_SNAPSHOT_CHECK_INTERVAL_MS 30000 //throttles the flash-wear-conscious periodic re-check
 const char* countdownPath = "/countdown.txt";
 const char* scheduledMessagesPath = "/scheduled-messages.txt";
 const char* debugModePath = "/debugmode.txt";
 const char* unitFirmwarePath = "/unit-firmware.bin";
-//Temp path for the unit-firmware upload's write-then-atomic-rename() pattern - see the comment on
-//that handler (CODE_REVIEW.md #5).
+//Temp path for the unit-firmware upload's write-then-atomic-rename() pattern.
 const char* unitFirmwareTmpPath = "/unit-firmware.bin.tmp";
 const char* clockFormatPath = "/clockformat.txt";
 const char* dateFormatPath = "/dateformat.txt";
@@ -534,13 +504,10 @@ unsigned long animationStaggerMs = 150; //ms between consecutive units' start, s
 String inputText = "";
 String deviceMode = "";
 String deviceRole = "standalone"; //standalone|primary|extension - see DEVICE_ROLE_* constants' own comment
-//Phase 1 (multiple-units.md): a fixed, small array like rotationItems - not a dynamic list, same
-//"no per-entry heap allocation, no LinkedList operator[] risk" reasoning as that struct's own
-//comment. 4 is a deliberately generous ceiling for a feature Phase 1 only ever tests with 1.
-//ExtensionDevice itself is declared in Classes.h, not here - see that header's own comment on
-//TwibootChipInfo for why a struct used as a function PARAMETER type
-//(ServiceExtensionFunctions.ino) must be visible before Arduino's auto-generated prototype block,
-//which is emitted well before this point in the file.
+//A fixed, small array like rotationItems - no per-entry heap allocation, no LinkedList
+//operator[] risk. ExtensionDevice itself is declared in Classes.h, not here - see that header's
+//own comment on TwibootChipInfo for why a struct used as a function parameter type must be
+//visible before Arduino's auto-generated prototype block.
 #define EXTENSION_DEVICES_MAX 4
 ExtensionDevice extensionDevices[EXTENSION_DEVICES_MAX];
 int extensionDeviceCount = 0;
@@ -549,22 +516,15 @@ String countupSinceDateUnix = "";
 String lastWrittenText = "";
 String lastReceivedMessageDateTime = "";
 //Together with lastWrittenText and displayRenderGeneration below, what showText() compares a new
-//request against to decide whether a redraw is actually needed - see the long comment on
-//displayRenderGeneration (found 2026-09-09, CODE_REVIEW.md #14). Replaces the old bare
-//alignmentUpdated bool, which only ever reflected the GLOBAL default alignment setting, not the
-//per-call alignmentOverride Rotation items use - two Rotation entries with identical text but
-//different per-item alignment never triggered a redraw. lastWrittenAlignment stores whichever
-//alignment (override or global) was ACTUALLY used for the last completed render, so it's directly
-//comparable against a new call's own effective alignment regardless of which one it came from.
+//request against to decide whether a redraw is actually needed. Stores whichever alignment
+//(override or global) was ACTUALLY used for the last completed render, so two Rotation entries
+//with identical text but different per-item alignment still trigger a redraw.
 String lastWrittenAlignment = "";
 //Bumped whenever something could make the PHYSICAL display state diverge from what
-//lastWrittenText/lastWrittenAlignment claim, without the requested text or alignment itself
-//necessarily changing - the global alignment setting changing (replaces the old alignmentUpdated
-//bool), a rescan (a unit may have restarted and lost its displayed letter), or a per-unit
-//calibration offset change (recalibration re-homes the unit, so its previously-displayed letter
-//is no longer guaranteed correct). showText() redraws whenever this doesn't match
-//lastRenderedGeneration (the generation that was current at the last completed render, set by
-//finishDisplayJob()), even if lastWrittenText and the effective alignment are both unchanged.
+//lastWrittenText/lastWrittenAlignment claim, without the requested text/alignment itself
+//necessarily changing - the global alignment setting changing, a rescan (a unit may have
+//restarted and lost its displayed letter), or a calibration offset change. showText() redraws
+//whenever this doesn't match lastRenderedGeneration, even if text/alignment are both unchanged.
 unsigned long displayRenderGeneration = 0;
 unsigned long lastRenderedGeneration = 0;
 bool isPendingReboot = false;
