@@ -1544,31 +1544,39 @@ void setup() {
           }
         }
         else {
-          //Only if device mode has changed
-          if (newDeviceModeValue != "" && deviceMode != newDeviceModeValue) {
-            deviceMode = newDeviceModeValue;
+          //What deviceMode will actually END UP as after this request, whether or not a new mode
+          //was explicitly submitted - needed so the too-long-text check below applies whenever
+          //Text mode is (or stays) active, not only on an explicit mode switch.
+          String effectiveDeviceMode = (newDeviceModeValue != "") ? newDeviceModeValue : deviceMode;
 
-            //Always (re-)start a sequence from the beginning when switching into Rotation mode.
-            if (deviceMode == DEVICE_MODE_ROTATION) {
-              rotationCurrentIndex = 0;
-              rotationItemAcceptedSeconds = 0;
-              rotationItemElapsedRealSeconds = 0;
+          //Validated BEFORE deviceMode is assigned/persisted below (CODE_REVIEW_V6.md #6):
+          //previously the mode was already switched and written to LittleFS before this check ever
+          //ran, so a rejected too-long text left the device stuck in Text mode showing nothing new,
+          //instead of leaving whichever mode was actually running beforehand untouched. A message
+          //needing more than DisplayJob::MAX_DISPLAY_LINES lines must be rejected here too (same
+          //check as the scheduled-message branch above) - otherwise it gets applied while
+          //startDisplayJob() then refuses to ever actually render it, every single tick, forever.
+          if (hasNewInputTextValue && effectiveDeviceMode == DEVICE_MODE_TEXT && isMessageTooLongToRender(newInputTextValue)) {
+            SerialPrintln(F("Direct text rejected: needs more lines than fit to display"));
+            directTextRejected = true;
+          } else {
+            //Only if device mode has changed
+            if (newDeviceModeValue != "" && deviceMode != newDeviceModeValue) {
+              deviceMode = newDeviceModeValue;
+
+              //Always (re-)start a sequence from the beginning when switching into Rotation mode.
+              if (deviceMode == DEVICE_MODE_ROTATION) {
+                rotationCurrentIndex = 0;
+                rotationItemAcceptedSeconds = 0;
+                rotationItemElapsedRealSeconds = 0;
+              }
+
+              writeFile(LittleFS, deviceModePath, deviceMode.c_str());
+              SerialPrintln(F("Device Mode Set: ") + deviceMode);
             }
 
-            writeFile(LittleFS, deviceModePath, deviceMode.c_str());
-            SerialPrintln(F("Device Mode Set: ") + deviceMode);
-          }
-
-          //Only if we are showing text
-          if (hasNewInputTextValue && deviceMode == DEVICE_MODE_TEXT) {
-            //A message needing more than DisplayJob::MAX_DISPLAY_LINES lines must be rejected
-            //here too (same check as the scheduled-message branch above) - otherwise it gets
-            //applied to inputText/deviceMode while startDisplayJob() then refuses to ever
-            //actually render it, every single tick, forever.
-            if (isMessageTooLongToRender(newInputTextValue)) {
-              SerialPrintln(F("Direct text rejected: needs more lines than fit to display"));
-              directTextRejected = true;
-            } else {
+            //Only if we are showing text
+            if (hasNewInputTextValue && deviceMode == DEVICE_MODE_TEXT) {
               inputText = newInputTextValue;
             }
           }
