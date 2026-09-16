@@ -383,6 +383,17 @@ int pendingFirmwarePushUnitIndex = -1;
 PendingRequestSlot pendingBootloaderProbeSlot;
 int pendingBootloaderProbeUnitIndex = -1;
 
+//Same deferred-request pattern, for POST /api/extension-display (CODE_REVIEW_V6.md #1):
+//applyExtensionDisplaySegment() blocks with its own yield()-based wait loop, which the ESP8266
+//core panics on when called directly from an AsyncWebServer callback - deferring it to loop()
+//keeps that same bounded blocking wait but runs it from a context where yield() is actually safe.
+PendingRequestSlot pendingExtensionDisplaySlot;
+String pendingExtensionDisplaySegment;
+String pendingExtensionDisplayAnimationMode;
+unsigned long pendingExtensionDisplayStaggerMs = 0;
+int pendingExtensionDisplayGlobalOffset = 0;
+int pendingExtensionDisplayCombinedWidth = 0;
+
 //Search for parameter in HTTP POST request
 const char* PARAM_ALIGNMENT = "alignment";
 const char* PARAM_FLAP_SPEED = "flapSpeed";
@@ -2571,8 +2582,19 @@ void setup() {
       unsigned long staggerMs = isNumber(staggerMsRaw) ? (unsigned long)staggerMsRaw.toInt() : 0;
       int globalOffset = isNumber(globalOffsetRaw) ? globalOffsetRaw.toInt() : 0;
       int combinedWidth = isNumber(combinedWidthRaw) ? combinedWidthRaw.toInt() : unitsAmount;
-      applyExtensionDisplaySegment(segment, animationMode, staggerMs, globalOffset, combinedWidth);
-      request->send(200, "text/plain", "OK");
+
+      //Deferred to loop() (see pendingExtensionDisplaySlot's comment) - applyExtensionDisplaySegment()
+      //itself must never run directly from this AsyncWebServer callback.
+      if (pendingExtensionDisplaySlot.request != nullptr) {
+        request->send(503, "text/plain", "Another display push is still being applied, try again shortly");
+        return;
+      }
+      pendingExtensionDisplaySegment = segment;
+      pendingExtensionDisplayAnimationMode = animationMode;
+      pendingExtensionDisplayStaggerMs = staggerMs;
+      pendingExtensionDisplayGlobalOffset = globalOffset;
+      pendingExtensionDisplayCombinedWidth = combinedWidth;
+      pendingExtensionDisplaySlot.accept(request);
     });
 
     //Primary-side extension host list (multiple-units.md) - GET returns the configured hosts plus
@@ -3259,6 +3281,21 @@ void loop() {
       } else {
         deferredRequest->send(503, "text/plain", "Failed to write offset to unit (I2C write failed) - try again");
       }
+    }
+  }
+
+  //Extension-side display push, deferred here from POST /api/extension-display (see
+  //pendingExtensionDisplaySlot's comment) - applyExtensionDisplaySegment() still blocks for its own
+  //bounded animation-stagger duration, but from loop()'s own context yield() inside that wait is safe.
+  if (pendingExtensionDisplaySlot.request != nullptr) {
+    std::shared_ptr<std::atomic<bool>> disconnected;
+    AsyncWebServerRequest* deferredRequest = pendingExtensionDisplaySlot.take(disconnected);
+
+    applyExtensionDisplaySegment(pendingExtensionDisplaySegment, pendingExtensionDisplayAnimationMode,
+      pendingExtensionDisplayStaggerMs, pendingExtensionDisplayGlobalOffset, pendingExtensionDisplayCombinedWidth);
+
+    if (PendingRequestSlot::stillConnected(disconnected)) {
+      deferredRequest->send(200, "text/plain", "OK");
     }
   }
 
