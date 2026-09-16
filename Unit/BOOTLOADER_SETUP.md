@@ -161,7 +161,7 @@ oder `avrdude ... -D -U flash:w:Unit.ino.hex:i` mit `-D`, um den gerade
 geschriebenen Bootloader dabei nicht wieder zu löschen).
 
 **Gilt genauso in die andere Richtung, nicht nur beim allerersten Setup**
-(live erlebt, 2026-09-09, siehe BUGFIX_LOG #138 - lokal): Wird später,
+(live erlebt, 2026-09-09): Wird später,
 NACHDEM Bootloader+App beide schon korrekt drauf sind, per ISP nur die App
 NOCHMAL neu geschrieben (z.B. um einen EEPROM-Wert/eine Fehlkalibrierung zu
 beheben), löscht `avrdude` ohne `-D` **wieder den kompletten Chip inklusive
@@ -178,8 +178,7 @@ bleibenden Teil per `avrdude -c ... -p atmega328p -t` und
 `dump flash 0x7800 32` (Bootloader) bzw. `dump flash 0x0 16` (App-Vektortabelle)
 gegenprüfen - nicht nur den gerade geschriebenen Teil.
 
-**Einschränkung dieser Faustregel** (live erlebt, 2026-09-09, siehe
-BUGFIX_LOG #140 - lokal): `-D` funktioniert nur, wenn der Zielbereich schon
+**Einschränkung dieser Faustregel** (live erlebt, 2026-09-09): `-D` funktioniert nur, wenn der Zielbereich schon
 **blank (`0xFF`)** ist - AVR-Flash kann ohne vorheriges Löschen nur Bits von
 1→0 setzen, nie zurück. Beim Versuch, per `-D` NUR den Bootloader auf einer
 Unit zu aktualisieren, die schon einen (alten) Bootloader hatte, entstand

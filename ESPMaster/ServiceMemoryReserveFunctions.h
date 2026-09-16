@@ -6,7 +6,7 @@
 //with the real `extern "C"` definition later in the same file ("conflicting declaration ... with
 //'C' linkage" vs. "'C++' linkage"). A plain .cpp file is compiled as an ordinary translation unit,
 //with no prototype generation at all, so this conflict can't arise. See both .cpp files' own
-//top comments for the full story (BUGFIX_LOG Punkt 207).
+//top comments for the full story.
 #ifndef SERVICE_MEMORY_RESERVE_FUNCTIONS_H
 #define SERVICE_MEMORY_RESERVE_FUNCTIONS_H
 

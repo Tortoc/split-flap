@@ -299,11 +299,10 @@ IPAddress wifiPrimaryDns(8, 8, 8, 8);
 //--- Core state - normal running of the system, be careful changing these ---
 //The current version of code to display on the UI. "2.3.0-Scott" was JonnyBooker/split-flap's own
 //version at the point this project's initial commit forked it (2026-08-09) - never actually bumped
-//since, despite everything documented in BUGFIX_LOG.md. Reconstructed 2026-09-16 by walking every
-//commit since that fork forward through semver rules (feature commit = minor, bugfix commit =
-//patch, breaking/protocol change = major) - see BUGFIX_LOG.md's versioning entry for the full
-//per-commit derivation. This is now this project's own independent version line, no longer tracking
-//JonnyBooker's upstream releases (hence dropping the inherited "-Scott" codename).
+//since. Reconstructed 2026-09-16 by walking every commit since that fork forward through semver
+//rules (feature commit = minor, bugfix commit = patch, breaking/protocol change = major). This is
+//now this project's own independent version line, no longer tracking JonnyBooker's upstream
+//releases (hence dropping the inherited "-Scott" codename).
 const char* espVersion = "4.8.1";
 
 //All the letters on the units that we have to be displayed. You can change these if it so pleases at your own risk
@@ -549,7 +548,7 @@ const char* deviceRolePath = "/devicerole.txt";
 const char* extensionDevicesPath = "/extensiondevices.json";
 //Combined boot-time settings cache (added 2026-09-11) - see saveBootSnapshot()/loadValuesFromFileSystem()'s
 //own comments (ServiceFileSystemFunctions.ino) for the full story: this device's flash chip (a
-//Zbit Semiconductor part, identified via GET /api/diag?type=heap's flashChipId - see BUGFIX_LOG)
+//Zbit Semiconductor part, identified via GET /api/diag?type=heap's flashChipId)
 //was live-measured taking ~800ms per LittleFS file open regardless of file size, and
 //loadValuesFromFileSystem() used to make ~30 of those (one per individual setting) on every single
 //boot - ~25s of the ~35-40s delay this whole multi-day investigation was chasing, more than
@@ -948,14 +947,14 @@ void setup() {
   //initWiFi()'s blocking autoConnect() call finished, no matter how "non-blocking" the code after
   //it was written to be. Deliberately NOT attempting to fix WiFi connect time itself here - a
   //prior, unrelated custom WiFi-reconnect rewrite this same project already tried made things
-  //WORSE and had to be reverted (see BUGFIX_LOG.md) - so this leaves WiFiManager's own connect
-  //logic completely untouched and instead does the one thing available without touching it: gets
-  //the unit-readiness wait and one real display update to happen BEFORE initWiFi()'s blocking
-  //call, spun synchronously right here since nothing else in setup() is waiting on this yet
-  //(WiFi/the web server haven't started regardless of how long this takes). Safety ceiling below
-  //matches UNIT_READINESS_MAX_WAIT_MS's own reasoning - never worse than doing nothing extra here
-  //if units never respond. (The dominant boot-time cost turned out to be elsewhere entirely - see
-  //BUGFIX_LOG.md #202 - but this move is still correct and worth keeping on its own merits.)
+  //WORSE and had to be reverted - so this leaves WiFiManager's own connect logic completely
+  //untouched and instead does the one thing available without touching it: gets the
+  //unit-readiness wait and one real display update to happen BEFORE initWiFi()'s blocking call,
+  //spun synchronously right here since nothing else in setup() is waiting on this yet (WiFi/the
+  //web server haven't started regardless of how long this takes). Safety ceiling below matches
+  //UNIT_READINESS_MAX_WAIT_MS's own reasoning - never worse than doing nothing extra here if
+  //units never respond. (The dominant boot-time cost turned out to be elsewhere entirely, but
+  //this move is still correct and worth keeping on its own merits.)
   //Apply the cached POSIX rule (if any) from the LAST successful timezoned.rop.nl lookup, before
   //rendering anything below - see cachedTimezonePosix's own comment. Skipped entirely if empty
   //(fresh device, or a device that has never had network access) - Clock/Date mode then falls
@@ -1000,8 +999,7 @@ void setup() {
     //makes events() a permanent no-op (see ezTime.cpp: "if (_ntp_interval) updateNTP();"). Our own
     //ServiceAsyncTimeSyncFunctions.ino (checkNtpSync()) takes over that job instead, ticked from
     //loop() further down - a genuinely non-blocking replacement, see that file's header comment
-    //for why (CODE_REVIEW.md #30 / BUGFIX_LOG #170 - the original blocking DNS+UDP calls could
-    //crash the device under network stress).
+    //for why (the original blocking DNS+UDP calls could crash the device under network stress).
     setInterval(0);
 
     //Not setDebug(INFO) - ezTime's own internal logging fires extremely often around WiFi
@@ -1053,7 +1051,7 @@ void setup() {
     // until this lookup completes, same accepted trade-off as before, just narrower. Fire-and-
     // forget here rather than waiting for it either way - blocking setup() on a network round-trip
     // can itself trip the software watchdog under network stress (see
-    // ServiceAsyncTimeSyncFunctions.ino's header comment, BUGFIX_LOG #170).
+    // ServiceAsyncTimeSyncFunctions.ino's header comment).
     startTimezoneLookup(timezoneSetting);
     bootTimezoneLookupPending = true; //see its own comment - lets loop() retry this specific attempt on failure
     SerialPrintln(F("DEBUG: Timezone lookup started (non-blocking) for: ") + timezoneSetting);
@@ -1114,12 +1112,11 @@ void setup() {
         html += "</div>";
         html += "<script>";
         //Was a 1s-interval poll of /log - that route (and its RAM ring buffer) was removed in an
-        //earlier session (BUGFIX_LOG #41-43, freeing heap headroom), leaving this page polling a
-        //dead endpoint (404 every second) whenever debug mode was on (found 2026-09-09,
-        //CODE_REVIEW.md #27). Switched to the diagnostic sources that actually exist now
+        //earlier heap-headroom pass, leaving this page polling a dead endpoint (404 every second)
+        //whenever debug mode was on. Switched to the diagnostic sources that actually exist now
         //(/api/crash-log, /api/diag?type=heap) - a one-shot fetch on load plus a manual refresh
         //button, not a re-added interval poll, to avoid reintroducing the same kind of steady-state
-        //cost that #41-43 removed.
+        //cost the earlier removal was for.
         html += "function loadDiag() {";
         html += "  var container = document.getElementById('logContainer');";
         html += "  container.innerHTML = '<div style=\"color: #888;\">Loading diagnostics...</div>';";
@@ -1204,9 +1201,9 @@ void setup() {
         return;
       }
 #endif
-      //Defensive heap guard (BUGFIX_LOG #51/#44 pattern, moved here from the now-removed
-      //serveStatic() filter that used to cover this same LittleFSImpl::open() call - see its own
-      //comment): a low-heap open() is one of two confirmed abort() sites on this device.
+      //Defensive heap guard, moved here from the now-removed serveStatic() filter that used to
+      //cover this same LittleFSImpl::open() call: a low-heap open() is one of two confirmed
+      //abort() sites on this device.
       if (ESP.getFreeHeap() < 6000) {
         request->send(503, "text/plain", "Low memory, try again shortly");
         return;
@@ -1323,11 +1320,11 @@ void setup() {
     });
 
     //Attempted merging this with the GET handler above into one HTTP_GET|HTTP_POST registration
-    //(same pattern as /api/wifi etc., see BUGFIX_LOG #120) - reproducibly broken on real hardware:
-    //a genuine POST request received the GET handler's JSON response instead of "OK", and invalid
-    //POST bodies got 200 instead of 400. Root cause not chased down (this handler's combined body
-    //is far larger than every other successfully-merged pair - likely relevant, but unconfirmed);
-    //reverted to two separate registrations, verified working again. See BUGFIX_LOG #121.
+    //(same pattern as /api/wifi etc.) - reproducibly broken on real hardware: a genuine POST
+    //request received the GET handler's JSON response instead of "OK", and invalid POST bodies
+    //got 200 instead of 400. Root cause not chased down (this handler's combined body is far
+    //larger than every other successfully-merged pair - likely relevant, but unconfirmed);
+    //reverted to two separate registrations, verified working again.
     webServer.on("/api/settings", HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
 
@@ -1840,7 +1837,7 @@ void setup() {
         //rtc/rtcOsf (added 2026-09-11, see ServiceRtcFunctions.ino) - the only way to verify the
         //optional DS3231's detection/trustworthiness without physically observing the display.
         //resetReason/uptimeSec (added 2026-09-12, while investigating whether the WiFiManager/
-        //AUTH_EXPIRE disconnect issue - BUGFIX_LOG "Offene Punkte" - still occurs): the existing
+        //AUTH_EXPIRE disconnect issue still occurs): the existing
         //crash reporter (ServiceCrashLogFunctions.ino) only captures genuine exceptions/panics via
         //custom_crash_callback() - a CLEAN reset (external/brownout/hardware-watchdog, exactly
         //what a WiFiManager-driven reconnect gone wrong could cause without ever hitting that
@@ -1899,8 +1896,8 @@ void setup() {
 
     // On-device crash log (see ServiceCrashLogFunctions.ino) - survives even without a live
     // serial connection at the moment of a crash. One JSON object per line, oldest first.
-    // GET+DELETE merged into one registration (heap-saving pattern established for /api/wifi,
-    // see BUGFIX_LOG #120). DELETE (not GET) clears it, to avoid a CSRF-via-GET state change.
+    // GET+DELETE merged into one registration (heap-saving pattern established for /api/wifi).
+    // DELETE (not GET) clears it, to avoid a CSRF-via-GET state change.
     webServer.on("/api/crash-log", HTTP_GET | HTTP_DELETE, [](AsyncWebServerRequest * request) {
       if (request->method() == HTTP_GET) {
         if (!LittleFS.exists(CRASH_LOG_PATH)) {
@@ -1940,8 +1937,8 @@ void setup() {
     // the FIRST registered handler that matches - so with "/api/units" registered first, it was
     // silently swallowing every request to "/api/units/firmware"/"/api/units/firmware-push" (a
     // real, undetected regression introduced when "/api/units" itself gained a POST handler in the
-    // units-actions consolidation, see BUGFIX_LOG #119/#122 - found while testing this merge, not
-    // caused by it). Registering the more specific paths first fixes it for good.
+    // units-actions consolidation - found while testing this merge, not caused by it). Registering
+    // the more specific paths first fixes it for good.
 
     // Admin: upload a compiled Unit.ino firmware image (raw AVR .bin, NOT ESPMaster's own) to be
     // pushed to a unit via /api/units/firmware-push. Requires X-OTA-Password, same as /api/firmware.
@@ -2088,9 +2085,9 @@ void setup() {
     //Pushes the currently stored unit firmware to a single unit over I2C (twiboot), or just probes
     //which I2C address it answers on without writing anything - both deferred to loop(), both take
     //the same 'id' param, so merged into one registration dispatched by 'action' (heap-saving
-    //pattern established for /api/wifi etc., see BUGFIX_LOG #120/#121) - unlike the /api/settings
-    //attempt in #121, both branches here are short and structurally near-identical, not a large,
-    //disjoint pair of handlers, so the same risk doesn't apply. Deliberately its own path, not
+    //pattern established for /api/wifi etc.) - unlike the /api/settings merge attempt, both
+    //branches here are short and structurally near-identical, not a large, disjoint pair of
+    //handlers, so the same risk doesn't apply. Deliberately its own path, not
     //merged into "/api/units/firmware" - that's a multipart upload registration (different
     //ESPAsyncWebServer callback signature), and that upload route would otherwise intercept a
     //sub-path anyway.
@@ -2110,8 +2107,8 @@ void setup() {
 
       //Bounds against UNITS_AMOUNT_MAX (the structural 6-bit-DIP address ceiling), not the
       //cached unitsAmount - unlike every other unit-id check in this file, this endpoint's whole
-      //point is to reach a unit that's already stuck in the bootloader (BUGFIX_LOG #139, local),
-      //which by definition doesn't answer at its app address and therefore drops out of
+      //point is to reach a unit that's already stuck in the bootloader, which by definition
+      //doesn't answer at its app address and therefore drops out of
       //unitsAmount on the next scan. Checking against unitsAmount here would block exactly the
       //recovery this endpoint exists for. scanForBootloaderAddress() below is the real safety
       //net regardless (refuses to proceed unless exactly one unit answers as a bootloader).
@@ -2181,9 +2178,9 @@ void setup() {
     // Admin: read live status + calibration offset for every unit (GET, deferred to loop()), or
     // trigger a unit write-action (POST, dispatched by ?action=: rescan/offset/reset - former
     // /api/units/rescan, /api/units/offset, /api/units/reset). Merged into one registration
-    // (heap-saving pattern established for /api/wifi etc., see BUGFIX_LOG #120/#124) - the two
-    // branches stay structurally small and independent (unlike the failed /api/settings attempt
-    // in #121), so the same size-related risk doesn't apply here.
+    // (heap-saving pattern established for /api/wifi etc.) - the two branches stay structurally
+    // small and independent (unlike the failed /api/settings merge attempt), so the same
+    // size-related risk doesn't apply here.
     webServer.on("/api/units", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
       if (request->method() == HTTP_GET) {
         SerialPrintln(F("DEBUG: Admin units request received"));
@@ -2682,7 +2679,7 @@ void setup() {
       isPendingReboot = true;
     });
 
-    //See BUGFIX_LOG #117 - moved out of GET /api/settings, mirrors GET /api/rotation-items exactly
+    //Moved out of GET /api/settings, mirrors GET /api/rotation-items exactly
     //(own small JsonDocument, .to<JsonArray>()+.add<JsonObject>(), deliberately no yield() in the
     //loop - a yield() here previously overflowed the AsyncWebServer callback's small stack).
     //Deliberately a separate registration, not merged with DELETE below - not worth stacking any
@@ -3394,10 +3391,10 @@ void setup() {
 //blocking" written into loop() alone was always gated behind it regardless. A function called
 //from both setup() (blocking here is fine - nothing else is waiting on setup() yet) and loop()
 //(ticked once per iteration, as before - a no-op once DONE) actually decouples unit readiness/the
-//first display from WiFi (see BUGFIX_LOG.md #202 - the real bottleneck this whole investigation
-//was chasing turned out to be a slow flash chip in loadValuesFromFileSystem(), not WiFi itself,
-//but this move is still correct and worth keeping: it's what lets the first display render
-//independently of however long WiFi ends up taking).
+//first display from WiFi (the real bottleneck this whole investigation was chasing turned out to
+//be a slow flash chip in loadValuesFromFileSystem(), not WiFi itself, but this move is still
+//correct and worth keeping: it's what lets the first display render independently of however long
+//WiFi ends up taking).
 void tickUnitReadiness() {
   if (unitReadinessPhase == UNIT_READINESS_SCAN) {
     //One scan attempt (with its own internal not-found retry, unchanged) to learn which
@@ -3571,8 +3568,8 @@ void loop() {
 
   //Was a single-tick block calling timezone.setLocation() directly (a blocking DNS+UDP network
   //call) - live-reproduced as a genuine software-watchdog crash under real network stress
-  //(2026-09-09, CODE_REVIEW.md #30/BUGFIX_LOG #170 - a wdtDisable()/wdtEnable() mitigation was
-  //tried and reverted after it caused an even WORSE crash type on this ESP8266 core/SDK version).
+  //(2026-09-09, CODE_REVIEW.md #30 - a wdtDisable()/wdtEnable() mitigation was tried and reverted
+  //after it caused an even WORSE crash type on this ESP8266 core/SDK version).
   //Replaced with a genuinely non-blocking implementation (checkTimezoneLookup(),
   //ServiceAsyncTimeSyncFunctions.ino) that never blocks loop() - which means the lookup now spans
   //multiple loop() ticks instead of finishing within the one tick that takes the request out of
@@ -4097,8 +4094,8 @@ void loop() {
   //ezTime's own auto-sync is disabled (setInterval(0) in setup()) - events() is now a permanent
   //no-op, not called here anymore. checkNtpSync() (ServiceAsyncTimeSyncFunctions.ino) replaces it
   //with a genuinely non-blocking implementation instead of the wdtDisable()/wdtEnable() bracket
-  //tried and reverted earlier (2026-09-09, CODE_REVIEW.md #30/BUGFIX_LOG #170 - that bracket
-  //caused a NEW, worse crash type on this ESP8266 core/SDK version when applied to this
+  //tried and reverted earlier (2026-09-09, CODE_REVIEW.md #30 - that bracket caused a NEW, worse
+  //crash type on this ESP8266 core/SDK version when applied to this
   //every-tick call site). checkTimezoneLookup() is the equivalent replacement for the
   ///api/timezone endpoint's own network lookup - see pendingTimezoneSlot's processing block
   //further down for how it's driven. Neither call below ever blocks - both are cheap, immediate

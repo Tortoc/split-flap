@@ -2,8 +2,8 @@
 //once a local variable inside initWiFi() goes out of scope.
 WiFiEventHandler wifiDisconnectEventHandler;
 
-//Makes the long-suspected WiFiManager/AUTH_EXPIRE disconnect issue (BUGFIX_LOG "Offene Punkte")
-//observable over HTTP, not just via a live serial capture (found 2026-09-13: the existing
+//Makes the long-suspected WiFiManager/AUTH_EXPIRE disconnect issue observable over HTTP, not just
+//via a live serial capture (found 2026-09-13: the existing
 //disconnect handler below already decodes the real reason, but only ever SerialPrintln()s it -
 //invisible unless a programmer happens to be connected at the exact moment it happens). A real
 //AUTH_EXPIRE/ASSOC_EXPIRE disconnect is usually just a brief, self-healing hiccup (WiFiManager's

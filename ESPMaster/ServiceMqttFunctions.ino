@@ -5,8 +5,7 @@
 //entity that reuses the exact same showText()/deviceMode path POST /api/text's permanent branch
 //already uses, plus one diagnostic `sensor` entity (free heap) that costs nothing extra (the
 //value already exists via ESP.getFreeHeap()). Kept small on purpose given this device's own heap
-//crash history (BUGFIX_LOG #41-43) - see the real, measured RAM/flash cost comparison in the chat
-//that led to this file. Everything here compiles away entirely when MQTT_ENABLE is false
+//crash history. Everything here compiles away entirely when MQTT_ENABLE is false
 //(ESPMaster.ino) - see that flag's own comment for why that's the only way to truly avoid
 //PubSubClient's cost (its constructor always malloc()s a buffer, a runtime "disabled" flag alone
 //can't prevent that).
@@ -174,8 +173,8 @@ void initMqtt() {
   //allows up to 500 characters - 512 total left as little as ~470 bytes of actual payload room,
   //silently truncating/rejecting the small share of legitimately long texts. 600 covers the real
   //worst case (500-char text + ~42 bytes of topic/header) with comfortable margin; this device
-  //had ~17-18KB free heap at last check (BUGFIX_LOG #41-43's fix), so +88 bytes here is not a
-  //meaningful risk. Still big enough for the discovery payloads above, see their own comment.
+  //has ~17-18KB free heap after boot, so +88 bytes here is not a meaningful risk. Still big enough
+  //for the discovery payloads above, see their own comment.
   mqttClient.setBufferSize(600);
   mqttWifiClient.setTimeout(MQTT_TCP_CONNECT_TIMEOUT_MS);
   mqttClient.setSocketTimeout(MQTT_SOCKET_TIMEOUT_S);

@@ -58,7 +58,7 @@ void checkExtensionHealth() {
   if (otaChunkBuffer != nullptr || otaPendingPhase != OTA_PHASE_NONE) {
     return; //don't contend with an active OTA update - a blocking HTTPClient call here hung the
     //device solid (no crash-log entry, needed a power cycle) when it collided with an incoming
-    //firmware-chunk upload - see BUGFIX_LOG.md
+    //firmware-chunk upload
   }
   if (!millisReached(lastExtensionHealthCheckAt + EXTENSION_HEALTH_CHECK_INTERVAL_MS)) {
     return;
@@ -138,7 +138,7 @@ void pushExtensionSegments() {
     return;
   }
   if (otaChunkBuffer != nullptr || otaPendingPhase != OTA_PHASE_NONE) {
-    return; //same OTA-collision guard as checkExtensionHealth() above - see BUGFIX_LOG.md
+    return; //same OTA-collision guard as checkExtensionHealth() above
   }
   int combinedWidth = combinedUnitsAmount();
   int offset = unitsAmount;

@@ -447,8 +447,8 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   //ambiguity (found 2026-09-09, CODE_REVIEW_V2.md #16 - not reachable on this project's current
   //10-unit install, but a real structural hazard for any future scale-up). unitsAmount (the live
   //app-address scan result) is a best-effort proxy for "how many real units exist" - it can
-  //undercount while some are already sitting in a bootloader (see BUGFIX_LOG #139, an existing,
-  //separate, unrelated limitation), so this check is conservative in the SAFE direction (it can
+  //undercount while some are already sitting in a bootloader (an existing, separate, unrelated
+  //limitation), so this check is conservative in the SAFE direction (it can
   //only ever reject a push that's actually fine, never silently allow a real collision).
   int expectedBootAddressForCollisionCheck = UNIT_BOOTLOADER_BASE_ADDRESS + unitIndex;
   if (expectedBootAddressForCollisionCheck < unitsAmount) {

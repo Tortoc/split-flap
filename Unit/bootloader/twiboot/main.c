@@ -71,8 +71,7 @@
  * This fork's own version (2026-09-16, continuing upstream's own MAJOR.MINOR-only tag scheme -
  * v1.0/v1.1/v1.2/v2.0/v2.1/v3.0 on GitHub - forward from the v3.2 this fork's base commit already
  * carries in VERSION_STRING below, rather than resetting to a fresh v1.0: v3.2 + Change 1 (new
- * capability) = v3.3, + Change 2 (new capability) = v3.4, + Change 3 (bugfix) = v3.5 - see
- * BUGFIX_LOG.md's versioning entry for the full derivation):
+ * capability) = v3.3, + Change 2 (new capability) = v3.4, + Change 3 (bugfix) = v3.5):
  * v3.5, reported as-is in VERSION_STRING below since 2026-09-16 ("SF-TWIBOOT v3.5"). Before that
  * date VERSION_STRING was deliberately left as upstream's own "TWIBOOT v3.2" to avoid requiring an
  * ISP reflash of every already-deployed unit just for a version string (no OTA path exists for the

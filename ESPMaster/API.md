@@ -66,9 +66,8 @@ Every other plain `GET`, plus `GET /api/i2c-scan`, has no auth check at all - no
 a secret or change device state. **Two exceptions**: `GET /api/wifi?type=scan-result` and
 `GET /api/wifi?type=connect-status` *do* require the password (gated by `accessControlWifi`, same
 toggle as the WiFi `POST`s) - added 2026-09-10 after a locally-cached WiFi scan result was found
-to leak previously-seen network names/signal strength without auth (see `BUGFIX_LOG.md`). This
-statement used to claim all plain `GET`s were exempt; that was true until this fix and is corrected
-here to match.
+to leak previously-seen network names/signal strength without auth. This statement used to claim
+all plain `GET`s were exempt; that was true until this fix and is corrected here to match.
 
 ## Endpoint index
 
@@ -184,7 +183,7 @@ client fetches the full list from [`GET /api/scheduled-messages`](#get-apischedu
 when there's actually something to show. This used to be a full `scheduledMessages` array embedded
 right here; moved out after a real, reproducible device crash (heap corruption - an ArduinoJson
 pattern issue combined with a stack-overflow-prone `yield()` inside this handler's loop) whenever a
-message actually sat in the queue - see BUGFIX_LOG #133 for the full story.
+message actually sat in the queue.
 
 ```bash
 curl http://192.168.1.50/api/settings
@@ -387,7 +386,7 @@ card polls. Deferred to `loop()`, same reasoning as `/api/i2c-scan` above. Uses 
 anything beyond status/offset.
 
 **Shares one registration with `POST /api/units` below** (heap-saving pattern established for
-`/api/wifi` etc., see BUGFIX_LOG #124) - dispatched internally by request method, same path.
+`/api/wifi` etc.) - dispatched internally by request method, same path.
 
 **Query param** `detail` (any value, e.g. `?detail=1`): opts into the heavier 8-byte read instead,
 adding `phase`/`progress`/`unexpectedHomeTriggerCount`/`slowHomeSearchCount` to each unit - added
@@ -538,8 +537,8 @@ by `action`. Both deferred to `loop()` - a real push can take several seconds to
 of the upload endpoint above and got silently intercepted by it (ESPAsyncWebServer's route
 matching for the two-callback upload form), making it completely unreachable. Always use a
 sibling path, never a sub-path of an upload endpoint's URL. **Merged with the former, separate
-`/api/units/bootloader-probe` 2026-09-08** (one registration instead of two, see BUGFIX_LOG #122) -
-while doing so, found and fixed a related instance of the same underlying issue: this path is also
+`/api/units/bootloader-probe` 2026-09-08** (one registration instead of two) - while doing so,
+found and fixed a related instance of the same underlying issue: this path is also
 a prefix-extension of `/api/units` (which only gained its own POST handler in an earlier
 same-day change), so it - and the upload endpoint above - had to be **registered before**
 `/api/units` in source order, or ESPAsyncWebServer's "first matching handler wins" dispatch
@@ -774,7 +773,7 @@ curl http://192.168.1.50/api/rotation-items
 
 ### `GET /api/scheduled-messages`
 
-All currently scheduled messages. Own small registration (see BUGFIX_LOG #133) - mirrors
+All currently scheduled messages. Own small registration - mirrors
 [`GET /api/rotation-items`](#get-apirotation-items) exactly, including deliberately **not** using
 `yield()` inside its build loop (that overflowed the small AsyncWebServer callback stack in an
 earlier version of this handler, when it lived inside `GET /api/settings`).
@@ -910,9 +909,9 @@ connects - `false` by default, changeable here without a reflash.
 Deliberately minimal scope: one Home Assistant `text` entity (bidirectional - reads and sets the
 display's current text, reusing the exact same code path `POST /api/text` without a `duration`
 already uses) plus one `sensor` entity (free heap, diagnostic only). No dedicated MQTT device
-mode, no buttons, no per-mode entities - the
-richer alternative (`Jerrys-modz/split-flap`) is intentionally *not* replicated, to keep
-the heap cost down on this device (see its own crash history, BUGFIX_LOG #41-43).
+mode, no buttons, no per-mode entities - the richer alternative
+(`Jerrys-modz/split-flap`) is intentionally *not* replicated, to keep the heap cost down on
+this device given its own crash history.
 
 **Auth:** `GET` is unauthenticated (no secret - the password itself is never included, only
 whether one is set). `POST` requires `X-OTA-Password` if a password is set and

@@ -297,10 +297,10 @@ bool readUnitInfo(int address, int &statusOut, int &offsetOut, int &phaseOut, in
 }
 
 //Same as the 7-arg overload above, plus Unit.ino's own firmware version (major/minor/patch),
-//added 2026-09-16 alongside this project's first formal Unit firmware versioning - see
-//BUGFIX_LOG.md. Separate overload rather than growing the 7-arg one in place, same reasoning as
-//that one's own comment: its two existing call sites don't need this. Used only where the version
-//is actually surfaced (GET /api/units?detail=1).
+//added 2026-09-16 alongside this project's first formal Unit firmware versioning. Separate
+//overload rather than growing the 7-arg one in place, same reasoning as that one's own comment:
+//its two existing call sites don't need this. Used only where the version is actually surfaced
+//(GET /api/units?detail=1).
 //
 //IMPORTANT, same caveat as the 7-arg overload's own comment for unexpectedHomeTriggerCount/
 //slowHomeSearchCount: a unit running firmware from before this version byte existed still answers

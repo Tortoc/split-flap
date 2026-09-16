@@ -19,12 +19,11 @@
 #define CMD_ENTER_BOOTLOADER 255
 
 //This project's own semver for Unit.ino, reconstructed 2026-09-16 by walking this file's own
-//git history from the initial fork (feature commits = minor, bugfix commits = patch) - see
-//BUGFIX_LOG.md's versioning entry for the full derivation. Bump on every functionally meaningful
-//change (not pure comment/formatting cleanup). Reported to ESPMaster via requestEvent()'s 3
-//trailing bytes, added below - see ESPMaster.ino's ANSWER_SIZE_VERSION/readUnitInfo() comments for
-//why a unit running older firmware without these bytes reads back as 255/255/255 ("unknown"),
-//not a crash.
+//git history from the initial fork (feature commits = minor, bugfix commits = patch). Bump on
+//every functionally meaningful change (not pure comment/formatting cleanup). Reported to
+//ESPMaster via requestEvent()'s 3 trailing bytes, added below - see ESPMaster.ino's
+//ANSWER_SIZE_VERSION/readUnitInfo() comments for why a unit running older firmware without these
+//bytes reads back as 255/255/255 ("unknown"), not a crash.
 #define UNIT_FW_VERSION_MAJOR 2
 #define UNIT_FW_VERSION_MINOR 2
 #define UNIT_FW_VERSION_PATCH 2

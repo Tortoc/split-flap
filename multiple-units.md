@@ -54,7 +54,7 @@ otaPendingPhase != OTA_PHASE_NONE`, ursprünglich für die eigene OTA-Empfangslo
 `ESPMaster.ino` gedacht) und überspringen den Netzwerk-Aufruf komplett, solange ein OTA-Update
 läuft. Firmware mit diesem Fix wurde erfolgreich auf beide Geräte deployed (sauberer Neustart,
 kein Crash-Log-Eintrag), danach die Rollen erneut konfiguriert und der Animations-Test (siehe oben)
-erfolgreich auf der gefixten Firmware durchgeführt. Details siehe `BUGFIX_LOG.md`.
+erfolgreich auf der gefixten Firmware durchgeführt.
 
 **Phase 3: robustere Fehler-UX im Admin-Panel - implementiert UND live verifiziert (2026-09-16).**
 Nutzerentscheidung (per Rückfrage): nur die Fehler-UX umsetzen, NICHT die optionale automatische

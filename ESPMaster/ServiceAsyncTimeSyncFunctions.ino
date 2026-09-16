@@ -1,6 +1,6 @@
 //Non-blocking replacement for ezTime's own network operations (Timezone::setLocation() and the
-//NTP sync normally driven by events()/updateNTP()) - see CODE_REVIEW.md #30 and BUGFIX_LOG #170
-//(both local) for the full story: the original, still-vendored ezTime calls do a blocking
+//NTP sync normally driven by events()/updateNTP()) - see CODE_REVIEW.md #30 for the full story:
+//the original, still-vendored ezTime calls do a blocking
 //DNS-then-UDP round-trip that can exceed the software watchdog's patience under real network
 //stress - live-reproduced as a genuine device crash. Wrapping those calls in
 //wdtDisable()/wdtEnable() was tried and reverted after it caused an even WORSE crash type
@@ -20,9 +20,9 @@
 //
 //IMPORTANT, carefully derived (see the comment on ntpSyncApplyResult() below) - NOT just calling
 //the obvious-looking public setTime(t): ezTime's own now()/getRealUtcNow() (ESPMaster.ino) already
-//have a well-documented sign-inversion quirk (BUGFIX_LOG #133) - naively calling the public
-//Timezone::setTime() API with a raw UTC value reproduces the exact double-offset-conversion bug
-//class already fixed once in this project (BUGFIX_LOG #133/#149), just via a different code path.
+//have a well-documented sign-inversion quirk - naively calling the public Timezone::setTime() API
+//with a raw UTC value reproduces the exact double-offset-conversion bug class already fixed once
+//in this project, just via a different code path.
 
 #include <lwip/dns.h>
 
@@ -241,7 +241,7 @@ void startNtpSync() {
 //empirically: GET /api/settings's timezoneOffset reads -120 for Europe/Berlin CEST). So calling
 //setTime(rawUtc) directly would NOT reproduce _last_sync_time = rawUtc - it would be off by
 //offset*60 seconds (e.g. -7200s/-2h for Europe/Berlin in summer), silently reproducing the exact
-//double-offset-conversion bug class already fixed once in this project (BUGFIX_LOG #133/#149).
+//double-offset-conversion bug class already fixed once in this project.
 //
 //Fix: pre-compensate by first computing offsetGuess = getOffset(rawUtc, UTC_TIME) - the offset AS
 //IF rawUtc were genuine UTC, avoiding the "is t local or UTC" ambiguity - then call

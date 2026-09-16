@@ -45,7 +45,7 @@ gleichzeitig den OTA-Slot auf ~438KB schrumpft, was auch die
 Web-OTA-Selbstreparatur mit dem korrekten Build vereitelt (Absturz mitten im
 Chunk-Upload). **Nach JEDEM Compile+Flash zwingend `flashConfigured` gegen
 `flashReal` in `GET /api/diag?type=heap` prüfen**, nicht erst bei einem
-Chip-Tausch (siehe Vorfall Punkt 136 in `BUGFIX_LOG.md`, 2026-09-08/09).
+Chip-Tausch (2026-09-08/09 hier schonmal aufgetreten).
 Falls es doch passiert: Web-OTA kann sich selbst nicht reparieren (siehe
 oben) - Recovery nur per seriellem `arduino-cli upload`/`esptool.py`, das
 unabhängig vom aktuell laufenden (falschen) Partitionsschema an absoluten

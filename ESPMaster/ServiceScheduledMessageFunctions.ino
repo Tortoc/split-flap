@@ -38,9 +38,9 @@ bool addScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool 
   if (scheduledDateTimeUnix > getRealUtcNow()) {
     //Find the existing scheduled message and replace it if one exists.
     //.get() (not operator[]) - the library's operator[] dereferences a NULL node with no bounds
-    //check on a stale/invalid index; .get() returns a default-constructed value instead. See
-    //BUGFIX_LOG #117 - this loop itself never yields mid-iteration so isn't the reproduced hang,
-    //but kept consistent with the other scheduledMessages accessors as a precaution.
+    //check on a stale/invalid index; .get() returns a default-constructed value instead. This
+    //loop itself never yields mid-iteration so isn't a reproduced hang site, but kept consistent
+    //with the other scheduledMessages accessors as a precaution.
     bool replacedExisting = false;
     for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
       ScheduledMessage scheduledMessage = scheduledMessages.get(scheduledMessageIndex);
