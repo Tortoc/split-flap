@@ -83,11 +83,8 @@ void checkRotation() {
     rotationItemElapsedRealSeconds = 0;
   }
 
-  //Bug (found while fixing #117): timezone.now() doesn't return real UTC (see getRealUtcNow()'s
-  //comment), but Countdown/Countup rotation items' TargetDateTimeUnix is real UTC seconds from the
-  //client - see the matching comment in checkCountdown() (ServiceCountdownFunctions.ino). Only
-  //used below for the item CONTENT (clock/date/countdown/countup text), not for timing the
-  //item's turn - see rotationItemAcceptedSeconds' own comment for that.
+  //timezone.now() doesn't return real UTC - see getRealUtcNow()'s comment. Only used below for
+  //item CONTENT, not for timing the item's turn.
   unsigned long nowSeconds = getRealUtcNow();
 
   //Direct array indexing - see the comment on rotationItems' declaration (ESPMaster.ino) for why
@@ -95,22 +92,12 @@ void checkRotation() {
   RotationItem &item = rotationItems[rotationCurrentIndex];
   int durationSeconds = item.DurationSeconds > 0 ? item.DurationSeconds : 5;
 
-  //Defense-in-depth against a permanently-stuck item (CODE_REVIEW_V3.md #13, see
-  //rotationItemElapsedRealSeconds' own comment) - a generous grace period past the item's own
-  //configured duration distinguishes "genuinely just slow to render" from "will never succeed"
-  //without being trigger-happy about ordinary rendering delays.
-  //
-  //Only counts a tick while the display is actually IDLE going into it, not unconditionally every
-  //tick (found 2026-09-10, CODE_REVIEW_V4.md #8): a job legitimately still busy rendering this
-  //item - a multi-line item with per-line pauses, or a large staggered animation across many
-  //units, both easily exceeding durationSeconds+30 in total - is proof of ongoing progress, not
-  //neglect, and must not be treated the same as an item whose showText() call keeps being
-  //rejected outright with the display sitting idle. isDisplayJobBusy() here reflects whatever job
-  //is still running from the end of the PREVIOUS tick's showText() call (loop()'s per-second
-  //block calls checkRotation() before its own showText() call for this same tick) - and, as a
-  //side effect, also correctly covers a foreign temporary message (e.g. a scheduled message)
-  //displacing the rotation: that keeps the display busy too, so it doesn't eat into this budget
-  //either, matching the review's own recommendation not to spend it on someone else's message.
+  //Defense-in-depth against a permanently-stuck item - a generous grace period past the item's
+  //own configured duration distinguishes "genuinely just slow to render" from "will never
+  //succeed". Only counts a tick while the display is actually IDLE going into it - a job
+  //legitimately still busy rendering (multi-line item, large staggered animation) is proof of
+  //progress, not neglect, and shouldn't count against the budget; this also correctly covers a
+  //foreign temporary message (e.g. a scheduled message) displacing the rotation.
   if (!isDisplayJobBusy()) {
     rotationItemElapsedRealSeconds++;
   }
@@ -131,8 +118,7 @@ void checkRotation() {
 
   //"" (empty) means "inherit the default alignment" - see showText()/DISPLAY_JOB_WRITE_LINE.
   rotationCurrentAlignment = rotationAlignmentOverrideToString(currentItem.Alignment);
-  //Same "" / -1 = inherit pattern for the per-item animation override (found 2026-09-10,
-  //"Animation pro Rotation-Item") - see the globals' own comment (ESPMaster.ino).
+  //Same "" / -1 = inherit pattern for the per-item animation override.
   rotationCurrentAnimationMode = rotationAnimationModeOverrideToString(currentItem.AnimationMode);
   rotationCurrentAnimationStaggerMs = currentItem.AnimationStaggerMs;
 
@@ -159,24 +145,13 @@ void checkRotation() {
 
 //Rebuilds the whole rotation list from a JSON array - a full replace, the client always submits
 //the complete list. Extra entries beyond ROTATION_ITEMS_MAX are dropped as a server-side backstop.
-//Returns whether the submitted JSON was actually valid and applied - previously void, silently
-//wiping the list on invalid input with no way for the caller to even know (found 2026-09-09,
-//CODE_REVIEW.md #24).
+//Returns whether the submitted JSON was actually valid and applied, so the caller can report
+//failure instead of always answering 200 OK.
 bool replaceRotationItemsFromJson(String rotationItemsJson) {
-  //rotationItemCount used to be zeroed unconditionally right here, before the JSON was even
-  //looked at - a syntax error or a top-level value that isn't a JSON array fell through to the
-  //`else` below, which only logged a message and did nothing to undo that reset. The existing,
-  //previously-working rotation list was gone regardless, and writeRotationItemsToFile() at the
-  //end ran unconditionally too, persisting the now-empty list - while the caller
-  //(ESPMaster.ino's /api/settings POST handler) still unconditionally answered 200 OK, since
-  //this function returned nothing to report failure with.
-  //
   //Every individual item field below already uses ArduinoJson's `| default` fallback operator,
-  //which never fails - a missing or wrong-typed field just becomes a sensible default, not an
-  //error. So there's no genuine PER-ITEM validation concern to guard against here, only the
-  //TOP-LEVEL one (malformed JSON, or valid JSON that isn't an array) - fixed by only touching
-  //rotationItemCount/rotationItems/the persisted file once that's already confirmed to hold,
-  //leaving the previous, working list completely untouched otherwise.
+  //which never fails, so the only real validation concern is at the TOP level (malformed JSON, or
+  //valid JSON that isn't an array) - only touch rotationItemCount/rotationItems/the persisted
+  //file once that's confirmed, leaving the previous, working list untouched otherwise.
   if (rotationItemsJson == "") {
     return true; //nothing submitted - leave the existing list exactly as it is, don't wipe it either
   }
@@ -189,22 +164,12 @@ bool replaceRotationItemsFromJson(String rotationItemsJson) {
     return false;
   }
 
-  //Pre-validate BEFORE touching any existing state - same "leave the previous, working list
-  //completely untouched on any validation failure" philosophy as the top-level JSON check above.
-  //Found 2026-09-10, CODE_REVIEW_V3.md #13: a text-type item whose Value alone needs more lines
-  //than fit (MAX_DISPLAY_LINES) passed every check this function otherwise does (the request-size
-  //limit is on the whole submitted JSON, not any one item's rendered content) - but every later
-  //showText() attempt for it inside checkRotation() then failed FOREVER, and since
-  //rotationItemAcceptedSeconds only advances on an ACCEPTED showText() call, the rotation could
-  //never progress past that one item again, permanently blocking every item behind it too. Only
-  //the text type can be checked exactly here - clock/date/countdown/countup items render dynamic,
-  //runtime-computed content that can't be reliably bounded upfront; checkRotation() below carries
-  //its own defense-in-depth timeout for those (and for any pre-existing text item saved before
-  //this check existed).
-  //animationMode/animationStaggerMs validated the same way as POST /api/settings' own fields
-  //(found 2026-09-10, "Animation pro Rotation-Item") - "" (mode) / -1 (stagger, absent or
-  //explicitly -1) means "inherit the global default", anything else must be one of the known
-  //modes / 0-ANIMATION_STAGGER_MS_MAX.
+  //Pre-validate BEFORE touching any existing state - same "leave the previous list untouched on
+  //any validation failure" philosophy as the top-level JSON check above. A text item whose Value
+  //needs more lines than fit would otherwise fail forever inside checkRotation(), permanently
+  //blocking the rotation from ever progressing past it. Only the text type can be checked exactly
+  //here - clock/date/countdown/countup render dynamic content checkRotation() bounds at runtime
+  //instead. "" (mode) / -1 (stagger) means "inherit the global default".
   for (JsonVariant value : jsonDocument.as<JsonArray>()) {
     String itemType = value["type"] | DEVICE_MODE_TEXT;
     if (itemType == DEVICE_MODE_TEXT && isMessageTooLongToRender(String((const char*)(value["value"] | "")))) {
@@ -212,11 +177,6 @@ bool replaceRotationItemsFromJson(String rotationItemsJson) {
       return false;
     }
 
-    //Alignment override validated the same way (found 2026-09-12, RAM-savings review: this check
-    //was missing entirely before, unlike its animationMode sibling right below - an unrecognized
-    //value would previously have been stored and passed through as-is to showText(), whatever that
-    //did with it; now rejected upfront like every other invalid field here, and required anyway
-    //once RotationItem.Alignment became an enum - see stringToRotationAlignmentOverride()).
     String itemAlignment = String((const char*)(value["alignment"] | ""));
     if (itemAlignment != "" && itemAlignment != ALIGNMENT_MODE_LEFT && itemAlignment != ALIGNMENT_MODE_CENTER && itemAlignment != ALIGNMENT_MODE_RIGHT) {
       SerialPrintln(F("Rotation items JSON rejected: invalid alignment - keeping the existing list, not touching it"));
@@ -256,12 +216,8 @@ bool replaceRotationItemsFromJson(String rotationItemsJson) {
     rotationItemCount++;
   }
 
-  //Release any String heap buffers left over in now-unused slots (e.g. a shrink from 20 to 3
-  //items would otherwise leave 17 RotationItems holding their previous content's capacity
-  //indefinitely - String's plain "=" assignment reuses existing capacity rather than freeing it;
-  //only a move-assignment from a fresh temporary actually calls String::invalidate()/frees the
-  //buffer, see WString.cpp. Found 2026-09-12, RAM-savings review). Cheap no-op on slots that were
-  //already empty (SSO strings, no heap involved).
+  //Release any String heap buffers left over in now-unused slots - plain "=" assignment reuses
+  //existing capacity rather than freeing it; a fresh temporary's move-assignment does free it.
   for (int i = rotationItemCount; i < ROTATION_ITEMS_MAX; i++) {
     rotationItems[i] = RotationItem();
   }

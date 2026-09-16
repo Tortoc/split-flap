@@ -9,18 +9,14 @@ void checkCountup() {
   if (deviceMode == DEVICE_MODE_COUNTUP) {
     long countupInSeconds = atol(countupSinceDateUnix.c_str());
 
-    //Bug (found while fixing #117): timezone.now() doesn't return real UTC (see getRealUtcNow()'s
-    //comment) - see the matching comment in checkCountdown() (ServiceCountdownFunctions.ino).
+    //timezone.now() doesn't return real UTC - see getRealUtcNow()'s comment.
     long currentTimeSeconds = getRealUtcNow();
     long differenceSeconds = currentTimeSeconds - countupInSeconds;
     long hours = differenceSeconds / 60 / 60;
 
-    //Full elapsed days only - unlike Countdown's ceil() (which rounds a partial day up so "still
-    //today" reads as "1 day left"), a partial day since the date hasn't been "a full day" yet.
+    //Full elapsed days only - unlike Countdown's ceil(), a partial day isn't "a full day" yet.
     long days = floor(hours / 24.0);
-
-    //Make sure we don't go negative (date hasn't happened yet)
-    days = days > 0 ? days : 0;
+    days = days > 0 ? days : 0; //date hasn't happened yet
 
     String daysText = buildCountupText(days);
 

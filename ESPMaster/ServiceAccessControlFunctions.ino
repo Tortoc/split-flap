@@ -1,19 +1,14 @@
-//Access control (CODE_REVIEW.md #29): a single password that can be globally disabled (empty
-//string), plus per-category toggles deciding which state-changing endpoints stay reachable
-//without it even while it's set. See the globals' own comments in ESPMaster.ino for the exact
-//default/safety reasoning.
+//A single password, globally disable-able (empty string), plus per-category toggles deciding
+//which endpoints stay reachable without it even while set.
 
-//True if this specific request should be allowed to proceed WITHOUT checking the password -
-//either because no password is configured at all (global off-switch), or because the admin
-//explicitly opted this specific category into the public allowlist. Pass `false` for
-//categoryPublicToggle to mean "never toggleable, always protected while a password is set" -
-//used by firmware/flash endpoints and the access-control settings themselves.
+//True if no password is required for this category - either the global off-switch, or the admin
+//opted this category into the public allowlist. Pass `false` for categoryPublicToggle to mean
+//"always protected while a password is set" (firmware/flash endpoints, access-control itself).
 bool isRequestAllowedWithoutPassword(bool categoryPublicToggle) {
   return String(otaPassword) == "" || categoryPublicToggle;
 }
 
-//Call at the top of a protected handler. Sends 401 and returns true (meaning "stop, already
-//responded") if the request should be rejected; returns false if it may proceed.
+//Call at the top of a protected handler. Sends 401 and returns true if rejected.
 bool rejectIfPasswordRequired(AsyncWebServerRequest* request, bool categoryPublicToggle) {
   if (isRequestAllowedWithoutPassword(categoryPublicToggle)) {
     return false;

@@ -67,14 +67,9 @@ bool recoverI2CBus() {
 void forceUnitRecoveryReset(int unitIndex) {
   SerialPrintln(F("I2C recovery: unit ") + String(unitIndex) + F(" still not responding after bus recovery - forcing it to reboot"));
   requestUnitEnterBootloader(unitIndex);
-  //Invalidate the display cache - found 2026-09-10, CODE_REVIEW_V3.md #10: this reboots the unit
-  //(Unit.ino's setup()/calibrate(true) re-homes it from scratch), which can leave its actual
-  //physical position no longer matching whatever the cache still believes was last successfully
-  //written to it - without this, a later showText() call for the exact same text/alignment the
-  //cache already has on file would hit that cache and skip re-sending, even though this
-  //specific unit may no longer show the correct letter. Same "cache no longer trustworthy"
-  //mechanism CODE_REVIEW.md #14 already uses for every other case where a unit's actual state
-  //can't be relied on - see displayRenderGeneration's own comment.
+  //Invalidate the display cache - the reboot re-homes the unit from scratch, so its actual
+  //position may no longer match what the cache believes was last written. See
+  //displayRenderGeneration's own comment.
   displayRenderGeneration++;
 }
 #else

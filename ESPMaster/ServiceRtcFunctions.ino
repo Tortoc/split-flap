@@ -1,22 +1,13 @@
-//Optional DS3231 RTC module (added 2026-09-11 on user request, following the boot-speed
-//discussion that removed the LED blink codes) - lets Clock/Date modes show a correct time almost
-//immediately after power-on instead of waiting for WiFi to connect and NTP to sync, and keeps
-//the clock correct through extended WiFi outages instead of sitting at ezTime's UTC/no-rule
-//default. Entirely optional and auto-detected (probeRtc()) - a build/device without one attached
-//behaves exactly as it did before this feature existed.
+//Optional DS3231 RTC module - lets Clock/Date modes show a correct time almost immediately after
+//power-on instead of waiting for WiFi/NTP, and keeps the clock correct through WiFi outages.
+//Entirely optional and auto-detected (probeRtc()).
 //
 //Plain direct I2C via Wire, no external RTC library - the DS3231 is a simple register-addressed
-//peripheral (7 contiguous BCD time registers at 0x00-0x06, one status register at 0x0F carrying
-//the Oscillator Stop Flag), not worth a dependency given how little code it takes. makeTime()/
-//breakTime()/tmElements_t come from ezTime itself (already `using namespace ezt;`-exposed
-//unqualified, see ezTime.h) - no separate Time library needed either.
+//peripheral (7 contiguous BCD time registers at 0x00-0x06, status register at 0x0F). makeTime()/
+//breakTime()/tmElements_t come from ezTime itself.
 
-//rtcPresent/rtcOscillatorStopFlag are declared in ESPMaster.ino itself, not here - found while
-//compiling: Arduino concatenates the main sketch file first, before every other .ino file in
-//alphabetical order, so a global used by ESPMaster.ino's own setup()/GET /api/diag handler (both
-//textually "earlier" in that concatenated order) must live there, same reasoning already hit for
-//MQTT's mqttClient and Animation's ANIMATION_MODE_* defines this session - functions get
-//auto-prototyped regardless of file order, but globals don't.
+//rtcPresent/rtcOscillatorStopFlag are declared in ESPMaster.ino, not here - globals used by code
+//in that file must live there, since Arduino concatenates the main sketch file first.
 
 uint8_t bcdToDec(uint8_t bcd) {
   return ((bcd >> 4) * 10) + (bcd & 0x0F);
@@ -61,13 +52,11 @@ bool readRtcTime(time_t &outUtc) {
   }
 
   //Real STOP + short settle delay before the read, not a repeated START - a repeated START here
-  //triggers a known ESP8266 core bug (esp8266/Arduino #5718), already worked around the exact
-  //same way for twiboot communication (see twibootReadChipInfo()'s own comment,
-  //ServiceUnitFirmwareFunctions.ino).
+  //triggers a known ESP8266 core bug (esp8266/Arduino #5718).
   Wire.beginTransmission(RTC_I2C_ADDRESS);
   Wire.write((uint8_t)0x00);
   if (Wire.endTransmission(true) != 0) {
-    recoverI2CBus(); //keep the shared bus from staying wedged for whatever I2C traffic comes next - see this file's own comment on why every other I2C caller in this project already does this
+    recoverI2CBus();
     return false;
   }
   delayMicroseconds(500);
@@ -118,10 +107,8 @@ bool readRtcTime(time_t &outUtc) {
 }
 
 //Writes utc (real UTC, same convention as readRtcTime()) to the DS3231, always in 24h mode, and
-//explicitly clears the Oscillator Stop Flag afterward - found while implementing this: some
-//DS3231 clones don't clear it automatically just because valid time was written, and a caller
-//that immediately read it back (unlikely today, but a future one might) should see it correctly
-//cleared. No-op if the RTC isn't present.
+//explicitly clears the Oscillator Stop Flag afterward - some DS3231 clones don't clear it
+//automatically just because valid time was written. No-op if the RTC isn't present.
 void writeRtcTime(time_t utc) {
   if (!rtcPresent) {
     return;
@@ -151,17 +138,9 @@ void writeRtcTime(time_t utc) {
   delayMicroseconds(500);
 
   //Read-modify-write the status register rather than blindly writing 0x00 - registers 0x0E/0x0F
-  //also carry alarm-interrupt-enable/square-wave-frequency bits this project doesn't use but
-  //shouldn't silently reset either.
-  //
-  //rtcOscillatorStopFlag is only cleared below once EVERY one of these three transactions is
-  //confirmed to have actually succeeded - found via Code_REVIEW_V5.md #17: it used to be set
-  //false unconditionally after this whole block regardless of whether the pointer-set, the read,
-  //or even the final write-back (whose result wasn't checked AT ALL before) actually worked. The
-  //diagnostic (`rtcOsf` in GET /api/diag?type=heap) could then claim the flag was cleared while
-  //the DS3231's real hardware register still had it set - and the NEXT boot's readRtcTime() reads
-  //that real register, not our cache, so it would then correctly refuse to trust the RTC time
-  //anyway. The cache just silently lied about it in the meantime.
+  //also carry alarm/square-wave bits this project doesn't use but shouldn't silently reset.
+  //rtcOscillatorStopFlag is only cleared below once EVERY one of these three transactions
+  //actually succeeded, not unconditionally.
   bool statusClearOk = false;
   Wire.beginTransmission(RTC_I2C_ADDRESS);
   Wire.write((uint8_t)0x0F);

@@ -8,13 +8,9 @@ void initialiseFileSystem() {
 }
 
 //Load variables that are saved to the file system - tries the combined boot-snapshot cache first
-//(ONE file open; see bootSnapshotPath's own comment, ESPMaster.ino, for the full "~800ms per open
-//on this device's flash chip" story), falling back to the original ~30-individual-file path only
-//when the snapshot is missing or unparseable (first boot with this feature, or after a factory
-//wipe) - that fallback path also (re)writes a fresh snapshot so every later boot takes the fast
-//path. loadValuesFromBootSnapshot() intentionally does NOT touch scheduledMessagesPath/
-//rotationItemsPath - those are already single files each and read exactly as before, regardless of
-//which path this function takes.
+//(ONE file open; see bootSnapshotPath's own comment for why), falling back to the original
+//~30-individual-file path when the snapshot is missing or unparseable, which also (re)writes a
+//fresh snapshot for later boots.
 void loadValuesFromFileSystem() {
   if (!loadValuesFromBootSnapshot()) {
     SerialPrintln(F("Boot snapshot missing/invalid - loading individual setting files instead (slower, one-time until the snapshot is (re)written)"));
@@ -56,10 +52,8 @@ void loadValuesFromFileSystem() {
     }
   }
 
-  //Extension device list (Primary role, multiple-units.md Phase 1) - own file like
-  //rotationItemsPath, not part of the boot snapshot (not a scalar). Loaded regardless of the
-  //current deviceRole, same as rotationItems being loaded regardless of deviceMode - a role switch
-  //shouldn't require re-entering the list.
+  //Extension device list - own file, not part of the boot snapshot. Loaded regardless of
+  //deviceRole, so a role switch doesn't require re-entering the list.
   String extensionDevicesJson = readFile(LittleFS, extensionDevicesPath, "[]");
   if (extensionDevicesJson != "" && extensionDevicesJson != "[]") {
     SerialPrintln(F("Loading Extension Devices"));
@@ -99,11 +93,8 @@ void loadValuesFromFileSystem() {
 }
 
 //Attempts the fast path: one combined JSON file instead of ~30 individual ones. Returns false (and
-//touches nothing) if the file doesn't exist yet or fails to parse - loadValuesFromFileSystem()'s
-//caller then falls back to loadValuesFromIndividualFiles(). Deliberately does NOT apply
-//quietHours/recomputeQuietHoursMinutes() etc. partially on a parse failure - either the whole
-//snapshot is trusted, or none of it is, so a corrupt file can never leave some fields from the
-//snapshot and others at their compile-time defaults.
+//touches nothing) if the file doesn't exist yet or fails to parse - the caller then falls back to
+//loadValuesFromIndividualFiles(). Either the whole snapshot is trusted, or none of it is.
 bool loadValuesFromBootSnapshot() {
   String snapshotJson = readFile(LittleFS, bootSnapshotPath, "");
   if (snapshotJson == "") {
@@ -158,8 +149,8 @@ bool loadValuesFromBootSnapshot() {
   return true;
 }
 
-//The original, pre-2026-09-11 loading logic - one readFile() per individual setting. Only still
-//reached as a fallback when no valid boot snapshot exists yet (see loadValuesFromFileSystem()).
+//One readFile() per individual setting. Only reached as a fallback when no valid boot snapshot
+//exists yet (see loadValuesFromFileSystem()).
 void loadValuesFromIndividualFiles() {
   //Load values saved in LittleFS
   countdownToDateUnix = readFile(LittleFS, countdownPath, "0");
@@ -207,19 +198,12 @@ void loadValuesFromIndividualFiles() {
 }
 
 //Serializes every scalar setting loadValuesFromBootSnapshot() knows how to read back into
-//bootSnapshotPath, in ONE write - see that file/function's own comment for why this exists.
-//scheduledMessagesPath/rotationItemsPath are NOT included (already their own single files, written
-//by their own existing, unchanged code paths - replaceRotationItemsFromJson(),
-//writeScheduledMessagesToFile()).
+//bootSnapshotPath, in ONE write. scheduledMessagesPath/rotationItemsPath are NOT included -
+//already their own single files, written by their own existing code paths.
 //
-//Returns whether the write actually succeeded - found via Code_REVIEW_V5.md #12:
-//lastSavedSettingsSignature used to be updated unconditionally right after calling writeFile(),
-//regardless of whether the write itself succeeded. A failed write (flash full/unwritable at that
-//moment) then looked identical to a successful one to every later checkBootSnapshotFreshness()
-//check - the stale, never-actually-saved snapshot would sit there un-retried until some OTHER,
-//unrelated setting changed again. Only advance the signature on confirmed success now, so a
-//failed save keeps looking "dirty" and gets retried on the very next periodic check (or reboot
-//hook) instead of silently going quiet.
+//Returns whether the write actually succeeded - lastSavedSettingsSignature only advances on
+//confirmed success, so a failed write keeps looking "dirty" and gets retried on the next check
+//instead of silently going quiet.
 bool saveBootSnapshot() {
   JsonDocument doc;
   doc["countdownToDateUnix"] = countdownToDateUnix;
@@ -269,11 +253,8 @@ bool saveBootSnapshot() {
 }
 
 //Cheap (no flash access) string built from every field saveBootSnapshot() persists - lets
-//checkBootSnapshotFreshness() (ESPMaster.ino, ticked periodically from loop()) detect "did any
-//boot-relevant setting actually change" without needing a dedicated dirty flag at each of the many
-//existing settings-POST handlers scattered across this file, and without re-writing the snapshot
-//on every check when nothing changed (this device's flash chip is already confirmed unusually slow
-//- see bootSnapshotPath's comment - no sense wearing it with unconditional periodic writes too).
+//checkBootSnapshotFreshness() detect "did any boot-relevant setting actually change" without a
+//dedicated dirty flag at each settings-POST handler.
 String computeSettingsSignature() {
   String sig;
   sig.reserve(256);
@@ -340,12 +321,8 @@ String readFile(fs::FS &fs, const char * path, String defaultValue) {
   return fileContent;
 }
 
-//Write file to LittleFS. Returns whether the FULL message was actually written - found via
-//Code_REVIEW_V5.md #12: this used to be void and only checked `if (file.print(message))`, which
-//is truthy for ANY nonzero return, i.e. a short/partial write (flash full, unplugged mid-write)
-//still looked like success to every caller. Every existing caller that ignores the return value
-//keeps behaving exactly as before (a bool return is silently discardable) - only callers that now
-//check it (readFile()'s own default-value write, saveBootSnapshot()) actually change behavior.
+//Write file to LittleFS. Returns whether the FULL message was actually written - a short/partial
+//write (flash full, unplugged mid-write) is not success.
 bool writeFile(fs::FS &fs, const char * path, const char * message) {
   SerialPrintf(F("Writing file: %s\r\n"), path);
 

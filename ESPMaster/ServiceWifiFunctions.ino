@@ -2,16 +2,9 @@
 //once a local variable inside initWiFi() goes out of scope.
 WiFiEventHandler wifiDisconnectEventHandler;
 
-//Makes the long-suspected WiFiManager/AUTH_EXPIRE disconnect issue observable over HTTP, not just
-//via a live serial capture (found 2026-09-13: the existing
-//disconnect handler below already decodes the real reason, but only ever SerialPrintln()s it -
-//invisible unless a programmer happens to be connected at the exact moment it happens). A real
-//AUTH_EXPIRE/ASSOC_EXPIRE disconnect is usually just a brief, self-healing hiccup (WiFiManager's
-//own auto-reconnect handles it) - it doesn't necessarily cause a reboot, so resetReason/uptimeSec
-//(added the same day, GET /api/diag?type=heap) wouldn't catch it either. wifiDisconnectCount/
-//lastWifiDisconnectReason/lastWifiDisconnectAt (declared in ESPMaster.ino, see its own comment for
-//why) let the established periodic stability monitoring see disconnect frequency/cause over
-//time, cheaply (one counter + one short String + one timestamp, no Serial/programmer needed).
+//Makes WiFi disconnect reasons observable over HTTP instead of only via a live serial capture.
+//wifiDisconnectCount/lastWifiDisconnectReason/lastWifiDisconnectAt (ESPMaster.ino) track
+//frequency/cause over time, cheaply.
 
 //Translates a WiFi disconnect reason into a readable string for the serial log, so "full signal but
 //won't connect" can be pinned to a concrete cause instead of just "FAILED".
@@ -51,12 +44,7 @@ String wifiDisconnectReasonToString(WiFiDisconnectReason reason) {
 
 //Both functions below use wifiScanRequested/wifiConnectPhase/WIFI_CONNECT_* - all only declared
 //under `#if WIFI_USE_DIRECT == false` in ESPMaster.ino (WiFiManager-based AP-config mode; direct
-//mode has no such scan/reconnect UI). These two definitions themselves were previously
-//unconditional, so a WIFI_USE_DIRECT=true build failed with "not declared in this scope" for
-//both identifiers (found 2026-09-09, CODE_REVIEW.md #25, reproduced: a temporary
-//WIFI_USE_DIRECT=true build failed exactly here). Matches the same compile condition as their
-//own dependencies, and the existing WIFI_USE_DIRECT==false guards already wrapping every call
-//site of these two functions in ESPMaster.ino's setup()/loop().
+//mode has no such scan/reconnect UI), so these definitions must be guarded the same way.
 #if WIFI_USE_DIRECT == false
 //Starts the network scan requested via POST /api/wifi/scan - kept out of the AsyncWebServer
 //callback. Empty completion callback: GET /api/wifi/scan-result polls WiFi.scanComplete() directly.
