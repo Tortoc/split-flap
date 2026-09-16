@@ -1,11 +1,6 @@
-//Constant-time string comparison, for password checks (found 2026-09-10, used by
-//ServiceAccessControlFunctions.ino and /api/firmware-*'s checkOtaPassword lambda). A plain `==`
-//does an early-exit byte compare - a theoretical timing side-channel that could, in principle,
-//let repeated measurements narrow down a correct password one byte at a time. Practically very
-//low-risk here (no remote attacker path with precise-enough timing over a local IoT device's
-//WiFi/HTTP stack), but this is exactly the kind of check the pattern exists for, and it costs
-//nothing. Always walks the longer of the two lengths and folds a length mismatch into the same
-//accumulator, rather than returning early for either a length or a content difference.
+//Constant-time string comparison, for password checks - avoids the timing side-channel a plain
+//`==`'s early-exit byte compare would have. Always walks the longer of the two lengths and folds
+//a length mismatch into the same accumulator, never returning early.
 bool constantTimeEquals(const String &a, const String &b) {
   size_t lenA = a.length();
   size_t lenB = b.length();
@@ -19,14 +14,9 @@ bool constantTimeEquals(const String &a, const String &b) {
   return diff == 0;
 }
 
-//Percent-encodes a value for use as one field of an application/x-www-form-urlencoded body -
-//needed by pushSegmentToExtension() (ServiceExtensionFunctions.ino, multiple-units.md Phase 2),
-//the first place this project builds an outgoing form-encoded request body itself rather than
-//just reading one an incoming request already parsed. A display segment's real character set is
-//narrow (letters[], ESPMaster.ino: A-Z, digits, space, and $&#:.-?!) but this encodes generally
-//correctly regardless - unreserved characters pass through unchanged, everything else becomes
-//%XX. Space becomes %20, not '+' - both are valid form-urlencoded space representations, but %20
-//needs no special-casing on the decoding side (ESPAsyncWebSrv's own param parser).
+//Percent-encodes a value for use as one field of an application/x-www-form-urlencoded body.
+//Unreserved characters pass through unchanged, everything else becomes %XX. Space becomes %20,
+//not '+' - needs no special-casing on the decoding side.
 String urlEncodeForFormBody(String value) {
   String encoded;
   encoded.reserve(value.length());
@@ -47,15 +37,9 @@ String urlEncodeForFormBody(String value) {
 }
 
 //Converts UTF-8 ä/ö/ü/Ä/Ö/Ü byte sequences to the internal single-byte placeholder codes ($/&/#)
-//that the physical letters[] array (ESPMaster.ino) actually has flaps for - centralizes what was
-//previously only done client-side, and only in the main text form's own onsubmit handler (found
-//2026-09-09, CODE_REVIEW.md #21): Rotation item text, scheduled messages, and direct /api/text
-//calls all bypassed that JS-side substitution entirely, arriving here as raw 2-byte UTF-8
-//sequences that translateLettertoInt() can't match at all - not just failing to show the umlaut,
-//but ALSO shifting every later character's flap position by one extra slot per umlaut, since the
-//line-splitting/alignment logic downstream counts raw bytes, not real characters. Runs once,
-//centrally, in showText() before any of that - so every input path gets the same, correct
-//handling regardless of where the text came from.
+//that the physical letters[] array (ESPMaster.ino) actually has flaps for. Runs once, centrally,
+//in showText() - so every input path (Rotation, scheduled messages, /api/text) gets the same
+//handling, and raw 2-byte UTF-8 sequences never shift later characters' flap positions.
 String normalizeUmlautsForDisplay(String text) {
   String result = "";
   result.reserve(text.length());
@@ -80,12 +64,10 @@ String normalizeUmlautsForDisplay(String text) {
   return result;
 }
 
-//Aligns string on center of array and fills empty chars with spaces. Callers pass unitsAmount
-//(every standalone/extension device) or combinedUnitsAmount() for a primary device with reachable
-//extensions (ServiceDisplayJobFunctions.ino) - see multiple-units.md point 4. No default value
-//here deliberately: Arduino's ctags-based auto-prototype generator re-emits this whole signature
-//as a forward declaration, and a default argument specified in two places (that declaration AND
-//this definition) is a C++ redefinition error - found by testing, not assumed.
+//Aligns string on center of array and fills empty chars with spaces. Callers pass unitsAmount or
+//combinedUnitsAmount() for a primary device with reachable extensions. No default value here
+//deliberately: Arduino's auto-prototype generator re-emits this signature as a forward
+//declaration, and a default argument in two places is a C++ redefinition error.
 String centerString(String message, int width) {
   //message.length() is unsigned - cast to int first, or a too-long message wraps the subtraction
   //to a huge positive pad amount instead of negative, driving the loop below into an OOM crash.
@@ -257,13 +239,9 @@ LList<String> processSentenceToLines(String sentence, int width) {
 
       if (wordItemLetter == '\n')
       {
-        //Guard against a spurious empty line (found while fixing Code_REVIEW_V5.md #14 below): a
-        //word that happens to fill the display width EXACTLY, right before an explicit line break,
-        //already flushed inProgressLine (and reset it to "") one letter earlier via the
-        //width-length check further down - adding it again here would insert an empty line
-        //between two real ones. Matches the rest of this function's own "\n\n collapses to a
-        //single \n" preprocessing further up - a deliberately blank line was never a supported
-        //feature to begin with.
+        //Guard against a spurious empty line: a word filling the display width EXACTLY, right
+        //before an explicit line break, already flushed inProgressLine one letter earlier via the
+        //width-length check below - adding it again here would insert an empty line.
         if (inProgressLine != "")
         {
           lines.add(inProgressLine);
@@ -273,11 +251,8 @@ LList<String> processSentenceToLines(String sentence, int width) {
       else
       {
         //If we need to break up the word as its too long, then we need to add a "-" - but NOT if
-        //the very next character is just this word's own trailing line break (found via
-        //Code_REVIEW_V5.md #14, reproduced against this exact function: "HELLO\nX" at width=5
-        //wrongly split into "HELL-"/"O"/"X" instead of "HELLO"/"X", since reaching the display
-        //width one letter before an explicit newline looked identical to genuinely needing to
-        //break the word, even though nothing was actually left to fit afterward).
+        //the very next character is just this word's own trailing line break (reaching the
+        //display width one letter before an explicit newline isn't genuinely needing to break).
         bool moreWordContentFollows = (letterIndex < currentWordLength - 1) && (wordItem[letterIndex + 1] != '\n');
         if (inProgressLine.length() == width - 1 && moreWordContentFollows)
         {
@@ -349,12 +324,8 @@ String convertUserDateFormatToEzTime(String userFormat) {
 
 //Used for ensuring a string is a number
 bool isNumber(String str) {
-  //An empty string was previously accepted as "a number" (found 2026-09-10): strtol("", &endPtr,
-  //10) sets endPtr to point at str's own null terminator (no digits consumed, nothing to reject),
-  //so the "reached the end of the string" check below was trivially true for "" too - a caller
-  //passing e.g. `id=` (present but empty) as a form field got isNumber("")==true, then .toInt()==0,
-  //silently targeting id 0 instead of the intended clear "must be a number" 400 rejection. Reject
-  //empty input explicitly before ever calling strtol().
+  //An empty string must be rejected explicitly - strtol("", &endPtr, 10) consumes no digits but
+  //still leaves endPtr at the terminator, so the end-of-string check below would trivially pass.
   if (str.length() == 0) {
     return false;
   }
@@ -390,11 +361,9 @@ int parseTimeOfDayToMinutes(String value) {
   return hour * 60 + minute;
 }
 
-//Validates a candidate mDNS/DNS hostname label (the "split-flap" in "split-flap.local") - used by
-//POST /api/wifi's "set-hostname" action, see mdnsHostname's own comment (ESPMaster.ino). Standard
+//Validates a candidate mDNS/DNS hostname label (the "split-flap" in "split-flap.local"). Standard
 //DNS label rules: 1-63 chars, only letters/digits/hyphens, must not start or end with a hyphen
-//(RFC 1035/1123) - ESP8266mDNS itself doesn't validate this and would otherwise happily broadcast
-//a name that most resolvers then silently refuse to look up.
+//(RFC 1035/1123) - ESP8266mDNS itself doesn't validate this.
 bool isValidMdnsHostname(String hostname) {
   if (hostname.length() == 0 || hostname.length() > 63) {
     return false;

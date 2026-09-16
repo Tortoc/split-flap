@@ -1,6 +1,5 @@
 //Replace/add a scheduled message and persist the result afterwards - returns false (and skips the
-//write, nothing changed) if the message was rejected as already due/in the past, same reasoning
-//as addScheduledMessage() below (found 2026-09-10, CODE_REVIEW_V4.md #12).
+//write) if rejected as already due/in the past.
 bool addAndPersistScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool showIndefinitely) {
   bool added = addScheduledMessage(scheduledText, scheduledDateTimeUnix, showIndefinitely);
   if (added) {
@@ -9,11 +8,8 @@ bool addAndPersistScheduledMessage(String scheduledText, long scheduledDateTimeU
   return added;
 }
 
-//Replace/add a scheduled message. Returns whether it was actually added - found 2026-09-10,
-//CODE_REVIEW_V4.md #12: this used to be void, silently no-op'ing (just a serial log line) for a
-//past-due timestamp while its caller (POST /api/settings' handler) had no way to know and always
-//answered 200 "OK" regardless - a schedule request with a timestamp that's already passed (or
-//passes before this runs) looked successful to the client but nothing was actually scheduled.
+//Replace/add a scheduled message. Returns whether it was actually added, so the caller can report
+//failure for an already-past-due timestamp instead of always answering 200 OK.
 bool addScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool showIndefinitely) {
   SerialPrintln(F("Processing New Scheduled Message"));
   SerialPrintln(F("-- Message: ") + scheduledText);
@@ -22,19 +18,9 @@ bool addScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool 
   SerialPrint(F("-- Show Indefinitely: "));
   SerialPrintln(showIndefinitely ? F("Yes") : F("No"));
 
-  //Reject a past-due timestamp FIRST, before touching the existing list at all - found 2026-09-10
-  //while implementing CODE_REVIEW_V4.md #12 (not itself part of that review): the old order
-  //removed any existing entry sharing this exact timestamp, THEN checked whether the new one was
-  //even in the future. A resubmission of an entry that's already essentially due (matching an
-  //existing stored timestamp) but rejected here as past-due would otherwise delete that still-
-  //valid existing entry with nothing to replace it with - a narrow window (the existing entry
-  //would itself already have to be right on the verge of firing, since checkScheduledMessages()
-  //fires/removes genuinely due entries on its own every second), but a real, avoidable loss.
-  //Bug (found while fixing #117): timezone.now() doesn't return real UTC despite its name/params
-  //(verified empirically - see getRealUtcNow()'s comment in ESPMaster.ino), but scheduledDateTimeUnix
-  //arrives from the client as real UTC seconds - comparing them directly was off by the timezone
-  //offset (2h for Europe/Berlin in summer), rejecting messages scheduled less than that far ahead
-  //as "already in the past".
+  //Reject a past-due timestamp FIRST, before touching the existing list at all - otherwise a
+  //resubmission matching an existing stored timestamp could delete that still-valid entry with
+  //nothing to replace it. timezone.now() doesn't return real UTC - see getRealUtcNow()'s comment.
   if (scheduledDateTimeUnix > getRealUtcNow()) {
     //Find the existing scheduled message and replace it if one exists.
     //.get() (not operator[]) - the library's operator[] dereferences a NULL node with no bounds
@@ -53,8 +39,7 @@ bool addScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool 
       }
     }
 
-    //Found via Code_REVIEW_V5.md #11 - only a genuinely NEW entry (not a same-timestamp replace,
-    //which the removal above already made room for) needs to be checked against the cap.
+    //Only a genuinely NEW entry needs to be checked against the cap.
     if (!replacedExisting && scheduledMessages.size() >= SCHEDULED_MESSAGES_MAX) {
       SerialPrintln(F("Not adding Scheduled Message - already at SCHEDULED_MESSAGES_MAX"));
       return false;
@@ -71,17 +56,9 @@ bool addScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool 
 }
 
 //Restores one PERSISTED scheduled message at boot, unconditionally - unlike addScheduledMessage()
-//above, this does NOT reject a timestamp that's already due/in the past. Found via
-//Code_REVIEW_V5.md #10: readScheduledMessagesFromJson() used to call addScheduledMessage() for
-//this too, applying brand-new-submission validation to messages being RESTORED from disk. Before
-//the DS3231 RTC feature, the clock was never actually set yet at this point in boot, so
-//"scheduledDateTimeUnix > getRealUtcNow()" was trivially true for everything and this bug had no
-//real effect - now that the RTC seeds an accurate time before loadValuesFromFileSystem() even
-//runs (see setup(), ESPMaster.ino), a message that's already due (or one deferred by Quiet Hours
-//across a restart) gets silently dropped here instead of ever reaching checkScheduledMessages()'s
-//own, correct "show it now" handling. No replace-if-same-timestamp logic needed here either - a
-//freshly-loaded list from this device's own file was never going to contain a duplicate timestamp
-//already caught by that logic elsewhere.
+//above, this does NOT reject a timestamp that's already due/in the past; checkScheduledMessages()
+//picks up anything genuinely due on its own next tick. No replace-if-same-timestamp logic needed
+//here either - a freshly-loaded list can't contain a duplicate timestamp.
 void restoreScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool showIndefinitely) {
   scheduledMessages.add({scheduledText, scheduledDateTimeUnix, showIndefinitely});
 }
@@ -114,9 +91,6 @@ void checkScheduledMessages() {
     return;
   }
 
-  //See the matching comment in addScheduledMessage() above - must compare against real UTC, not
-  //timezone.now()'s (misleadingly-named) local time, to match the UTC seconds the client
-  //scheduled against.
   unsigned long currentTimeUnix = getRealUtcNow();
   for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
     ScheduledMessage scheduledMessage = scheduledMessages.get(scheduledMessageIndex);
@@ -127,12 +101,8 @@ void checkScheduledMessages() {
       SerialPrintln(scheduledMessage.ShowIndefinitely ? F("Yes") : F("No"));
 
       //A message that needs more lines than fit can NEVER be shown - unlike a busy display
-      //(transient, resolves on its own), leaving this queued would retry the exact same failing
-      //showText() call every tick forever, and the break below would then permanently block every
-      //OTHER due message queued behind it from ever being reached (found 2026-09-09,
-      //CODE_REVIEW_V2.md #10). New submissions are now rejected up front (see the /api/settings
-      //and /api/text handlers), but this stays as defense in depth for anything scheduled before
-      //that validation existed. Drop it here instead.
+      //(transient), leaving this queued would retry the same failing call forever and permanently
+      //block every OTHER due message behind it. Drop it here instead.
       if (isMessageTooLongToRender(scheduledMessage.Message)) {
         SerialPrintln(F("Scheduled Message needs more lines than fit and can never be shown - dropping it instead of blocking later messages"));
         scheduledMessages.remove(scheduledMessageIndex);
@@ -150,12 +120,8 @@ void checkScheduledMessages() {
         shown = showText(scheduledMessage.Message, scheduledMessageDisplayTimeMillis);
       }
 
-      //Only dequeue on actual success (found 2026-09-09, CODE_REVIEW.md #10) - a busy display or
-      //no detected units previously still removed the entry unconditionally, silently losing the
-      //message. Leaving it queued means the next ~1s tick retries the same (still-due) message;
-      //no risk of it firing twice, since ShowIndefinitely's own deviceMode/inputText assignment
-      //above already makes the very next tick's normal mode-dispatch show it regardless of this
-      //call's own result, and a still-queued entry just means this function tries again too.
+      //Only dequeue on actual success - a busy display or no detected units otherwise removes the
+      //entry unconditionally, silently losing the message.
       if (shown) {
         scheduledMessages.remove(scheduledMessageIndex);
         writeScheduledMessagesToFile();
@@ -175,11 +141,8 @@ void readScheduledMessagesFromJson(String scheduledMessagesJson) {
     if (!deserialisationError) {
       if (jsonDocument.is<JsonArray>()) {
         for (JsonVariant value : jsonDocument.as<JsonArray>()) {
-          //Same restore-time cap as rotationItems' own restore loop (ESPMaster.ino,
-          //replaceRotationItemsFromJson()) - see SCHEDULED_MESSAGES_MAX's own comment
-          //(Code_REVIEW_V5.md #11). Only reachable if the persisted file itself somehow holds more
-          //than the cap (e.g. from before this limit existed) - addScheduledMessage() already
-          //enforces it for every new submission from here on.
+          //Only reachable if the persisted file itself somehow holds more than the cap -
+          //addScheduledMessage() already enforces it for every new submission.
           if (scheduledMessages.size() >= SCHEDULED_MESSAGES_MAX) {
             SerialPrintln(F("Scheduled messages file has more than SCHEDULED_MESSAGES_MAX entries - dropping the rest"));
             break;
@@ -189,10 +152,8 @@ void readScheduledMessagesFromJson(String scheduledMessagesJson) {
           String message = value["message"];
           bool showIndefinitely = value["showIndefinitely"];
 
-          //restoreScheduledMessage(), not addScheduledMessage() - see that function's own comment
-          //(Code_REVIEW_V5.md #10) for why restoring a persisted entry must never be rejected just
-          //because it's already due; checkScheduledMessages() (ticked every second regardless)
-          //picks up and fires anything genuinely due on its own very next tick.
+          //restoreScheduledMessage(), not addScheduledMessage() - a restored entry must never be
+          //rejected just because it's already due; see that function's own comment.
           restoreScheduledMessage(message, scheduledDateTimeUnix, showIndefinitely);
         }
       }

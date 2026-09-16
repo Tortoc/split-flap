@@ -1,21 +1,11 @@
-//MQTT + Home Assistant auto-discovery - found 2026-09-10 in two independent forks
-//(Jerrys-modz/split-flap, scottbez1/splitflap's own mqtt_task.cpp).
-//Deliberately minimal scope compared to Jerrys-modz's full
-//feature set (no dedicated MQTT device mode, no buttons, no countdown entity) - a single `text`
-//entity that reuses the exact same showText()/deviceMode path POST /api/text's permanent branch
-//already uses, plus one diagnostic `sensor` entity (free heap) that costs nothing extra (the
-//value already exists via ESP.getFreeHeap()). Kept small on purpose given this device's own heap
-//crash history. Everything here compiles away entirely when MQTT_ENABLE is false
-//(ESPMaster.ino) - see that flag's own comment for why that's the only way to truly avoid
-//PubSubClient's cost (its constructor always malloc()s a buffer, a runtime "disabled" flag alone
-//can't prevent that).
+//MQTT + Home Assistant auto-discovery - deliberately minimal scope: a single `text` entity that
+//reuses the exact same showText()/deviceMode path POST /api/text uses, plus one diagnostic
+//`sensor` entity (free heap). Everything here compiles away entirely when MQTT_ENABLE is false -
+//the only way to truly avoid PubSubClient's cost (its constructor always malloc()s a buffer).
 #if MQTT_ENABLE == true
 
 //Unique-enough ID for this device's MQTT client/discovery topics - derived from the ESP's own
-//chip ID at first use (see mqttDeviceId()) rather than hardcoded, so two displays on the same
-//network/broker don't collide by default (same reasoning as mdnsHostname needing to be unique -
-//but this one doesn't need the user to set anything, since MQTT topics aren't human-facing the
-//way a .local hostname is).
+//chip ID at first use, so two displays on the same broker don't collide by default.
 String mqttDeviceIdCache = "";
 String mqttDeviceId() {
   if (mqttDeviceIdCache == "") {
@@ -36,25 +26,19 @@ String mqttHeapTopic() {
   return "splitflap/" + mqttDeviceId() + "/heap";
 }
 
-//Tracks what was last SUCCESSFULLY published to mqttStateTopic() - checkMqttState() (below)
-//compares this against inputText every second and only attempts a publish on an actual change,
-//same "compare to last known value" pattern used elsewhere in this codebase for periodic checks.
+//Tracks what was last SUCCESSFULLY published to mqttStateTopic() - checkMqttState() compares this
+//against inputText every second and only publishes on an actual change.
 String lastPublishedMqttText = "";
-//Separate from lastPublishedMqttText's VALUE, because "" is itself a real, valid displayed text
-//(found 2026-09-10, CODE_REVIEW_V4.md #5) - without this, mqttReconnect() resetting the cache to
-//force a fresh post-reconnect publish would stay silent whenever the CURRENT text also happened
-//to be "", since inputText != lastPublishedMqttText would then be false too - leaving a stale
-//retained value from before the reconnect sitting on the broker. false = "not yet confirmed
-//published since the last (re)connect or the last change", regardless of what the text is.
+//Separate from lastPublishedMqttText's VALUE, because "" is itself a real, valid displayed text -
+//without this, resetting the cache on reconnect would stay silent if the CURRENT text also
+//happens to be "", leaving a stale retained value on the broker.
 bool mqttStatePublished = false;
 unsigned long lastMqttHeapPublish = 0;
 unsigned long lastMqttReconnectAttempt = 0;
 
-//Incoming command - mirrors POST /api/text's permanent (no duration) branch exactly: switches
-//into Text mode if not already there, and calls the same showText() every other permanent text
-//push uses. No length/renderability validation error path back to the broker (MQTT is fire-and-
-//forget, no synchronous response to reject with) - an oversized message is simply logged and
-//dropped, same as showText() would refuse it internally anyway.
+//Incoming command - mirrors POST /api/text's permanent (no duration) branch: switches into Text
+//mode if not already there, and calls the same showText(). MQTT is fire-and-forget, so an
+//oversized message is simply logged and dropped, no error path back to the broker.
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String message;
   message.reserve(length);
@@ -137,10 +121,8 @@ bool mqttReconnect() {
     SerialPrintln(F("MQTT: connected to ") + mqttBrokerHost);
     mqttClient.subscribe(mqttCommandTopic().c_str());
     publishHomeAssistantDiscovery();
-    //Force an immediate state publish too - checkMqttState()'s own "publish on change" comparison
-    //would otherwise stay silent here if inputText hasn't changed since before this connection.
-    //Clearing the flag, not lastPublishedMqttText's value (found 2026-09-10,
-    //CODE_REVIEW_V4.md #5 - see mqttStatePublished's own declaration comment for why).
+    //Force an immediate state publish - checkMqttState()'s "publish on change" comparison would
+    //otherwise stay silent if inputText hasn't changed since before this connection.
     mqttStatePublished = false;
   } else {
     SerialPrintln(F("MQTT: connect failed, rc=") + String(mqttClient.state()));
@@ -149,16 +131,10 @@ bool mqttReconnect() {
   return connected;
 }
 
-//Both timeouts below found 2026-09-10, CODE_REVIEW_V4.md #3: mqttReconnect() calls the blocking
-//mqttClient.connect(), which runs entirely inside loop() (nothing here is deferred like the OTA/
-//I2C work elsewhere in this file) - the display state machine and every HTTP request this device
-//serves stall for as long as that call takes. Left at their library defaults, a broker that's
-//TCP-reachable but never answers (wrong port, a stuck proxy) could block for up to ~5s (WiFiClient's
-//own connect() timeout) PLUS up to 15s (PubSubClient's MQTT_SOCKET_TIMEOUT, waiting for CONNACK) -
-//nearly 20s worst case. A real async MQTT client would be the cleaner fix but is a much larger
-//rewrite for an optional, off-by-default feature; bounding both legs to a few seconds instead
-//keeps the existing simple/synchronous design while making a stuck broker merely a brief, bounded
-//hiccup instead of a near-20s freeze. Not provoked against the live device (MQTT disabled there).
+//mqttReconnect() calls the blocking mqttClient.connect(), which runs entirely inside loop() - the
+//display state machine and every HTTP request stall for as long as it takes. Left at library
+//defaults, a broker that's TCP-reachable but never answers could block for up to ~20s worst case;
+//bounding both legs to a few seconds keeps a stuck broker a brief, bounded hiccup instead.
 #define MQTT_TCP_CONNECT_TIMEOUT_MS 2000
 #define MQTT_SOCKET_TIMEOUT_S 3
 
@@ -167,35 +143,24 @@ void initMqtt() {
     mqttClient.setServer(mqttBrokerHost.c_str(), mqttBrokerPort);
   }
   mqttClient.setCallback(mqttCallback);
-  //600, not 512 (found 2026-09-10, CODE_REVIEW_V4.md #5): must fit a PUBLISH packet's fixed
-  //header (up to 5 bytes) + 2-byte topic length prefix + the state topic itself
-  //("splitflap/splitflap-<8 hex chars>/state", ~35 bytes) + the payload, and POST /api/text
-  //allows up to 500 characters - 512 total left as little as ~470 bytes of actual payload room,
-  //silently truncating/rejecting the small share of legitimately long texts. 600 covers the real
-  //worst case (500-char text + ~42 bytes of topic/header) with comfortable margin; this device
-  //has ~17-18KB free heap after boot, so +88 bytes here is not a meaningful risk. Still big enough
-  //for the discovery payloads above, see their own comment.
+  //600, not 512: must fit a PUBLISH packet's header+topic ("splitflap/splitflap-<8 hex
+  //chars>/state", ~35 bytes) plus up to 500 characters of payload - 512 would silently truncate
+  //the small share of legitimately long texts.
   mqttClient.setBufferSize(600);
   mqttWifiClient.setTimeout(MQTT_TCP_CONNECT_TIMEOUT_MS);
   mqttClient.setSocketTimeout(MQTT_SOCKET_TIMEOUT_S);
 }
 
-//Called once per second from loop(), alongside checkRotation()/checkNtpSync() etc. - publishes
-//the current inputText (the same variable every device mode already treats as "what's currently
-//shown/intended", see its own comment in ESPMaster.ino) only when it actually changed, and
-//opportunistically republishes the heap sensor every 30s (cheap, no discovery re-announce needed).
+//Called once per second from loop() - publishes the current inputText only when it actually
+//changed, and opportunistically republishes the heap sensor every 30s.
 void checkMqttState() {
   if (!mqttEnabled || !mqttClient.connected()) {
     return;
   }
 
   //!mqttStatePublished (not just a text comparison) covers the just-reconnected/still-empty-text
-  //case - see that flag's declaration comment. The cache is only updated on a CONFIRMED successful
-  //publish (found 2026-09-10, CODE_REVIEW_V4.md #5): publish() returns false whenever the message
-  //- topic, header and all - doesn't fit PubSubClient's internal buffer (a real possibility here,
-  //see setBufferSize()'s own comment), and the previous code marked it "published" regardless,
-  //permanently skipping every future retry as long as the text stayed unchanged. Leaving both
-  //untouched on failure means the very next tick (~1s later) retries automatically instead.
+  //case. The cache is only updated on a CONFIRMED successful publish - leaving both untouched on
+  //failure means the very next tick retries automatically.
   if (!mqttStatePublished || inputText != lastPublishedMqttText) {
     if (mqttClient.publish(mqttStateTopic().c_str(), inputText.c_str(), true)) {
       lastPublishedMqttText = inputText;
@@ -221,12 +186,8 @@ void mqttLoop() {
   if (!mqttClient.connected()) {
     unsigned long now = millis();
     if (now - lastMqttReconnectAttempt > 5000) {
-      //Timestamp taken AFTER mqttReconnect() returns, not before (found 2026-09-10,
-      //CODE_REVIEW_V4.md #3) - that call can itself block for a few seconds (see the timeout
-      //comment on initMqtt() above), and measuring the 5s retry window from its START meant a
-      //slow-but-ultimately-failed attempt already ate most of that window before the next one was
-      //even allowed to start, retrying far more eagerly against an unresponsive broker than the
-      //nominal 5s interval intends.
+      //Timestamp taken AFTER mqttReconnect() returns, not before - that call can itself block for
+      //a few seconds, and measuring the 5s window from its START would retry far too eagerly.
       mqttReconnect();
       lastMqttReconnectAttempt = millis();
     }
