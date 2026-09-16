@@ -56,9 +56,23 @@ läuft. Firmware mit diesem Fix wurde erfolgreich auf beide Geräte deployed (sa
 kein Crash-Log-Eintrag), danach die Rollen erneut konfiguriert und der Animations-Test (siehe oben)
 erfolgreich auf der gefixten Firmware durchgeführt. Details siehe `BUGFIX_LOG.md`.
 
+**Phase 3: robustere Fehler-UX im Admin-Panel - implementiert UND live verifiziert (2026-09-16).**
+Nutzerentscheidung (per Rückfrage): nur die Fehler-UX umsetzen, NICHT die optionale automatische
+mDNS-Erkennung (Begründung im Plan selbst: mDNS-Browsing ist auf diesem Core "deutlich
+unfertiger/fragiler" als reines Ankündigen - die manuelle Kopplung bleibt bewusst bestehen).
+Der "Mehrgeräte-Verbund"-Tab im System-Modal zeigt den Status jedes konfigurierten
+Erweiterungsgeräts jetzt als farbige Zeile (grün "Erreichbar, N Units" / rot "Nicht erreichbar" /
+gelb "wird geprüft..." - dieselben `status-online-ready`/`status-offline`/`status-online-busy`-
+Klassen wie die bestehende Units-Ansicht) statt reinem Text, und aktualisiert sich automatisch alle
+15s, solange der Tab sichtbar ist (Polling startet beim Öffnen des Tabs, stoppt beim Wechsel zu
+einem anderen Tab oder beim Schließen des System-Modals - kein unnötiger Netzwerk-Traffic im
+Hintergrund). **Vom Nutzer im Browser live bestätigt.** Reine `data/index.html`-Änderung, keine
+Firmware-/Endpunkt-Änderung nötig (nutzt weiterhin das bestehende `GET /api/extension-devices`).
+
 **Noch nicht getestet** (bewusst außerhalb des heutigen Tests, siehe Phasenplan oben):
 Fail-Soft-Verhalten bei nicht erreichbarem Erweiterungsgerät (Theorie, nicht provoziert), mehrere
 gleichzeitige Erweiterungsgeräte (Nutzer hat aktuell nur Material für ein Erweiterungsgerät).
+Automatische Erkennung (mDNS) bleibt bewusst nicht umgesetzt (Nutzerentscheidung 2026-09-16).
 
 ## Kontext
 

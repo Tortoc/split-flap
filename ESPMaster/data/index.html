@@ -1731,9 +1731,11 @@
 							<p id="extensionDevicesChangeStatus"></p>
 							<p>
 								<label>Status</label>
-								<br>
-								<span id="extensionDevicesStatus" style="font-family: monospace; font-size: 0.95rem; white-space: pre-line;">wird geladen...</span>
+								<span class="note" style="display: inline; margin-left: var(--space-sm);">
+									(aktualisiert sich automatisch, solange dieser Tab geöffnet ist)
+								</span>
 							</p>
+							<div id="extensionDevicesStatus">wird geladen...</div>
 						</div>
 					</div>
 				</div>
@@ -3533,7 +3535,9 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			document.getElementById("systemTabBtnMultiDevice").classList.toggle("active", tab === "multiDevice");
 			document.getElementById("systemTabBtnHelp").classList.toggle("active", tab === "help");
 			if (tab === "multiDevice") {
-				loadExtensionDevicesStatus();
+				startExtensionDevicesPolling();
+			} else {
+				stopExtensionDevicesPolling();
 			}
 		}
 
@@ -3541,6 +3545,9 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			var modalId = adminModalIds[name];
 			if (!modalId) {
 				return;
+			}
+			if (name === "system") {
+				stopExtensionDevicesPolling();
 			}
 			document.getElementById(modalId).classList.add("hidden");
 		}
@@ -4372,10 +4379,46 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 		//Populates both the 4 host input fields and the human-readable status line, called when the
 		//Mehrgeräte-Verbund tab is opened (setSystemModalTab()) - GET /api/extension-devices returns
 		//an empty array harmlessly on a device that has none configured yet.
+		//Renders one row per configured extension, reusing the same .unit-row/.unit-label/
+		//.unit-status classes and status-online-ready/status-online-busy/status-offline color
+		//convention as the Units tab's formatStatus() - so an unreachable extension reads as
+		//unmistakably red at a glance instead of being one line of plain text among many.
+		function renderExtensionDevicesStatus(devices) {
+			var statusEl = document.getElementById("extensionDevicesStatus");
+			statusEl.innerHTML = "";
+			if (devices.length === 0) {
+				statusEl.innerHTML = '<p class="note">Keine Erweiterungsgeräte konfiguriert.</p>';
+				return;
+			}
+			devices.forEach(function (d) {
+				var row = document.createElement("div");
+				row.className = "unit-row";
+
+				var labelElement = document.createElement("div");
+				labelElement.className = "unit-label";
+				labelElement.innerText = d.host;
+
+				var statusElement = document.createElement("div");
+				statusElement.className = "unit-status";
+				var age = d.lastCheckedSecAgo < 0 ? "noch nicht geprüft" : ("zuletzt geprüft vor " + d.lastCheckedSecAgo + "s");
+				if (d.lastCheckedSecAgo < 0) {
+					statusElement.innerHTML = '<span class="status-online-busy">wird geprüft...</span>';
+				} else if (d.reachable) {
+					statusElement.innerHTML = '<span class="status-online-ready">Erreichbar, ' + d.unitsAmount + ' Units</span> <span class="note">(' + age + ')</span>';
+				} else {
+					statusElement.innerHTML = '<span class="status-offline">Nicht erreichbar</span> <span class="note">(' + age + ')</span>';
+				}
+
+				row.appendChild(labelElement);
+				row.appendChild(statusElement);
+				statusEl.appendChild(row);
+			});
+		}
+
 		function loadExtensionDevicesStatus() {
 			var statusEl = document.getElementById("extensionDevicesStatus");
 			if (localDevelopment) {
-				statusEl.innerText = "(keine Erweiterungsgeräte konfiguriert - simuliert)";
+				statusEl.innerHTML = '<p class="note">(keine Erweiterungsgeräte konfiguriert - simuliert)</p>';
 				return;
 			}
 
@@ -4387,23 +4430,32 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						for (var i = 0; i < 4; i++) {
 							document.getElementById("extensionHost" + i).value = devices[i] ? devices[i].host : "";
 						}
-						if (devices.length === 0) {
-							statusEl.innerText = "Keine Erweiterungsgeräte konfiguriert.";
-						} else {
-							var lines = devices.map(function (d) {
-								var age = d.lastCheckedSecAgo < 0 ? "noch nicht geprüft" : (d.lastCheckedSecAgo + "s her");
-								return d.host + ": " + (d.reachable ? ("erreichbar, " + d.unitsAmount + " Units") : "nicht erreichbar") + " (" + age + ")";
-							});
-							statusEl.innerText = lines.join("\n");
-						}
+						renderExtensionDevicesStatus(devices);
 					} catch (e) {
-						statusEl.innerText = "Fehler beim Laden.";
+						statusEl.innerHTML = '<p class="note">Fehler beim Laden.</p>';
 					}
 				}
 			};
 			xhrRequest.open("GET", "/api/extension-devices", true);
 			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send();
+		}
+
+		//Auto-refresh while the Mehrgeräte-Verbund tab is actually visible, so a health-check
+		//transition (e.g. an extension going unreachable) shows up without the admin having to
+		//close and reopen the tab. Matches this device's own EXTENSION_HEALTH_CHECK_INTERVAL_MS
+		//(15s) - polling faster would just re-show the same last-known values sooner.
+		var extensionDevicesPollTimer = null;
+		function startExtensionDevicesPolling() {
+			stopExtensionDevicesPolling();
+			loadExtensionDevicesStatus();
+			extensionDevicesPollTimer = setInterval(loadExtensionDevicesStatus, 15000);
+		}
+		function stopExtensionDevicesPolling() {
+			if (extensionDevicesPollTimer !== null) {
+				clearInterval(extensionDevicesPollTimer);
+				extensionDevicesPollTimer = null;
+			}
 		}
 
 		//Used only to refresh after a save - reuses /api/settings (same fields loadAdminSettings()
