@@ -18,12 +18,10 @@
 //letter indices (0-44), so it can never collide with a normal display request.
 #define CMD_ENTER_BOOTLOADER 255
 
-//This project's own semver for Unit.ino, reconstructed 2026-09-16 by walking this file's own
-//git history from the initial fork (feature commits = minor, bugfix commits = patch). Bump on
-//every functionally meaningful change (not pure comment/formatting cleanup). Reported to
-//ESPMaster via requestEvent()'s 3 trailing bytes, added below - see ESPMaster.ino's
-//ANSWER_SIZE_VERSION/readUnitInfo() comments for why a unit running older firmware without these
-//bytes reads back as 255/255/255 ("unknown"), not a crash.
+//This project's own semver for Unit.ino - bump on every functionally meaningful change (not pure
+//comment/formatting cleanup). Reported to ESPMaster via requestEvent()'s 3 trailing bytes, added
+//below - see ESPMaster.ino's ANSWER_SIZE_VERSION/readUnitInfo() comments for why a unit running
+//older firmware without these bytes reads back as 255/255/255 ("unknown"), not a crash.
 #define UNIT_FW_VERSION_MAJOR 2
 #define UNIT_FW_VERSION_MINOR 2
 #define UNIT_FW_VERSION_PATCH 2
@@ -54,14 +52,11 @@ const uint8_t addressPins[ADDRESS_PIN_COUNT] = {A0, A1, A2, A3, 3, 4}; //bit 0..
 #define RAMP_DOWN_MIN_FACTOR 0.7 //speed fraction (of stepperSpeed) reached on the final letter-position
 
 //Acceleration ramp tuning for stepLetters() below - mirrors RAMP_DOWN_* above but for the START of
-//a move instead of the end. Found missing 2026-09-10 while comparing against scottbez1/splitflap's
-//motor control (different hardware entirely - ESP32+Chainlink, so not portable code, just a
-//portable idea): that project ramps UP from a stop as well as down, we previously only had the
-//RAMP_DOWN half (from an earlier session). A slower start needs less initial current/torque than
-//jumping straight to full stepperSpeed - plausible (not proven) as one contributor to the
-//still-open "Unit dreht langsam" investigation (voltage-sag hypothesis, see
-//unit-slow-rotation-and-remote-reset memory). 0.6 is a slightly more conservative starting factor
-//than RAMP_DOWN_MIN_FACTOR's 0.7 - starting from a dead stop needs more torque than coasting to one.
+//a move instead of the end. A slower start needs less initial current/torque than jumping straight
+//to full stepperSpeed - plausible (not proven) as one contributor to the still-open "Unit dreht
+//langsam" investigation (voltage-sag hypothesis, see unit-slow-rotation-and-remote-reset memory).
+//0.6 is a slightly more conservative starting factor than RAMP_DOWN_MIN_FACTOR's 0.7 - starting
+//from a dead stop needs more torque than coasting to one.
 #define RAMP_UP_LETTERS 1
 #define RAMP_UP_MIN_FACTOR 0.6 //speed fraction (of stepperSpeed) used on the first letter-position
 
@@ -73,11 +68,11 @@ const uint8_t addressPins[ADDRESS_PIN_COUNT] = {A0, A1, A2, A3, 3, 4}; //bit 0..
 //Starting value, not a measured one - see the plan's own "Unsicherheiten" section.
 #define EXPECTED_HOME_SEARCH_MAX_STEPS (STEPS + STEPS / 2)
 
-//Chunk size for calibrate()'s post-marker offset move - see that call site's own comment
-//(Code_REVIEW_V5.md #05). 20 steps keeps every chunk well under a second even at the slowest
-//allowed speed (1 RPM, ~29ms/step -> ~0.6s/chunk), so currentPhaseProgress updates far more often
-//than the master's 15s stuck-detection window, while still being coarse enough not to add
-//meaningful per-chunk call overhead over the previous single stepper.step() call.
+//Chunk size for calibrate()'s post-marker offset move - see that call site's own comment. 20 steps
+//keeps every chunk well under a second even at the slowest allowed speed (1 RPM, ~29ms/step ->
+//~0.6s/chunk), so currentPhaseProgress updates far more often than the master's 15s
+//stuck-detection window, while still being coarse enough not to add meaningful per-chunk call
+//overhead over the previous single stepper.step() call.
 #define CALIBRATION_OFFSET_STEP_CHUNK 20
 
 //constants others
@@ -103,28 +98,23 @@ boolean newData = false;
 //Wire's onReceive()/onRequest() callbacks (receiveLetter()/requestEvent() below) run directly
 //inside the AVR TWI interrupt handler, with global interrupts disabled for their own duration -
 //so a variable written or read by BOTH one of those callbacks and "normal" code (setup()/loop()/
-//everything they call) needs `volatile` (found 2026-09-09, CODE_REVIEW.md #30): without it, the
-//compiler is free to cache a copy of the variable in a register across normal-code statements,
-//since it can't see the ISR-side write - normal code could then keep observing a stale value
-//indefinitely, an optimization-dependent bug that wouldn't show up in every build. `volatile`
-//alone doesn't make a multi-byte (int/uint16_t) access atomic though - normal code CAN be
-//interrupted mid-access by the ISR, unlike the ISR interrupting itself - see the ATOMIC_BLOCK
-//uses below at the specific multi-byte cross-context accesses where a torn value would actually
-//matter physically (how far the motor turns, whether a rotation is issued at all). The frequent,
-//self-correcting-next-poll ones (currentPhaseProgress, currentlyrotating, currentPhase - a stuck-
-//detection heartbeat and busy flags, not motor-movement or rotation-dispatch decisions) are left
-//as plain volatile without extra wrapping, deliberately - see BOOTLOADER_SETUP.md-style reasoning:
-//the risk here is real but narrow and non-destructive, not worth the added per-step overhead/risk
-//of wrapping the hot stepLetters()/calibrate() progress-counter loops too.
+//everything they call) needs `volatile`: without it, the compiler is free to cache a copy of the
+//variable in a register across normal-code statements, since it can't see the ISR-side write.
+//`volatile` alone doesn't make a multi-byte (int/uint16_t) access atomic though - normal code CAN
+//be interrupted mid-access by the ISR - see the ATOMIC_BLOCK uses below at the specific multi-byte
+//cross-context accesses where a torn value would actually matter physically (how far the motor
+//turns, whether a rotation is issued at all). The frequent, self-correcting-next-poll ones
+//(currentPhaseProgress, currentlyrotating, currentPhase - a stuck-detection heartbeat and busy
+//flags, not motor-movement or rotation-dispatch decisions) are left as plain volatile without
+//extra wrapping - the risk here is real but narrow and non-destructive, not worth the added
+//per-step overhead of wrapping the hot stepLetters()/calibrate() progress-counter loops too.
 volatile int displayedLetter = 0; //currently shown letter
 //Tracks whether displayedLetter is an actually-confirmed position (a calibrate() call reached the
-//marker) rather than just calibrate()'s own "give up, reset to 0" fallback on failure - found
-//2026-09-09, CODE_REVIEW_V2.md #5: previously a failed calibrate(false) inside rotateToLetter()
-//correctly aborted the CURRENT call (CODE_REVIEW.md #18's fix), but left displayedLetter at 0 with
-//nothing distinguishing "genuinely homed to 0" from "unknown, calibration never confirmed it" - the
-//NEXT call then trusted that 0 as real and could take the direct-move branch from a completely
-//wrong actual position. Set by calibrate() itself (true on success, false on its failure path) so
-//every call site is covered without needing to touch each one's own handling of the return value.
+//marker) rather than just calibrate()'s own "give up, reset to 0" fallback on failure - without
+//this, a failed calibrate(false) inside rotateToLetter() leaves displayedLetter at 0 with nothing
+//distinguishing "genuinely homed to 0" from "unknown, calibration never confirmed it", so the NEXT
+//call could trust that 0 and take the direct-move branch from a completely wrong actual position.
+//Set by calibrate() itself (true on success, false on failure) so every call site is covered.
 volatile bool positionKnown = false; //starts false: no calibration has run yet
 int desiredLetter = 0; //letter to be shown
 const char letters[] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'Ä', 'Ö', 'Ü', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', '-', '?', '!'};
@@ -136,19 +126,16 @@ bool lastInd4 = false; //store last status of phase
 float missedSteps = 0; //cummulate steps <1, to compensate via additional step when reaching >1
 volatile int currentlyrotating = 0; // 1 = drum is currently rotating, 0 = drum is standing still
 
-//Diagnostic counters, found missing 2026-09-10 while comparing against scottbez1/splitflap's
-//motor control (see the RAMP_UP_* comment above for the full context - different hardware, ported
-//idea not code). Both accumulate since the last power-cycle/reset only (like currentlyrotating and
-//friends above) - no reset command or EEPROM persistence in this first round, deliberately kept
-//simple. Neither is a hard error by itself; both are a coarse "has this unit been struggling
-//lately" signal, surfaced to ESPMaster via requestEvent() below and GET /api/units?detail=1.
+//Diagnostic counters. Both accumulate since the last power-cycle/reset only (like currentlyrotating
+//and friends above) - no reset command or EEPROM persistence, deliberately kept simple. Neither is
+//a hard error by itself; both are a coarse "has this unit been struggling lately" signal, surfaced
+//to ESPMaster via requestEvent() below and GET /api/units?detail=1.
 //
 //Incremented in stepLetters() whenever the hall sensor reads LOW (marker state) at any point
 //during a DIRECT move - a direct move (by construction) never expects to cross the home marker, so
 //any such reading is anomalous (bumped drum, slipped steps, sensor noise). stepLetters() also
 //clears positionKnown when this happens - the existing !positionKnown dispatch in loop() (see its
-//own comment, CODE_REVIEW_V3.md #4) then forces a full recalibration on the very next iteration,
-//without needing any new dispatch logic.
+//own comment) then forces a full recalibration on the very next iteration.
 volatile uint8_t unexpectedHomeTriggerCount = 0;
 
 //Incremented in calibrate()'s own success path when it took unusually many steps (more than
@@ -303,15 +290,13 @@ void loop() {
     receivedNumberSnapshot = receivedNumber;
     displayedLetterSnapshot = displayedLetter;
   }
-  //Also re-attempt whenever positionKnown is false, even if the numbers already coincide - found
-  //2026-09-10, CODE_REVIEW_V3.md #4: this comparison alone decided whether to call
-  //rotateToLetter() at all, completely independent of positionKnown (see that variable's own
-  //declaration comment) - if a failed calibration happened to leave displayedLetter equal to
-  //whatever receivedNumber already was (e.g. both 0/space), this dispatch never called
-  //rotateToLetter() again at all, so positionKnown staying false had no effect: the gate it
-  //controls lives INSIDE a function that was never even invoked. rotateToLetter() itself already
-  //handles this correctly once actually called - positionKnown==false forces its full-rotation/
-  //recalibration branch regardless of the numeric relationship between the two positions.
+  //Also re-attempt whenever positionKnown is false, even if the numbers already coincide - without
+  //this, a failed calibration that happened to leave displayedLetter equal to receivedNumber
+  //(e.g. both 0/space) would never call rotateToLetter() again, so positionKnown staying false
+  //would have no effect (the gate it controls lives INSIDE a function never invoked).
+  //rotateToLetter() itself already handles this correctly once actually called - positionKnown==
+  //false forces its full-rotation/recalibration branch regardless of the numeric relationship
+  //between the two positions.
   if (displayedLetterSnapshot != receivedNumberSnapshot || !positionKnown)
   {
     /*
@@ -347,12 +332,12 @@ int translateLettertoInt(char letterchar) {
   return -1;
 }
 
-//Approximate letter-space position of the Hall marker, given the current calibration offset -
-//found 2026-09-10, CODE_REVIEW_V4.md #6. calibrate() defines letter 0 as calOffset STEPS past the
-//marker (see its own stepper.step(offsetSnapshot) call), so the marker itself sits calOffset
-//steps BEHIND letter 0 - converting that to letter-space and wrapping into [0, AMOUNTFLAPS) gives
-//its approximate letter index. Deliberately as coarse as stepLetters()'s own plausibility check
-//below (per letter-position, not per microstep) - it only needs to be right to within about one
+//Approximate letter-space position of the Hall marker, given the current calibration offset.
+//calibrate() defines letter 0 as calOffset STEPS past the marker (see its own
+//stepper.step(offsetSnapshot) call), so the marker itself sits calOffset steps BEHIND letter 0 -
+//converting that to letter-space and wrapping into [0, AMOUNTFLAPS) gives its approximate letter
+//index. Deliberately as coarse as stepLetters()'s own plausibility check below (per
+//letter-position, not per microstep) - it only needs to be right to within about one
 //letter-position's worth of steps.
 int markerLetterIndex() {
   float stepsPerLetter = (float)STEPS / (float)AMOUNTFLAPS;
@@ -375,15 +360,13 @@ int markerLetterIndex() {
 //`startLetter` is the absolute letter index this specific move starts FROM (-1 for the
 //post-calibration full-rotation call, which always starts fresh right at letter 0, immediately
 //after calibrate() itself just left the marker behind - a move of well under one AMOUNTFLAPS from
-//there can never reach back around to it, so -1 there keeps every marker reading anomalous,
-//unchanged from before). For a "direct" move (rotateToLetter()'s other branch), it's NOT always
-//true that "once already homed, this never crosses the home marker again" (found 2026-09-10,
-//CODE_REVIEW_V4.md #6 - the previous version of this comment claimed exactly that): calOffset can
-//place the marker's own letter-space position (see markerLetterIndex() above) ANYWHERE within the
-//0..AMOUNTFLAPS-1 range, not necessarily exactly at the 0/AMOUNTFLAPS-1 boundary, so a direct move
-//that happens to span across it is a perfectly legitimate crossing, not a bumped-drum/slipped-step
-//anomaly - see the hall-sensor check below (found missing 2026-09-10, see
-//unexpectedHomeTriggerCount's own comment) for how this is now taken into account.
+//there can never reach back around to it, so -1 there keeps every marker reading anomalous). For a
+//"direct" move (rotateToLetter()'s other branch), it's NOT true that "once already homed, this
+//never crosses the home marker again": calOffset can place the marker's own letter-space position
+//(see markerLetterIndex() above) ANYWHERE within the 0..AMOUNTFLAPS-1 range, not necessarily
+//exactly at the 0/AMOUNTFLAPS-1 boundary, so a direct move that happens to span across it is a
+//perfectly legitimate crossing, not a bumped-drum/slipped-step anomaly - see the hall-sensor check
+//below (see unexpectedHomeTriggerCount's own comment) for how this is taken into account.
 void stepLetters(int letterSteps, int startLetter) {
   //Precompute the one loop iteration `i` (if any) within THIS move where the marker is
   //legitimately expected, so the check below can tell "the marker was crossed exactly where
@@ -445,21 +428,21 @@ void stepLetters(int letterSteps, int startLetter) {
     //approximation of "continuous" as the blocking Stepper library allows: only after each whole
     //letter-position's worth of microsteps (~STEPS/AMOUNTFLAPS ≈ 45), not truly during it. A very
     //brief sensor blip entirely inside one step() call could still be missed - an accepted
-    //limitation, not a claim of full per-microstep coverage (see the plan's own "Unsicherheiten").
+    //limitation, not a claim of full per-microstep coverage.
     if (digitalRead(HALLPIN) == 0) {
-      //Allow one letter-position's worth of slack around the precomputed expected crossing point
-      //(found 2026-09-10, CODE_REVIEW_V4.md #6) - this check only samples once per letter-position
-      //to begin with (see this function's own header comment), so it can't pin the crossing down
-      //to single-microstep precision, and the ramp-adjusted step size right at RAMP_UP_LETTERS/
-      //RAMP_DOWN_LETTERS boundaries isn't perfectly uniform either.
+      //Allow one letter-position's worth of slack around the precomputed expected crossing point -
+      //this check only samples once per letter-position to begin with (see this function's own
+      //header comment), so it can't pin the crossing down to single-microstep precision, and the
+      //ramp-adjusted step size right at RAMP_UP_LETTERS/RAMP_DOWN_LETTERS boundaries isn't
+      //perfectly uniform either.
       bool expectedHere = (expectedCrossingStep >= 0) && (abs(i - expectedCrossingStep) <= 1);
       if (!expectedHere) {
         //Marker seen where none should be, mid-move (see this function's own header comment for
         //why a single call never legitimately covers a full revolution, and why a crossing AT the
         //calibration offset's own expected position is not itself anomalous). Don't abort THIS
-        //move - just flag it and let the existing loop()/CODE_REVIEW_V3.md #4 dispatch self-heal
-        //via a full recalibration on the next iteration, instead of adding a new abort path to
-        //this tight timing loop.
+        //move - just flag it and let the existing loop() dispatch self-heal via a full
+        //recalibration on the next iteration, instead of adding a new abort path to this tight
+        //timing loop.
         unexpectedHomeTriggerCount++;
         positionKnown = false;
       }
@@ -502,25 +485,20 @@ void rotateToLetter(int toLetter) {
 #ifdef SERIAL_ENABLE
         Serial.println(F("full rotation incl. calibration"));
 #endif
-        //calibrate()'s return value was previously discarded entirely (found 2026-09-09,
-        //CODE_REVIEW.md #18): on failure (-1, Hall sensor/marker never found within 3*STEPS) it
-        //already stops the motor and resets displayedLetter to 0 as an honest "actual position
-        //unknown" - but this function then went on to step further FROM that unverified position
-        //and unconditionally claimed displayedLetter=toLetter anyway, as if the rotation had
-        //genuinely succeeded. Abort instead: leave displayedLetter at calibrate()'s own reset
-        //value (0) rather than lying about having reached toLetter. loop()'s existing
+        //On failure (-1, Hall sensor/marker never found within 3*STEPS), calibrate() already stops
+        //the motor and resets displayedLetter to 0 as an honest "actual position unknown" - abort
+        //here too, rather than stepping further from that unverified position and claiming
+        //displayedLetter=toLetter as if the rotation had genuinely succeeded. loop()'s existing
         //`displayedLetter != receivedNumber` retry naturally tries again on the next call.
         if (calibrate(false) == -1) {
-          //Re-stamp lastRotation HERE, not just at this function's own entry above (found
-          //2026-09-10, CODE_REVIEW_V4.md #7): the OVERHEATINGTIMEOUT cooldown is measured from
-          //lastRotation, which was set at the START of this attempt - but a failed calibrate()
-          //search can itself run for up to 3*STEPS steps (well over OVERHEATINGTIMEOUT's 2s worth
-          //of stepping), meaning the cooldown window can already be fully expired again by the
-          //time this function returns. Without this, the very next loop() iteration immediately
-          //starts another full failed search with no actual rest for the motor in between,
-          //defeating the whole point of OVERHEATINGTIMEOUT. Re-stamping restarts the cooldown from
-          //the point of FAILURE instead, guaranteeing at least one genuine OVERHEATINGTIMEOUT-long
-          //gap before the next attempt.
+          //Re-stamp lastRotation HERE, not just at this function's own entry above: the
+          //OVERHEATINGTIMEOUT cooldown is measured from lastRotation, set at the START of this
+          //attempt - but a failed calibrate() search can itself run for up to 3*STEPS steps (well
+          //over OVERHEATINGTIMEOUT's 2s worth of stepping), so the cooldown window can already be
+          //fully expired again by the time this function returns. Without this, the very next
+          //loop() iteration would immediately start another full failed search with no actual rest
+          //for the motor in between. Re-stamping restarts the cooldown from the point of FAILURE
+          //instead, guaranteeing at least one genuine OVERHEATINGTIMEOUT-long gap before the next attempt.
           lastRotation = millis();
           return;
         }
@@ -563,10 +541,8 @@ void receiveLetter(int numBytes) {
   }
 
   //Every real message from ESPMaster carries at least 2 payload bytes (letter + speed) plus the
-  //checksum. Previously only actualBytes<2 (payloadLen<1) was rejected here, which let a bare
-  //{letter, checksum} 2-byte packet through with payloadLen==1 - receiveArray[1] (the checksum
-  //byte itself) then got silently read as the speed a few lines below (found 2026-09-09,
-  //CODE_REVIEW.md #20, reproduced with such a packet).
+  //checksum. A bare {letter, checksum} 2-byte packet must be rejected here too - otherwise
+  //receiveArray[1] (the checksum byte itself) would get silently read as the speed a few lines below.
   if (actualBytes < 3) {
     return; //too short to contain a real letter+speed payload + checksum - ignore
   }
@@ -588,8 +564,7 @@ void receiveLetter(int numBytes) {
 
   //A matching checksum only proves the bytes weren't corrupted in transit, not that they're a
   //*plausible* letter position - a garbled-but-checksum-valid value outside the 45 real positions
-  //(1-in-256 chance per corrupted byte) was previously accepted and driven to as-is (found
-  //2026-09-09, CODE_REVIEW.md #20, reproduced with e.g. letter=100). Reject it the same way
+  //(1-in-256 chance per corrupted byte) must still be rejected. Reject it the same way
   //ESPMaster.ino's own translateLettertoInt() already only ever returns 0..44 (or -1).
   if (receiveArray[0] < 0 || receiveArray[0] >= AMOUNTFLAPS) {
     return;
@@ -607,7 +582,7 @@ void receiveLetter(int numBytes) {
     newCalOffset = receiveArray[2] + (receiveArray[3] << 8);
     //Same range ESPMaster.ino's own /api/units?action=offset already validates against
     //(0..STEPS-1) - without this, a garbled-but-checksum-valid offset could set calOffset far
-    //outside a real rotation's worth of steps, the same failure mode fixed in getOffset() above.
+    //outside a real rotation's worth of steps, the same failure mode getOffset() below guards against.
     if (newCalOffset < STEPS && newCalOffset != calOffset) {
       calOffset = newCalOffset;
       //Defer the actual EEPROM.put() to loop() - receiveLetter() runs inside the AVR's TWI
@@ -623,17 +598,13 @@ void requestEvent() {
   //Report busy if EITHER actually rotating right now (currentlyrotating), OR a newly-received
   //letter is still waiting to be applied - e.g. during the OVERHEATINGTIMEOUT cooldown in
   //rotateToLetter(), which returns immediately without moving anything or updating
-  //displayedLetter whenever it's called again too soon after the last rotation. Previously only
-  //currentlyrotating was checked, which stays 0 for the whole cooldown wait - the master's "is
-  //this unit ready" poll (pollDisplayJobWaitAllUnitsReady() in ESPMaster.ino) considered the unit
-  //already done before it had even started moving toward the newly-received letter, so a job
-  //could complete (and a subsequent write overwrite receivedNumber) before the pending rotation
-  //ever actually happened. Found 2026-09-09, CODE_REVIEW.md #16.
-  //Also busy while positionKnown is false - found 2026-09-10, CODE_REVIEW_V3.md #4: this report
-  //ignored positionKnown entirely, same gap as the loop() dispatch condition above it. Without
-  //this, a unit whose last calibration failed but whose displayedLetter (reset to 0 by that
-  //failure) happened to already equal receivedNumber would report itself READY despite its actual
-  //position being unconfirmed - letting the master consider the display job successfully done.
+  //displayedLetter whenever it's called again too soon after the last rotation. currentlyrotating
+  //alone stays 0 for the whole cooldown wait, which would let the master's "is this unit ready"
+  //poll (pollDisplayJobWaitAllUnitsReady() in ESPMaster.ino) consider the unit already done before
+  //it had even started moving toward the newly-received letter.
+  //Also busy while positionKnown is false - without this, a unit whose last calibration failed but
+  //whose displayedLetter (reset to 0 by that failure) happened to already equal receivedNumber
+  //would report itself READY despite its actual position being unconfirmed.
   uint8_t effectivelyBusy = (currentlyrotating != 0 || displayedLetter != receivedNumber || !positionKnown) ? 1 : 0;
   Wire.write(effectivelyBusy);
   Wire.write(lowByte(calOffset));
@@ -649,9 +620,9 @@ void requestEvent() {
   //ANSWER_SIZE_DIAG) sees these two.
   Wire.write(unexpectedHomeTriggerCount);
   Wire.write(slowHomeSearchCount);
-  //Firmware version, appended 2026-09-16 - same backwards-compatible append-only extension as the
-  //two diagnostic counters above. A master still requesting only ANSWER_SIZE/ANSWER_SIZE_LIGHT/
-  //ANSWER_SIZE_DIAG bytes simply never reads these three.
+  //Firmware version - same backwards-compatible append-only extension as the two diagnostic
+  //counters above. A master still requesting only ANSWER_SIZE/ANSWER_SIZE_LIGHT/ANSWER_SIZE_DIAG
+  //bytes simply never reads these three.
   Wire.write(UNIT_FW_VERSION_MAJOR);
   Wire.write(UNIT_FW_VERSION_MINOR);
   Wire.write(UNIT_FW_VERSION_PATCH);
@@ -680,12 +651,11 @@ int getaddress() {
 //gets magnet sensor offset from EEPROM in steps
 void getOffset() {
   EEPROM.get(eeAddress, calOffset);
-  //calOffset is uint16_t - "< 0" can never be true, this check never did anything (found
-  //2026-09-09, CODE_REVIEW.md #17). A blank/erased EEPROM (0xFFFF = 65535, e.g. after a fresh ISP
-  //chip-erase) needs an upper-bound check instead: without one, calibrate()'s
-  //stepper.step(ROTATIONDIRECTION * calOffset) runs with a bogus value far larger than one
-  //rotation's worth of steps - live-reproduced as an unintended ~3-minute spin. Same valid range
-  //ESPMaster.ino's own /api/units?action=offset already validates against (0..STEPS-1).
+  //calOffset is uint16_t, so an upper-bound check is what matters: a blank/erased EEPROM (0xFFFF =
+  //65535, e.g. after a fresh ISP chip-erase) would otherwise leave calibrate()'s
+  //stepper.step(ROTATIONDIRECTION * calOffset) running with a bogus value far larger than one
+  //rotation's worth of steps (an unintended multi-minute spin). Same valid range ESPMaster.ino's
+  //own /api/units?action=offset already validates against (0..STEPS-1).
   if (calOffset >= STEPS) {
     calOffset = 0;
   }
@@ -706,18 +676,14 @@ int calibrate(bool initialCalibration) {
   bool reachedMarker = false;
   stepper.setSpeed(stepperSpeed);
   int i = 0;
-  //Two-phase edge search (found 2026-09-09, CODE_REVIEW_V2.md #6, following on from
-  //CODE_REVIEW.md #19's i==0 special case below): that earlier fix only handled the drum already
-  //sitting inside the marker zone at the very START of calibration - it still accepted ANY LOW
-  //reading as "found" once past that one special case, without ever requiring a genuine
-  //HIGH-to-LOW entry edge. A permanently-LOW/stuck sensor, or a marker zone wider than the blind
-  //50-step jump below, was therefore accepted as a successful calibration (reproduced: sensor
-  //stuck LOW, offset 0 -> reports success after just 50 steps, having never actually seen HIGH).
-  //leavingZone tracks "we're still inside the zone we started in (or moved into) and haven't yet
-  //observed a genuine HIGH reading" - only once HIGH has actually been seen does the final `else`
-  //below get to declare the NEXT LOW a real, repeatable edge. If the sensor never goes HIGH at
-  //all, leavingZone simply never clears and the existing i > 3*STEPS cap below times this out as
-  //a failure, exactly like it already does for a sensor stuck HIGH.
+  //Two-phase edge search: accepting ANY LOW reading as "found" (without requiring a genuine
+  //HIGH-to-LOW entry edge) would let a permanently-LOW/stuck sensor, or a marker zone wider than
+  //expected, be accepted as a successful calibration. leavingZone tracks "we're still inside the
+  //zone we started in (or moved into) and haven't yet observed a genuine HIGH reading" - only once
+  //HIGH has actually been seen does the final `else` below get to declare the NEXT LOW a real,
+  //repeatable edge. If the sensor never goes HIGH at all, leavingZone simply never clears and the
+  //existing i > 3*STEPS cap below times this out as a failure, exactly like it already does for a
+  //sensor stuck HIGH.
   bool leavingZone = (digitalRead(HALLPIN) == 0);
   while (!reachedMarker) {
     currentPhaseProgress = (uint16_t)i;
@@ -751,14 +717,12 @@ int calibrate(bool initialCalibration) {
       ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         offsetSnapshot = calOffset;
       }
-      //Chunk the offset move instead of one single blocking stepper.step(offsetSnapshot) call -
-      //found via Code_REVIEW_V5.md #05: at the slowest allowed speed (1 RPM) and the largest
-      //allowed offset (STEPS-1), that single call blocks for up to ~60s with currentPhaseProgress
-      //never updating in between. ESPMaster's own stuck-detection (pollDisplayJobWaitAllUnitsReady(),
-      //15s without a progress change) then force-reboots a unit that was actually still correctly,
-      //if slowly, homing - reproduced via the installed Stepper library's own timing math (~29.44s
-      //for a 1000-step offset at 1 RPM, already over the 15s threshold). Same per-chunk progress
-      //update idea as stepLetters()'s own per-letter-position tracking, just applied here too.
+      //Chunk the offset move instead of one single blocking stepper.step(offsetSnapshot) call: at
+      //the slowest allowed speed (1 RPM) and the largest allowed offset (STEPS-1), that single call
+      //would block for up to ~60s with currentPhaseProgress never updating in between - long enough
+      //for ESPMaster's own stuck-detection (pollDisplayJobWaitAllUnitsReady(), 15s without a
+      //progress change) to force-reboot a unit that's actually still correctly, if slowly, homing.
+      //Same per-chunk progress update idea as stepLetters()'s own per-letter-position tracking.
       uint16_t offsetStepsRemaining = offsetSnapshot;
       while (offsetStepsRemaining > 0) {
         uint16_t thisChunk = offsetStepsRemaining < CALIBRATION_OFFSET_STEP_CHUNK ? offsetStepsRemaining : CALIBRATION_OFFSET_STEP_CHUNK;
