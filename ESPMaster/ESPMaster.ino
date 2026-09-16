@@ -3262,22 +3262,17 @@ void loop() {
     }
   }
 
-  //Was a single-tick block calling timezone.setLocation() directly (a blocking DNS+UDP network
-  //call) - live-reproduced as a genuine software-watchdog crash under real network stress
-  //(2026-09-09, CODE_REVIEW.md #30 - a wdtDisable()/wdtEnable() mitigation was tried and reverted
-  //after it caused an even WORSE crash type on this ESP8266 core/SDK version).
-  //Replaced with a genuinely non-blocking implementation (checkTimezoneLookup(),
-  //ServiceAsyncTimeSyncFunctions.ino) that never blocks loop() - which means the lookup now spans
-  //multiple loop() ticks instead of finishing within the one tick that takes the request out of
-  //pendingTimezoneSlot, so the deferred request has to be held across that whole span instead of
-  //just this one block (timezoneLookupDeferredRequest/_Generation, declared near
-  //pendingTimezoneSlot). checkTimezoneLookup() itself already ran earlier this loop() tick (near
-  //the top, where events() used to be) - by the time control reaches here, tzLookupDone may
-  //already be true for the SAME tick a lookup finishes on.
+  //A direct timezone.setLocation() call (blocking DNS+UDP) could trip the software watchdog under
+  //real network stress, so this uses a genuinely non-blocking implementation
+  //(checkTimezoneLookup(), ServiceAsyncTimeSyncFunctions.ino) instead - the lookup spans multiple
+  //loop() ticks, so the deferred request has to be held across that whole span (
+  //timezoneLookupDeferredRequest/_Generation, declared near pendingTimezoneSlot).
+  //checkTimezoneLookup() itself already ran earlier this loop() tick, so tzLookupDone may already
+  //be true for the SAME tick a lookup finishes on.
   if (pendingTimezoneSlot.request != nullptr && timezoneLookupDeferredRequest == nullptr && !isTimezoneLookupBusy()) {
     timezoneLookupDeferredRequest = pendingTimezoneSlot.take(timezoneLookupDeferredFlag);
     //Snapshot NOW, not re-read from the shared pendingTimezoneValue global at finish time below -
-    //see timezoneLookupDeferredValue's own comment (CODE_REVIEW_V2.md #14/Nachtrag).
+    //see timezoneLookupDeferredValue's own comment.
     timezoneLookupDeferredValue = pendingTimezoneValue;
     startTimezoneLookup(timezoneLookupDeferredValue);
   }
@@ -3293,8 +3288,7 @@ void loop() {
       writeFile(LittleFS, timezonePath, timezoneSetting.c_str());
       SerialPrintln(F("Timezone changed to: ") + timezoneSetting);
       //The active rule is now confirmed resolved regardless of how the original boot attempt
-      //went - stops a still-pending boot-retry (CODE_REVIEW_V3.md #12) from redundantly
-      //re-resolving a value that's already correct (harmless either way, just unnecessary).
+      //went - stops a still-pending boot-retry from redundantly re-resolving an already-correct value.
       bootTimezoneRuleResolved = true;
       checkBootSnapshotFreshness(); //see its own comment (ESPMaster.ino) - re-sync right after this confirmed change, not just on the periodic 30s check
     } else {
@@ -3310,11 +3304,10 @@ void loop() {
     }
   }
 
-  //Consumes the boot-time (or a retry of it) lookup's own result exactly once - see
-  //bootTimezoneRuleResolved's own comment (CODE_REVIEW_V3.md #12). Only reacts to a completion
-  //that has NO associated HTTP request (timezoneLookupDeferredRequest == nullptr) - an explicit
-  //POST /api/timezone's own outcome is fully handled by the block directly above and must never
-  //be reinterpreted as a boot/retry result here.
+  //Consumes the boot-time (or a retry of it) lookup's own result exactly once. Only reacts to a
+  //completion that has NO associated HTTP request (timezoneLookupDeferredRequest == nullptr) - an
+  //explicit POST /api/timezone's own outcome is fully handled by the block directly above and
+  //must never be reinterpreted as a boot/retry result here.
   if (bootTimezoneLookupPending && timezoneLookupDeferredRequest == nullptr && tzLookupDone) {
     bootTimezoneLookupPending = false;
     if (tzLookupResult) {
@@ -3472,9 +3465,9 @@ void loop() {
     otaPendingPhase = OTA_PHASE_NONE;
 
   } else if (otaPendingPhase == OTA_PHASE_WRITE) {
-    //No otaChunkRejected check needed here (removed, CODE_REVIEW_V4.md #1) - otaPendingPhase only
-    //ever transitions to OTA_PHASE_WRITE from the /api/firmware-chunk outer handler above, which by
-    //now only does so once it has confirmed THIS request was the buffer's sole, still-current owner.
+    //otaPendingPhase only ever transitions to OTA_PHASE_WRITE from the /api/firmware-chunk outer
+    //handler above, which only does so once it has confirmed THIS request was the buffer's sole,
+    //still-current owner.
     bool ok = (Update.write(otaChunkBuffer, otaChunkLen) == otaChunkLen);
     if (!ok) {
       SerialPrintln(F("Firmware upload: chunk write failed"));
@@ -3499,21 +3492,17 @@ void loop() {
     //Verify every declared byte actually arrived before accepting this as a complete update -
     //Update.end(true)'s evenIfRemaining=true deliberately skips the library's own isFinished()
     //check (see Updater.cpp), which alone would let /api/firmware-finish activate a truncated
-    //image if called early (found 2026-09-09, CODE_REVIEW.md #2). evenIfRemaining still has to
-    //stay true for the real end() call below, though - Update.begin() rounds its internal target
-    //size UP to the next flash sector, always larger than the exact byte count actually
-    //transferred, so the library's own isFinished() would never be satisfied even for a genuinely
-    //complete, correctly-sized upload.
+    //image if called early. evenIfRemaining still has to stay true for the real end() call below,
+    //though - Update.begin() rounds its internal target size UP to the next flash sector, always
+    //larger than the exact byte count actually transferred, so isFinished() would never be
+    //satisfied even for a genuinely complete, correctly-sized upload.
     //
-    //Deliberately otaBytesWritten here, NOT Update.progress(): live-tested 2026-09-09 against a
-    //real firmware image (518944 bytes, not a multiple of 4096) and it reproducibly rejected every
-    //single upload as "incomplete", short by exactly the size of the final chunk. Root cause is in
-    //Updater.cpp - write() only advances progress() when a full SPI_FLASH_SEC_SIZE (4096) buffer
-    //gets flushed to flash; a trailing partial sector stays in Updater's internal _buffer and is
-    //only flushed inside end(), i.e. AFTER this comparison would run. So Update.progress() legitimately
-    //under-reports by design for any image whose size isn't an exact multiple of 4096 - which is
-    //effectively every real image. otaBytesWritten instead counts bytes actually handed to (and
-    //accepted by) Update.write() call-by-call, independent of Updater's internal flush timing.
+    //Deliberately otaBytesWritten here, NOT Update.progress(): Updater.cpp's write() only advances
+    //progress() when a full SPI_FLASH_SEC_SIZE (4096) buffer gets flushed to flash; a trailing
+    //partial sector stays in Updater's internal _buffer and is only flushed inside end() - so
+    //Update.progress() legitimately under-reports for any image whose size isn't an exact
+    //multiple of 4096 (effectively every real image). otaBytesWritten instead counts bytes
+    //actually handed to (and accepted by) Update.write() call-by-call.
     size_t received = otaBytesWritten;
     bool sizeMatches = (received == otaBeginSize);
     bool ok = false;
@@ -3557,15 +3546,13 @@ void loop() {
   // Separate from the block above on purpose: the flash-side result and the deferred request can
   // become ready in either order.
   //
-  // Gated on otaResultReady ALONE now, not "otaResultReady && pendingFirmwareUploadSlot.request !=
-  // nullptr" (found 2026-09-10, CODE_REVIEW_V4.md #13): /api/firmware-finish's client can disconnect
-  // right after the request is accepted but before this loop() tick runs - PendingRequestSlot's own
-  // onDisconnect callback (see its accept() comment) already nulls the slot's request pointer at
-  // that point, which used to skip this WHOLE block, reboot-flagging included, even though
-  // Update.end() had already genuinely succeeded and the new firmware was already active. Whether
-  // to actually SEND the HTTP response legitimately depends on a request still being there to send
-  // it to - whether to flag the reboot must not, since the flash write itself doesn't care whether
-  // anyone is still listening for its result.
+  // Gated on otaResultReady ALONE, not also on pendingFirmwareUploadSlot.request != nullptr:
+  // /api/firmware-finish's client can disconnect right after the request is accepted but before
+  // this loop() tick runs (PendingRequestSlot's own onDisconnect callback already nulls the
+  // slot's request pointer at that point) - reboot-flagging must still happen even then, since the
+  // flash write itself doesn't care whether anyone is still listening for its result. Whether to
+  // actually SEND the HTTP response is the only thing that legitimately depends on the request
+  // still being there.
   if (otaResultReady) {
     if (otaResultSuccess && otaCompletedPhase == OTA_PHASE_FINISH) {
       SerialPrintln(F("Firmware update successful, rebooting..."));
@@ -3601,12 +3588,11 @@ void loop() {
     //Always runs to completion regardless of whether the client is still listening - see the
     //comment on the onDisconnect handler for /unit-firmware-push above.
     bool success = pushFirmwareToUnit(unitIndex, resultJson);
-    //Invalidate the display cache unconditionally, not just on success - found 2026-09-10,
-    //CODE_REVIEW_V3.md #10: pushFirmwareToUnit()'s very first step (requestUnitEnterBootloader())
-    //already interrupts the unit's running app and reboots it into the bootloader regardless of
-    //whether the push that follows ultimately succeeds - the unit's actual physical position may
-    //no longer match whatever the cache still believes, either way. Same reasoning as
-    //forceUnitRecoveryReset()'s identical fix (ServiceI2CRecoveryFunctions.ino).
+    //Invalidate the display cache unconditionally, not just on success - pushFirmwareToUnit()'s
+    //very first step (requestUnitEnterBootloader()) already interrupts the unit's running app and
+    //reboots it into the bootloader regardless of whether the push that follows ultimately
+    //succeeds, so the unit's actual physical position may no longer match the cache either way.
+    //Same reasoning as forceUnitRecoveryReset()'s identical fix (ServiceI2CRecoveryFunctions.ino).
     displayRenderGeneration++;
 
     if (PendingRequestSlot::stillConnected(disconnected)) {
@@ -3624,13 +3610,12 @@ void loop() {
     doc["unitIndex"] = unitIndex;
 
     //Same structural-collision guard as pushFirmwareToUnit() - see its comment
-    //(ServiceUnitFirmwareFunctions.ino, CODE_REVIEW_V2.md #16). Corrected 2026-09-12
-    //(Code_REVIEW_V5.md #03/#04): this probe is NOT actually read-only - requestUnitEnterBootloader()
-    //below genuinely reboots whatever answers at this address, and twibootReadChipInfo() itself is
-    //a 4-byte WRITE (register-pointer + address bytes) before its read, not a pure read either. A
-    //colliding address is a real hazard here, not just "silently-wrong garbage" - also checked
-    //against the separate, fixed RTC collision (isReservedI2CAddress(), ESPMaster.ino), independent
-    //of unitsAmount.
+    //(ServiceUnitFirmwareFunctions.ino). This probe is NOT actually read-only:
+    //requestUnitEnterBootloader() below genuinely reboots whatever answers at this address, and
+    //twibootReadChipInfo() itself is a 4-byte WRITE (register-pointer + address bytes) before its
+    //read. A colliding address is a real hazard here, not just "silently-wrong garbage" - also
+    //checked against the separate, fixed RTC collision (isReservedI2CAddress()), independent of
+    //unitsAmount.
     bool collisionRisk = (expectedBootAddress < unitsAmount) || isReservedI2CAddress(expectedBootAddress);
 
     if (collisionRisk) {
