@@ -4382,7 +4382,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				if (this.readyState == 4) {
 					if (this.status == 200) {
 						statusEl.innerHTML = '<span class="status-online-ready">Erweiterungsgeräte gespeichert.</span>';
-						loadExtensionDevicesStatus();
+						loadExtensionDevicesStatus(true); //just saved - inputs should reflect the new canonical value
 					} else if (this.status == 401) {
 						clearAdminPassword();
 						statusEl.innerHTML = '<span class="status-offline">Falsches Administrator-Passwort.</span>';
@@ -4439,7 +4439,11 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			});
 		}
 
-		function loadExtensionDevicesStatus() {
+		//populateInputs: also (re-)fill the 4 editable host input fields from the server response -
+		//only true for an initial/explicit load. The 15s background poll below passes false, so it
+		//can't clobber an unsaved edit sitting in one of those fields with the still-old saved value
+		//(CODE_REVIEW_V6.md #7) - it only ever refreshes the read-only status line.
+		function loadExtensionDevicesStatus(populateInputs) {
 			var statusEl = document.getElementById("extensionDevicesStatus");
 			if (localDevelopment) {
 				statusEl.innerHTML = '<p class="note">(keine Erweiterungsgeräte konfiguriert - simuliert)</p>';
@@ -4451,8 +4455,10 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				if (this.readyState == 4 && this.status == 200) {
 					try {
 						var devices = JSON.parse(this.responseText);
-						for (var i = 0; i < 4; i++) {
-							document.getElementById("extensionHost" + i).value = devices[i] ? devices[i].host : "";
+						if (populateInputs) {
+							for (var i = 0; i < 4; i++) {
+								document.getElementById("extensionHost" + i).value = devices[i] ? devices[i].host : "";
+							}
 						}
 						renderExtensionDevicesStatus(devices);
 					} catch (e) {
@@ -4472,8 +4478,8 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 		var extensionDevicesPollTimer = null;
 		function startExtensionDevicesPolling() {
 			stopExtensionDevicesPolling();
-			loadExtensionDevicesStatus();
-			extensionDevicesPollTimer = setInterval(loadExtensionDevicesStatus, 15000);
+			loadExtensionDevicesStatus(true); //initial load - fill the input fields too
+			extensionDevicesPollTimer = setInterval(function () { loadExtensionDevicesStatus(false); }, 15000);
 		}
 		function stopExtensionDevicesPolling() {
 			if (extensionDevicesPollTimer !== null) {
