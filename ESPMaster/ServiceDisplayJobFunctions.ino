@@ -1,14 +1,9 @@
 //Non-blocking display-update state machine - showText() starts a job and returns immediately;
 //updateDisplayJob() does at most one I2C transfer per loop() tick.
 
-//millis() wraps back to 0 after ~49.7 days. A direct "millis() >= target"/"millis() < target"
-//comparison breaks right at that wraparound: once millis() has wrapped but target (captured
-//before the wrap) hasn't, the comparison flips its answer for a while - a pause could end
-//instantly, or a poll due just before the wrap could block for a very long time afterwards
-//(found 2026-09-09, CODE_REVIEW.md #28, derived from the code, not reproduced live - would need
-//>49 days of uptime). Casting the unsigned difference to signed gives the correct answer across
-//the wraparound too, since unsigned subtraction itself wraps consistently either way - this is
-//the standard Arduino millis()-rollover-safe comparison idiom.
+//millis() wraps back to 0 after ~49.7 days - a direct "millis() >= target" comparison breaks right
+//at that wraparound. Casting the unsigned difference to signed gives the correct answer across
+//the wraparound too - the standard Arduino millis()-rollover-safe comparison idiom.
 static inline bool millisReached(unsigned long target) {
   return (long)(millis() - target) >= 0;
 }
@@ -44,46 +39,30 @@ struct DisplayJob {
   unsigned long finalPauseMs = 0;
   unsigned long pauseUntil = 0;
   String alignmentOverride = ""; //"" = use the global default alignment, see showText()
-  //Set by DISPLAY_JOB_WRITE_LINE to whatever effective alignment ("left"/"center"/"right") it
-  //actually just used - finishDisplayJob() records THIS into lastWrittenAlignment, not a fresh
-  //re-computation from alignmentOverride/the global alignment, since the global one could have
-  //changed again while this job was still running (found 2026-09-09, CODE_REVIEW.md #14: re-
-  //deriving it at completion time would silently attribute the job's LAST rendered line to
-  //whatever alignment happens to be current NOW, not what was actually sent to the units).
+  //Set by DISPLAY_JOB_WRITE_LINE to whatever effective alignment it actually just used -
+  //finishDisplayJob() records THIS into lastWrittenAlignment, not a fresh re-computation, since
+  //the global alignment could have changed again while this job was still running.
   String lastUsedEffectiveAlignment = "";
   //Set by DISPLAY_JOB_WRITE_LINE to whatever displayRenderGeneration actually WAS at the moment
-  //that line was sent - finishDisplayJob() records THIS into lastRenderedGeneration, not a fresh
-  //re-read of the (possibly-since-bumped) global at completion time (found 2026-09-09,
-  //CODE_REVIEW_V2.md #7: re-reading it at finish would silently credit a render for a generation
-  //bump that happened AFTER the last line was actually written but BEFORE the job finished - e.g.
-  //a rescan during a long final-pause hold - masking exactly the desync CODE_REVIEW.md #14's
-  //generation counter exists to catch, since the next showText() call for the same text+alignment
-  //would then see lastRenderedGeneration already matching and skip the redraw it should trigger).
-  //Defaults to the generation at job START (set in startDisplayJob()) as a sane fallback for the
-  //DISPLAY_JOB_DEBUG_PAUSE path, which never runs DISPLAY_JOB_WRITE_LINE at all.
+  //that line was sent, not a fresh re-read of the (possibly-since-bumped) global at completion
+  //time - re-reading it would silently credit a render for a generation bump that happened AFTER
+  //the last line was written but BEFORE the job finished.
   unsigned long lastUsedRenderGeneration = 0;
-  //Set true by DISPLAY_JOB_WRITE_LINE if any unit's I2C write failed (any line, not just the
-  //last) - finishDisplayJob() uses this to force a retry on the very next showText() call for
-  //the same text, even though the job otherwise completed and nothing else about the cache
-  //changed. See CODE_REVIEW.md #15.
+  //Set true by DISPLAY_JOB_WRITE_LINE if any unit's I2C write failed - finishDisplayJob() uses
+  //this to force a retry on the very next showText() call for the same text.
   bool hadWriteFailure = false;
 
-  //Animation (staggered per-unit start) support, found 2026-09-10 on user request - see
-  //computeUnitAnimationDelayMs()'s own comment for the delay formulas.
+  //Animation (staggered per-unit start) support - see computeUnitAnimationDelayMs()'s own comment
+  //for the delay formulas.
   //
   //animationModeOverride/animationStaggerMsOverride: what the CALLER asked for (""/-1 = "no
-  //override, use the global setting") - set once in startDisplayJob(), same as
-  //alignmentOverride above. Only Rotation ever passes a non-default value here (found 2026-09-10:
-  //"Animation pro Rotation-Item" - see the showText()/startDisplayJob() overloads' own comments).
+  //override, use the global setting") - set once in startDisplayJob(). Only Rotation ever passes
+  //a non-default value here.
   String animationModeOverride = "";
   int animationStaggerMsOverride = -1;
   //animationModeValue/animationStaggerMsValue: the RESOLVED values actually in effect for the
-  //line currently being written (override if one was given, else the global setting) - resolved
-  //fresh in DISPLAY_JOB_WRITE_LINE, not in startDisplayJob(), because startDisplayJob() alone
-  //can't tell "caller explicitly wants the global default" apart from "caller wants whatever the
-  //global default happens to be BY THE TIME this line actually renders" for the no-override case;
-  //resolving at write time keeps that always current, same spirit as flapSpeedValue/
-  //lastUsedEffectiveAlignment being captured at the point of use elsewhere in this struct.
+  //line currently being written - resolved fresh in DISPLAY_JOB_WRITE_LINE, not startDisplayJob(),
+  //so a no-override job always uses whatever the global default is AT RENDER TIME.
   String animationModeValue = "simultaneous";
   unsigned long animationStaggerMsValue = 0;
   //The aligned line currently being written - was a local variable in DISPLAY_JOB_WRITE_LINE
@@ -99,39 +78,22 @@ struct DisplayJob {
   uint64_t unitsWrittenMask = 0;
 
   //Sub-state for the "wait for all units ready" phase - sweeps every still-busy unit once per
-  //poll tick, rather than fully resolving one unit's OWN busy status before ever looking at the
-  //next (found 2026-09-11, user-reported live: ~5 units still mid-homing after boot took ~25s to
-  //clear the old sequential-per-unit design, even though each individual unit only needed a few
-  //more seconds - waiting them out one at a time ADDED their remaining times up instead of
-  //overlapping them, since a later unit's own homing keeps progressing in parallel on its own AVR
-  //the whole time this code is only watching an earlier one; see pollDisplayJobWaitAllUnitsReady()'s
-  //own comment for why a one-unit-per-tick round-robin, tried first, didn't actually fix this
-  //either). Same overall I2C poll RATE as before (one sweep per ~1s) and the same 90s max-wait/15s
-  //stuck-timeout safety nets, just applied per-unit via the arrays below instead of to a single
-  //shared cursor - total wait is now bounded by whichever unit takes longest, not their sum.
+  //poll tick, rather than fully resolving one unit's OWN busy status before looking at the next
+  //(waiting them out one at a time ADDED their remaining times instead of overlapping them, since
+  //a later unit's own homing keeps progressing in parallel the whole time this code watches an
+  //earlier one). Same 90s max-wait/15s stuck-timeout safety nets as before, applied per-unit.
   uint64_t waitUnitsReadyMask = 0; //bit i set once unit i is confirmed ready, sleeping, or given up on
   unsigned long waitPhaseStartedAt = 0; //anchors the shared 90s overall ceiling
   unsigned long waitNextPollAt = 0; //next tick allowed to do another sweep
   //Counts sweeps since resetDisplayJobWaitSubstate() - used to only fetch phase/progress (the
   //heavy 6-byte read) every Nth sweep instead of every sweep, see PHASE_READ_EVERY_N_POLLS below.
   unsigned long waitPollCount = 0;
-  //Per-unit stuck-detection state, sized to the structural max (64 units) -
-  //each unit needs its own "have I seen it move" tracking now that they're no longer resolved
-  //one at a time. Reset for every unit on every new wait phase (resetDisplayJobWaitSubstate()).
-  //
-  //Narrowed from plain `int`/`unsigned long` (found 2026-09-12, RAM-savings review): real values
-  //are tiny (phase is one of 3 states, Unit.ino's PHASE_IDLE/CALIBRATING/ROTATING; progress tops
-  //out at 3*STEPS=6114 on the actual hardware) - but readUnitInfo()'s raw wire bytes are NOT
-  //bounds-checked before landing here, and this project has already documented, live-observed one
-  //specific garbage pattern (an idle/pulled-up I2C bus reads back as 0xFF per byte - see
-  //readUnitInfo()'s 7-arg overload comment) that would decode to phase=255/progress=65535.
-  //pollDisplayJobWaitAllUnitsReady() validates both against UNIT_PHASE_MAX/UNIT_PROGRESS_MAX
-  //BEFORE ever storing into these narrower arrays - without that check, a persistent garbage
-  //reading of 65535 could never be faithfully stored in a uint16_t (it would silently collide with
-  //whatever "no real sample yet" sentinel occupies that same bit pattern) and would keep comparing
-  //as "changed" forever, permanently defeating the stuck-timeout/forceUnitRecoveryReset() safety
-  //net below instead of tripping it - so the array types alone are not the fix, the validation at
-  //the write site is.
+  //Per-unit stuck-detection state, sized to the structural max (64 units). Narrowed from plain
+  //`int`/`unsigned long` since real values are tiny, but readUnitInfo()'s raw wire bytes are NOT
+  //bounds-checked before landing here (an idle/pulled-up I2C bus reads back as 0xFF per byte,
+  //decoding to phase=255/progress=65535) - pollDisplayJobWaitAllUnitsReady() validates both
+  //against UNIT_PHASE_MAX/UNIT_PROGRESS_MAX before storing, or a persistent garbage reading could
+  //never be faithfully stored in a uint16_t and would keep comparing as "changed" forever.
   int8_t waitLastPhase[UNITS_AMOUNT_MAX];    //-1 = no sample yet; else 0..UNIT_PHASE_MAX
   int16_t waitLastProgress[UNITS_AMOUNT_MAX]; //-1 = no sample yet; else 0..UNIT_PROGRESS_MAX
   unsigned long waitLastProgressAt[UNITS_AMOUNT_MAX]; //already the platform's native word size - no narrowing available
@@ -157,13 +119,11 @@ void resetDisplayJobWaitSubstate() {
 }
 
 //How long unit `unitIndex` (of `unitsAmount` total) should wait, relative to the line's own start,
-//before DISPLAY_JOB_WRITE_LINE(_WAIT_STAGGER) writes it - found 2026-09-10 on user request
-//("Animationen"). `edgeDist` is each unit's distance from whichever physical edge (left or right)
-//is nearer - for unitsAmount=10 that's 0,1,2,3,4,4,3,2,1,0, which already pairs up symmetric units
-//(0&9, 1&8, ...) for outside-in/inside-out with no special-casing needed beyond this one formula.
-//simultaneous (the default) and staggerMs==0 both collapse to "every unit due at 0" - see the
-//DISPLAY_JOB_WRITE_LINE_WAIT_STAGGER state's own comment for why that matters (no new tick, no
-//behavior change for the existing default).
+//before DISPLAY_JOB_WRITE_LINE(_WAIT_STAGGER) writes it. `edgeDist` is each unit's distance from
+//whichever physical edge is nearer - for unitsAmount=10 that's 0,1,2,3,4,4,3,2,1,0, which already
+//pairs up symmetric units for outside-in/inside-out with no special-casing needed.
+//simultaneous/staggerMs==0 both collapse to "every unit due at 0" - no behavior change from before
+//this feature existed.
 unsigned long computeUnitAnimationDelayMs(int unitIndex, int unitsAmount, String animationMode, unsigned long staggerMs) {
   if (staggerMs == 0 || unitsAmount <= 1) {
     return 0;
@@ -189,21 +149,12 @@ unsigned long computeUnitAnimationDelayMs(int unitIndex, int unitsAmount, String
 }
 
 //Whether a message needs more lines than MAX_DISPLAY_LINES to display (the same check
-//startDisplayJob() below does internally before ever touching displayJob state) - exposed
-//separately so callers can validate renderability UP FRONT, at acceptance time, rather than only
-//discovering it when the message is actually due/pushed (found 2026-09-09, CODE_REVIEW_V2.md #10:
-//a message that passes the 500-char API limit but is split into more than 50 lines by explicit
-//line breaks is a PERMANENT failure - unlike a busy display, retrying it later never helps, so
-//accepting it at all just defers an inevitable, silent failure to a worse moment - see
-//checkScheduledMessages() and the /api/text handler for the two places this matters).
+//startDisplayJob() does internally) - exposed separately so callers can validate renderability UP
+//FRONT, at acceptance time, since this is a PERMANENT failure that retrying later never fixes.
 //
-//Normalizes umlauts FIRST, same as showText() does before it ever reaches startDisplayJob() -
-//found 2026-09-10, CODE_REVIEW_V3.md #11: every call site here runs on the RAW, not-yet-normalized
-//message (this is checked before showText() ever runs), but a 2-byte UTF-8 umlaut sequence
-//(ä/ö/ü/...) collapses to a single 1-byte placeholder once normalized - counting the raw bytes
-//instead double-counts every umlaut for line-wrapping purposes, rejecting messages that would
-//actually have fit once actually rendered (reproduced: 250x 'ä' counted as 56 lines raw vs. 28
-//lines normalized, at a 50-line limit - accepted once normalized, wrongly rejected before).
+//Normalizes umlauts FIRST, same as showText() does before it ever reaches startDisplayJob() - a
+//2-byte UTF-8 umlaut sequence collapses to a single 1-byte placeholder once normalized, so
+//counting the raw bytes instead double-counts every umlaut for line-wrapping purposes.
 bool isMessageTooLongToRender(String message) {
   return processSentenceToLines(normalizeUmlautsForDisplay(message), combinedUnitsAmount()).size() > DisplayJob::MAX_DISPLAY_LINES;
 }
@@ -226,13 +177,9 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   //of a scope like this one, only its individual String elements.
   LList<String> parsedLines = processSentenceToLines(message, combinedUnitsAmount());
   //MAX_DISPLAY_LINES (50) was sized for "500 chars fits comfortably" assuming a fairly large
-  //unitsAmount - with fewer units (or many explicit line breaks packed into the 500-char budget),
-  //a fully within-limits message can genuinely need more lines than that. Previously silently
-  //truncated to the first 50 lines while still setting originalMessage (and so lastWrittenText)
-  //to the FULL text, as if all of it had actually been shown (found 2026-09-09, CODE_REVIEW.md
-  //#23). Reject clearly instead of silently dropping the tail - matches the same "false = really
-  //not accepted" contract showText() callers already rely on since CODE_REVIEW.md #10, rather
-  //than the bigger, riskier redesign of streaming lines incrementally without a full list.
+  //unitsAmount - with fewer units (or many explicit line breaks), a within-limits message can
+  //genuinely need more lines than that. Reject clearly instead of silently truncating the tail
+  //while still claiming the full text was shown.
   if (parsedLines.size() > DisplayJob::MAX_DISPLAY_LINES) {
     SerialPrintln(F("Message needs more lines than MAX_DISPLAY_LINES - refusing rather than silently truncating"));
     return false;
@@ -249,13 +196,12 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   displayJob.finalPauseMs = finalPauseMs;
   displayJob.alignmentOverride = alignmentOverride;
   //Just stored here, not resolved against the global settings yet - see animationModeOverride's
-  //own comment (this struct's field declarations) for why that resolution happens later, in
-  //DISPLAY_JOB_WRITE_LINE, not here.
+  //own comment for why that resolution happens later, in DISPLAY_JOB_WRITE_LINE.
   displayJob.animationModeOverride = animationModeOverride;
   displayJob.animationStaggerMsOverride = animationStaggerMsOverride;
-  displayJob.lastUsedEffectiveAlignment = ""; //defensive reset - see the field's own comment
-  displayJob.lastUsedRenderGeneration = displayRenderGeneration; //fallback for DEBUG_PAUSE - see the field's own comment
-  displayJob.hadWriteFailure = false; //reset once per job, not per line - see the field's own comment
+  displayJob.lastUsedEffectiveAlignment = ""; //defensive reset
+  displayJob.lastUsedRenderGeneration = displayRenderGeneration; //fallback for DEBUG_PAUSE
+  displayJob.hadWriteFailure = false; //reset once per job, not per line
 
   SerialPrintln(displayJob.isMultiLine ? String(F("Showing a split down message")) : (F("Showing a simple message: ") + message));
 
@@ -274,29 +220,18 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
 //on (ready, or given up on via forceUnitRecoveryReset()).
 //
 //Checks every still-busy unit in one sweep per poll tick, instead of fully resolving one before
-//ever looking at the next (found 2026-09-11, see DisplayJob's own comment on the fields this uses
-//for the full reasoning/repro). The original per-unit-sequential design's own "one I2C read per
-//call" pacing turned out to NOT be what actually bounded its total wait time (a first attempt at
-//this fix that round-robinned one unit per call, keeping that same pacing, was verified - via a
-//standalone simulation of both designs against the same scenarios, not checked in - to often be
-//SLOWER than the original design, not faster: checking only one of several still-busy units per
-//tick means the others' own readiness isn't discovered until the rotation comes back around to
-//them, even though they may have already finished in real time on their own independent AVRs).
-//Sweeping the whole not-yet-ready set every tick instead converges in exactly max(each unit's own
-//remaining time) - the true theoretical best - confirmed against the same simulation. unitsAmount
-//is small in practice (10 today, structurally capped at 64) and each read is a handful of I2C
-//bytes, so a full sweep is not a meaningful per-tick cost.
+//looking at the next - sweeping the whole not-yet-ready set every tick converges in exactly
+//max(each unit's own remaining time), the theoretical best, since a later unit's own homing keeps
+//progressing in parallel on its own AVR the whole time this code watches an earlier one.
 //
-//Only fetches the heavy 6-byte read every Nth poll (now: every Nth SWEEP), light 3-byte
-//otherwise - reduces I2C interrupt load on the ATmega328p during calibration.
+//Only fetches the heavy 6-byte read every Nth poll, light 3-byte otherwise - reduces I2C
+//interrupt load on the ATmega328p during calibration.
 const int PHASE_READ_EVERY_N_POLLS = 3; //heavy 6-byte read roughly every 3s instead of every 1s
 
 //Plausibility bounds for the raw phase/progress bytes read over I2C, checked before they're
-//narrowed into DisplayJob's uint8_t/int16_t arrays (see that struct's own comment for why this
-//check - not just the narrower types - is the actual fix). PHASE_MAX matches Unit.ino's highest
+//narrowed into DisplayJob's uint8_t/int16_t arrays. PHASE_MAX matches Unit.ino's highest
 //currentPhase constant (PHASE_ROTATING=2); PROGRESS_MAX is a generous ceiling well above the real
-//worst case (Unit.ino's own hard-failure cap is 3*STEPS=6114 with STEPS=2038) but comfortably
-//below the known-bad 65535 "idle bus" reading and int16_t's range.
+//worst case but comfortably below the known-bad 65535 "idle bus" reading.
 const int UNIT_PHASE_MAX = 2;
 const int UNIT_PROGRESS_MAX = 20000;
 
@@ -340,11 +275,9 @@ bool pollDisplayJobWaitAllUnitsReady() {
       unitDone = true; //0 = ready, -1 = sleeping - either way, nothing to wait for
     } else if (ok) {
       if (wantPhaseRead) {
-        //Reject implausible readings (see UNIT_PHASE_MAX/UNIT_PROGRESS_MAX's own comment) before
-        //they ever reach the narrowed waitLastPhase/waitLastProgress arrays - treated the same as
-        //a failed read below (not stored, not compared, timestamp untouched), so a unit stuck
-        //returning garbage still trips the stuck-timeout instead of the comparison silently never
-        //matching again.
+        //Reject implausible readings before they ever reach the narrowed waitLastPhase/
+        //waitLastProgress arrays - treated the same as a failed read (not stored, timestamp
+        //untouched), so a unit stuck returning garbage still trips the stuck-timeout.
         bool phaseReadingPlausible = phase >= 0 && phase <= UNIT_PHASE_MAX &&
           progress >= 0 && progress <= UNIT_PROGRESS_MAX;
         if (!phaseReadingPlausible) {
@@ -391,37 +324,24 @@ bool pollDisplayJobWaitAllUnitsReady() {
 
 void finishDisplayJob() {
   lastWrittenText = displayJob.originalMessage;
-  //Record the alignment this job ACTUALLY used - displayJob.lastUsedEffectiveAlignment, captured
-  //live in DISPLAY_JOB_WRITE_LINE, not re-derived here from alignmentOverride/the current global
-  //alignment, which could have changed again while this job was still running (found live during
-  //this same fix's own testing, 2026-09-09: re-deriving here would attribute the job to whatever
-  //alignment happens to be current NOW, not what was really sent to the units - silently masking
-  //exactly the desync this fix exists to catch). Falls back to a fresh computation only for the
-  //DISPLAY_JOB_DEBUG_PAUSE path (UNIT_CALLS_DISABLE builds), which never runs DISPLAY_JOB_WRITE_LINE
-  //at all. The generation is recorded as of THIS completion, not when the job started - if
-  //displayRenderGeneration moved on again while this job was still running, that's a real (if
-  //rare) further change this render never reflects, and leaving lastRenderedGeneration at the
-  //now-stale value correctly forces yet another redraw next time rather than wrongly appearing
-  //"already handled". See displayRenderGeneration's own comment - CODE_REVIEW.md #14.
+  //Record the alignment this job ACTUALLY used - lastUsedEffectiveAlignment, captured live in
+  //DISPLAY_JOB_WRITE_LINE, not re-derived here from the current global alignment, which could have
+  //changed again while this job was still running. Falls back to a fresh computation only for the
+  //DISPLAY_JOB_DEBUG_PAUSE path, which never runs DISPLAY_JOB_WRITE_LINE at all.
   lastWrittenAlignment = displayJob.lastUsedEffectiveAlignment != "" ? displayJob.lastUsedEffectiveAlignment :
     (displayJob.alignmentOverride != "" ? displayJob.alignmentOverride : alignment);
   lastRenderedGeneration = displayJob.lastUsedRenderGeneration;
   //If any unit's write failed partway through this job, the physical display doesn't actually
   //match lastWrittenText even though everything above just claimed it does. Bump the generation
-  //AFTER snapshotting lastRenderedGeneration (order matters - see CODE_REVIEW.md #14's identical
-  //reasoning) so the very next showText() call for this same text sees a mismatch and retries the
-  //whole thing, including the unit that failed. See CODE_REVIEW.md #15.
+  //AFTER snapshotting lastRenderedGeneration so the very next showText() call for this same text
+  //sees a mismatch and retries the whole thing.
   if (displayJob.hadWriteFailure) {
     displayRenderGeneration++;
   }
 
-  //Release any String heap buffers this job held (found 2026-09-12, RAM-savings review):
-  //originalMessage/lines[]/currentAlignedLine can grow well past the small-string-optimization
-  //threshold for a long message, and the NEXT job re-populating the same slots with SHORTER text
-  //wouldn't free that capacity on its own (String's plain "=" reuses existing capacity rather than
-  //releasing it) - move-assigning a fresh temporary does (String::move()/invalidate(), WString.cpp).
-  //Safe here: lastWrittenText already captured originalMessage above, and nothing reads displayJob's
-  //text fields again until the next startDisplayJob() call, which repopulates them from scratch.
+  //Release any String heap buffers this job held - a plain "=" assignment reuses existing
+  //capacity rather than freeing it, so the NEXT job re-populating the same slots with SHORTER
+  //text wouldn't free it on its own. Safe here: lastWrittenText already captured originalMessage.
   displayJob.originalMessage = String();
   displayJob.currentAlignedLine = String();
   for (int i = 0; i < DisplayJob::MAX_DISPLAY_LINES; i++) {
@@ -447,12 +367,10 @@ void writeDueAnimatedUnits() {
       continue; //already written for this line
     }
 
-    //combinedUnitsAmount() (Phase 2, multiple-units.md) instead of plain unitsAmount - a local
-    //unit's own index already equals its GLOBAL position in the combined line (local units always
-    //come first, offset 0 - see pushExtensionSegments()), so passing the combined total here is
-    //enough to make e.g. "outside-in" measure its edges against the FULL combined display instead
-    //of just this device's own units. A no-op for every role other than primary with reachable
-    //extensions - combinedUnitsAmount() returns plain unitsAmount otherwise.
+    //combinedUnitsAmount() instead of plain unitsAmount - a local unit's own index already equals
+    //its GLOBAL position in the combined line (local units always come first, offset 0), so this
+    //makes e.g. "outside-in" measure against the FULL combined display. A no-op for every role
+    //other than primary with reachable extensions.
     unsigned long delayMs = computeUnitAnimationDelayMs(unitIndex, combinedUnitsAmount(), displayJob.animationModeValue, displayJob.animationStaggerMsValue);
     if (millis() - displayJob.lineWriteStartMillis < delayMs) {
       continue; //not due yet this tick
@@ -461,10 +379,8 @@ void writeDueAnimatedUnits() {
     char currentLetter = displayJob.currentAlignedLine[unitIndex];
     int currentLetterPosition = translateLettertoInt(currentLetter);
     if (currentLetterPosition == -1) {
-      //Unsupported character - previously skipped entirely, silently leaving whatever this
-      //unit was PREVIOUSLY showing in place with no indication anything's wrong (found
-      //2026-09-09, CODE_REVIEW.md #21 - e.g. "AB" followed by "A/" could keep showing "AB").
-      //Fall back to a defined replacement instead of doing nothing.
+      //Unsupported character - fall back to a defined replacement instead of silently leaving
+      //whatever this unit was PREVIOUSLY showing in place.
       currentLetterPosition = translateLettertoInt('?');
     }
 
@@ -477,10 +393,8 @@ void writeDueAnimatedUnits() {
 
     if (currentLetterPosition != -1) {
       if (!writeToUnit(unitIndex, currentLetterPosition, displayJob.flapSpeedValue)) {
-        //Don't retry inline here - writeToUnit() already tried a bus recovery once. Just
-        //remember it and let finishDisplayJob() force a full retry of this same text on the
-        //next showText() call, once the current (now-known-incomplete) job otherwise
-        //completes normally. See CODE_REVIEW.md #15.
+        //Don't retry inline - writeToUnit() already tried a bus recovery once. Remember it and
+        //let finishDisplayJob() force a full retry on the next showText() call.
         displayJob.hadWriteFailure = true;
       }
     }
@@ -499,39 +413,20 @@ bool allAnimatedUnitsWritten() {
 //idle. Does at most one I2C read/write per call, so a single call is always fast regardless of
 //display job state.
 void updateDisplayJob() {
-  //Quiet Hours became active mid-job (found 2026-09-09, CODE_REVIEW.md #13): previously only a
-  //NEW showText() call got blanked - an already-running multi-line job kept writing its remaining
-  //lines and moving motors regardless, and a long finalPauseMs hold (e.g. a temporary /api/text
-  //push) blocked blanking until the whole hold elapsed. Abort cleanly to IDLE here instead,
-  //checked once per tick before the state switch below - safe at every state: WRITE_LINE hasn't
-  //sent anything yet for the CURRENT line if we're here before it runs this tick, and every other
-  //state is either a pure timing wait or an already-in-flight unit rotation that ESPMaster has no
-  //way to cancel anyway (a Unit keeps rotating to its last commanded letter regardless of what
-  //ESPMaster does next - aborting here just stops issuing FURTHER commands, it never interrupts
-  //one already sent). Deliberately does NOT call finishDisplayJob() - that would mark
-  //originalMessage as "lastWrittenText" even though only part of it (or none) was actually shown.
-  //Leaving lastWrittenText untouched is not by itself enough to guarantee the very next
-  //showText("") call actually redraws, though (found 2026-09-09, CODE_REVIEW_V2.md #8): if the
-  //LAST job to actually finish (before this aborted one) had ALSO shown blank text, the cache
-  //already reads lastWrittenText=="" from that earlier completion - showText("")'s cache check
-  //would then see a coincidental match and return true without ever issuing a real write, even
-  //though the units may currently be sitting mid-way through this aborted job's real content.
+  //Quiet Hours became active mid-job: abort cleanly to IDLE rather than letting an already-running
+  //job keep writing its remaining lines. Deliberately does NOT call finishDisplayJob() - that
+  //would mark originalMessage as "lastWrittenText" even though only part of it was shown.
   //Bumping displayRenderGeneration forces a real redraw regardless of what lastWrittenText
-  //happens to already say - the same "cache no longer trustworthy" mechanism CODE_REVIEW.md #14
-  //already uses for every other case where the units' actual state can't be relied on.
+  //already says, since a coincidentally-matching earlier "" completion could otherwise make a
+  //fresh blank-out request look like a no-op.
   //
-  //originalMessage != "" is required here (bug found live during this same fix's own testing,
-  //2026-09-09): without it, the blank-out job itself - started by that very showText("") call
-  //above, its originalMessage correctly "" - would get caught by this exact same check and
-  //re-aborted before ever reaching WRITE_LINE, forever, since Quiet Hours stays active the whole
-  //time by definition. The display never actually went blank; it just silently never finished
-  //starting. Checking originalMessage lets a job that's ALREADY trying to show blank text (i.e.
-  //doing exactly what Quiet Hours wants) run to completion, and only aborts a job trying to show
-  //real content.
+  //originalMessage != "" is required here: without it, the blank-out job itself (started by
+  //showText("")) would get caught by this exact same check and re-aborted before ever reaching
+  //WRITE_LINE, forever, since Quiet Hours stays active the whole time by definition.
   if (displayJob.state != DISPLAY_JOB_IDLE && isQuietHoursActive() && displayJob.originalMessage != "") {
     SerialPrintln(F("Quiet Hours became active mid-job - aborting remaining lines"));
     displayJob.state = DISPLAY_JOB_IDLE;
-    displayRenderGeneration++; //see the comment above - CODE_REVIEW_V2.md #8
+    displayRenderGeneration++;
     return;
   }
 
@@ -552,21 +447,11 @@ void updateDisplayJob() {
       return;
 
     case DISPLAY_JOB_WRITE_LINE: {
-      //Matches the old code exactly: only pull from the split lines when there's more than one -
-      //a single line always uses originalMessage verbatim, not processSentenceToLines()'s output.
-      //
-      //REVERTED 2026-09-10 (found live during testing): a 2026-09-10 "fix" briefly changed this to
-      //use processSentenceToLines()'s trimmed/double-space-collapsed lines[0] instead, reasoning
-      //that originalMessage could otherwise be silently truncated to whatever fit. That reasoning
-      //missed the actual intended use of leading/repeated spaces on this device: they're a
-      //deliberate way to manually POSITION text (e.g. leading spaces to shift a short message
-      //right, or extra spaces between words to space things out) - collapsing/trimming them is
-      //not a bug fix, it's the regression. Leading/double spaces are meant to reach the display
-      //exactly as typed for a single-line message; only the multi-line word-wrap path needs its
-      //own whitespace normalization for line-breaking purposes, and its use of lines[] here was
-      //never changed. Any actual length overflow just gets read up to unitsAmount characters by
-      //the loop below either way - no crash, only ever a truncation, exactly as before this whole
-      //file existed.
+      //Only pull from the split lines when there's more than one - a single line always uses
+      //originalMessage verbatim, not processSentenceToLines()'s output. Leading/repeated spaces
+      //are a deliberate way to manually position text on this device - collapsing/trimming them
+      //for a single-line message would be a regression, not a fix; only the multi-line word-wrap
+      //path needs its own whitespace normalization for line-breaking purposes.
       String line = displayJob.isMultiLine ? displayJob.lines[displayJob.currentLineIndex] : displayJob.originalMessage;
       if (displayJob.isMultiLine) {
         SerialPrint(F("-- Message Line: "));
@@ -579,8 +464,8 @@ void updateDisplayJob() {
       displayJob.lastUsedEffectiveAlignment = effectiveAlignment; //see the field's own comment
       displayJob.lastUsedRenderGeneration = displayRenderGeneration; //see the field's own comment
 
-      //combinedUnitsAmount() (ServiceExtensionFunctions.ino) - own unitsAmount unless this is a
-      //primary device with reachable extensions, see multiple-units.md point 4.
+      //combinedUnitsAmount() - own unitsAmount unless this is a primary device with reachable
+      //extensions.
       int effectiveWidth = combinedUnitsAmount();
       String aligned = line;
       if (effectiveAlignment == ALIGNMENT_MODE_LEFT) {
@@ -595,14 +480,12 @@ void updateDisplayJob() {
       SerialPrint(aligned);
       SerialPrintln(F("\""));
 
-      //Staggered per-unit start ("Animationen", found 2026-09-10 on user request) - see
-      //computeUnitAnimationDelayMs()'s own comment. currentAlignedLine/lineWriteStartMillis/
-      //unitsWrittenMask are DisplayJob fields (not locals) because writing a line can now span
-      //multiple loop() ticks - see writeDueAnimatedUnits() and the WAIT_STAGGER state below.
+      //Staggered per-unit start - see computeUnitAnimationDelayMs()'s own comment.
+      //currentAlignedLine/lineWriteStartMillis/unitsWrittenMask are DisplayJob fields (not
+      //locals) because writing a line can now span multiple loop() ticks.
       //
       //Resolve the per-line override vs. the global setting HERE, not in startDisplayJob() - see
-      //animationModeOverride's own comment (this file, DisplayJob's field declarations) for why
-      //("Animation pro Rotation-Item", found 2026-09-10).
+      //animationModeOverride's own comment for why.
       displayJob.animationModeValue = displayJob.animationModeOverride != "" ? displayJob.animationModeOverride : animationMode;
       displayJob.animationStaggerMsValue = displayJob.animationStaggerMsOverride >= 0 ? (unsigned long)displayJob.animationStaggerMsOverride : animationStaggerMs;
       displayJob.currentAlignedLine = aligned;
@@ -611,8 +494,7 @@ void updateDisplayJob() {
 
       SerialPrintln(F("Unit calls are enabled. Will display message"));
       writeDueAnimatedUnits();
-      //Once per new line (not from the WAIT_STAGGER re-poll below) - Phase 1 doesn't coordinate
-      //animation timing across devices, see multiple-units.md point 5; a no-op unless this is a
+      //Once per new line, not from the WAIT_STAGGER re-poll below - a no-op unless this is a
       //primary device with reachable extensions configured.
       pushExtensionSegments();
 
