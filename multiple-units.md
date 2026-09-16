@@ -1,17 +1,30 @@
 # Mehrgeräte-Verbund (Primärgerät + Erweiterungsgerät) - Architekturplan
 
-**Status (2026-09-15): Phase 1 implementiert, kompiliert sauber, NOCH NICHT auf echter Hardware
-verifiziert** - beide Testgeräte (192.168.1.51/.195) waren zum Zeitpunkt der Umsetzung nicht
-erreichbar. Neue Dateien: `ServiceExtensionFunctions.ino` (Health-Check, Push, Empfang),
-`Classes.h`s `ExtensionDevice`-Struct. Geänderte Dateien: `ESPMaster.ino` (Rollen-Einstellung,
-Erweiterungsgeräte-Liste, neue Endpunkte `/api/device-role`, `/api/extension-devices`,
-`/api/extension-display`, `deviceRole` im Boot-Snapshot), `HelpersStringHandling.ino`
-(`centerString()`/`leftString()`/`rightString()`/`processSentenceToLines()` bekommen einen
-`width`-Parameter statt der globalen `unitsAmount`), `ServiceDisplayJobFunctions.ino` (nutzt
-`combinedUnitsAmount()` an den 5 relevanten Stellen, ruft `pushExtensionSegments()` einmal pro
-neuer Zeile), `data/index.html` (neuer "Mehrgeräte-Verbund"-Tab). Sobald mindestens ein Gerät
-läuft: Extension-Empfang isoliert testbar (Rolle setzen, `POST /api/extension-display` direkt per
-curl simulieren); für den vollen Primärgerät-Pfad werden zwei laufende Geräte gebraucht.
+**Status (2026-09-16): Phase 1 implementiert UND live auf echter Hardware verifiziert -
+END-TO-END, physisch vom Nutzer bestätigt.** Neue Dateien: `ServiceExtensionFunctions.ino`
+(Health-Check, Push, Empfang), `Classes.h`s `ExtensionDevice`-Struct. Geänderte Dateien:
+`ESPMaster.ino` (Rollen-Einstellung, Erweiterungsgeräte-Liste, neue Endpunkte
+`/api/device-role`, `/api/extension-devices`, `/api/extension-display`, `deviceRole` im
+Boot-Snapshot), `HelpersStringHandling.ino` (`centerString()`/`leftString()`/`rightString()`/
+`processSentenceToLines()` bekommen einen `width`-Parameter statt der globalen `unitsAmount`),
+`ServiceDisplayJobFunctions.ino` (nutzt `combinedUnitsAmount()` an den 5 relevanten Stellen, ruft
+`pushExtensionSegments()` einmal pro neuer Zeile), `data/index.html` (neuer
+"Mehrgeräte-Verbund"-Tab).
+
+**Live-Test (2026-09-16), zwei echte Geräte:** 192.168.1.50 (9 Units) als Primärgerät, 192.168.1.51
+(1 Unit) als Erweiterungsgerät konfiguriert. Health-Check erkannte 181 korrekt (`reachable:true,
+unitsAmount:1`) innerhalb des ersten 15s-Zyklus. Ein 10-Zeichen-Text ("ABCDEFGHIJ", exakt die
+kombinierte Breite 9+1) wurde an 195 gesendet - **vom Nutzer physisch bestätigt: 195 zeigt
+"ABCDEFGHI", 181 zeigt "J"**, exakt wie erwartet. Heap/Crash-Log auf beiden Geräten während des
+gesamten Tests unauffällig (kein Fehler im `HTTPClient`-basierten Health-Check/Push-Pfad). Damit
+ist der komplette Phase-1-Pfad (Rollen-Konfiguration, Health-Check, kombinierte Breite,
+Segment-Aufteilung, Netzwerk-Push, lokale Anzeige auf beiden Geräten) real bestätigt, nicht nur
+kompiliert.
+
+**Noch nicht getestet** (bewusst außerhalb des heutigen Tests, siehe Phasenplan oben):
+Fail-Soft-Verhalten bei nicht erreichbarem Erweiterungsgerät (Theorie, nicht provoziert), mehrere
+gleichzeitige Erweiterungsgeräte, Rotation-Modus im Verbund, Animations-Koordination über Geräte
+hinweg (Phase 2).
 
 ## Kontext
 
