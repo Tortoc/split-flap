@@ -30,6 +30,12 @@ firmware/
 
 ## Build-Konfiguration (wie diese Dateien entstanden sind)
 
+⚠️ **Immer `./compile-espmaster.sh` benutzen, nicht `arduino-cli compile` von Hand tippen.**
+Dieses Skript (in diesem Ordner) verdrahtet `:eesz=4M1M` und die `-Wl,--wrap=...`-Flags fest -
+beide wurden in der Vergangenheit schon mehrfach vergessen (zuletzt 2026-09-16), mit stundenlanger Fehlsuche in
+die falsche Richtung (WLAN-Flakiness) als Folge. Die Befehle unten sind nur zur Dokumentation,
+was das Skript intern tut - nicht zum Abtippen.
+
 ⚠️ **Das `:eesz=4M1M` ist Teil des FQBN, kein optionaler Zusatz.** Ein Build
 mit dem bloßen `esp8266:esp8266:generic` (ohne `eesz`) kompiliert still und
 ohne Fehler - aber mit einem falschen (kleineren) Flash-Layout, das die
