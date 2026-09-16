@@ -114,7 +114,17 @@ void pushExtensionSegments() {
     return;
   }
   if (otaChunkBuffer != nullptr || otaPendingPhase != OTA_PHASE_NONE) {
-    return; //same OTA-collision guard as checkExtensionHealth() above
+    //Same OTA-collision guard as checkExtensionHealth() above - any reachable extension is left
+    //undelivered this tick. Flag it the same as a failed push below so finishDisplayJob() forces a
+    //retry once OTA is done, instead of silently caching this render as complete
+    //(CODE_REVIEW_V6.md #4).
+    for (int i = 0; i < extensionDeviceCount; i++) {
+      if (extensionDevices[i].Host != "" && extensionDevices[i].Reachable) {
+        displayJob.hadWriteFailure = true;
+        break;
+      }
+    }
+    return;
   }
   int combinedWidth = combinedUnitsAmount();
   int offset = unitsAmount;
@@ -124,7 +134,13 @@ void pushExtensionSegments() {
       continue; //fail-soft: skip, don't block/retry inline - see this function's own top comment
     }
     String segment = displayJob.currentAlignedLine.substring(offset, offset + ext.UnitsAmount);
-    pushSegmentToExtension(ext, segment, offset, combinedWidth);
+    if (!pushSegmentToExtension(ext, segment, offset, combinedWidth)) {
+      //Leaves this extension showing stale content - mark the same write-failure flag
+      //writeDueAnimatedUnits() uses for a failed local I2C write, so finishDisplayJob() forces a
+      //retry on the next showText() call for the same text instead of caching this as delivered
+      //(CODE_REVIEW_V6.md #4).
+      displayJob.hadWriteFailure = true;
+    }
     offset += ext.UnitsAmount;
   }
 }
