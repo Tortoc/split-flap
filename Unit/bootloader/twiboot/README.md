@@ -2,6 +2,46 @@
 twiboot is a simple/small bootloader for AVR MCUs written in C. It uses the integrated TWI or USI peripheral of the controller to implement a I2C slave.
 It was originally created to update I2C controlled BLMCs (Brushless Motor Controller) without an AVR ISP adapter.
 
+## This fork (split-flap project) ##
+`main.c` in this directory is a lightly patched fork of upstream twiboot, vendored for the
+[split-flap project](https://github.com/Tortoc/split-flap) to update its ATmega328p "Unit" boards
+over I2C. It is based on unmodified upstream commit
+[`559a403`](https://github.com/orempel/twiboot/commit/559a403836e8d91a2d5b962e9541af679150b7a9)
+(2021-02-20).
+
+**How much is actually different:** diffed directly against that upstream commit
+(898 lines) against this fork's `main.c` (1027 lines) - 7 contiguous change blocks, roughly
+5% of the file's functional code (the rest, including the entire TWI/I2C protocol below, is
+byte-for-byte identical to upstream). About half of the added lines are a documentation header
+at the top of `main.c` explaining the changes in place; see that header for the full,
+line-referenced rationale behind each one. Summary:
+
+1. **Dynamic I2C address via DIP switches** (~20 new lines + renaming `TWI_ADDRESS` to
+   `TWI_ADDRESS_BASE`): instead of a fixed compile-time slave address, `main()` reads the same
+   6 address-jumper pins the application firmware (`Unit.ino`) already reads and adds that to
+   `TWI_ADDRESS_BASE`. This lets one compiled bootloader image be flashed onto every unit -
+   jumper changes take effect immediately, with no per-unit bootloader rebuild/reflash.
+2. **Hardware-matched timing** (2 lines): `F_CPU` changed from upstream's 8MHz default to this
+   project's actual 16MHz crystal, with the idle-timer interval adjusted accordingly (25ms ->
+   12ms) to avoid a counter overflow at the higher clock.
+3. **EEPROM update-in-progress marker** (~30 lines): a dedicated EEPROM byte now gates whether
+   the bootloader is allowed to boot into the application at all. The application-update code on
+   the ESPMaster side arms this marker before writing any flash page and only clears it once the
+   full image is written and verified - so an interrupted update can never leave the unit
+   auto-booting into a half-written, inconsistent application.
+4. **Idle-timeout re-arm fix** (1 line): unmodified upstream disables the ~1000ms idle-boot
+   countdown the moment any real bootloader command arrives, and never re-enables it - so a
+   master that abandons a session early (crash, lost network, wrong target) left the unit stuck
+   in the bootloader indefinitely, needing a manual power cycle. Changed to re-arm the countdown
+   on every command instead, making it a rolling idle timer that always recovers on its own.
+
+None of this changes the wire protocol documented below - `Show bootloader version` still
+returns upstream's own `"TWIBOOT v3.2"` string unchanged (this fork's own version, tracked
+separately in `main.c`'s header comment, is not reported over I2C - doing so would need every
+already-deployed unit's bootloader re-flashed via ISP, since there is no OTA path for the
+bootloader itself by design). Everything else - chip info, flash/EEPROM read/write, application
+start, clockstretching - is exactly the upstream protocol.
+
 twiboot acts as a slave device on a TWI/I2C bus and allows reading/writing of the internal flash memory.
 As a compile time option (EEPROM_SUPPORT) twiboot also allows reading/writing of the whole internal EEPROM memory.
 The bootloader is not able to update itself (only application flash memory region accessible).
