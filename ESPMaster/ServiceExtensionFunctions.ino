@@ -1,40 +1,20 @@
-//Primary<->Extension communication (multiple-units.md, Phase 1) - lets a "primary" device stretch
-//its display logic across its own units plus one or more configured "extension" devices' units,
-//without either side needing to know about the other's internals. See multiple-units.md for the
-//full architecture; this file implements it.
+//Primary<->Extension communication (multiple-units.md) - lets a "primary" device stretch its
+//display logic across its own units plus one or more configured "extension" devices' units.
 //
-//Uses ESP8266HTTPClient (plain HTTP, no TLS - same "trusted local network, password header"
-//convention as every other endpoint in this project). Verified IRAM-neutral before adding this
-//dependency - see ESPMaster.ino's own include comment.
-//
-//DELIBERATE, DOCUMENTED DEVIATION from this project's own established "no blocking network calls"
-//lesson (ServiceAsyncTimeSyncFunctions.ino's non-blocking DNS+UDP rewrite, Punkt 172 - a blocking
-//NTP/timezone call colliding with WiFiManager's reconnect handling caused a real, live-reproduced
-//watchdog crash): the health check and the display push below both use HTTPClient with a SHORT,
-//bounded timeout (EXTENSION_HTTP_TIMEOUT_MS). Three things make this materially different from
-//that earlier anti-pattern rather than a repeat of it: (1) it only ever runs on a device an admin
-//has explicitly opted into this feature on (deviceRole == primary WITH a configured host) - every
-//standalone/extension device, which is every device by default, never calls into this file at all;
-//(2) the bound is ~10x shorter than NTP/timezone's old multi-second waits, and HTTPClient's own
-//wait loop yields internally, so it can't starve the software watchdog the way that old blocking
-//DNS+UDP call could; (3) the health check runs on its own independent, infrequent timer
-//(EXTENSION_HEALTH_CHECK_INTERVAL_MS) separate from the actual display push, so a slow/unreachable
-//extension is already known BEFORE a real display update needs to happen and that push is simply
-//skipped (see pushExtensionSegments()) rather than blocking the display path on a live timeout. A
-//genuinely async, from-scratch AsyncClient state machine would remove even this bounded cost, but
-//is real additional complexity - noted as a Phase 2+ candidate if this bound ever proves
-//insufficient in practice, not attempted here.
+//DELIBERATE, DOCUMENTED DEVIATION from this project's "no blocking network calls" lesson
+//(ServiceAsyncTimeSyncFunctions.ino's non-blocking DNS+UDP rewrite, Punkt 172): the health check
+//and display push below both use HTTPClient with a SHORT, bounded timeout
+//(EXTENSION_HTTP_TIMEOUT_MS). Materially different from that earlier anti-pattern: opt-in only
+//(deviceRole==primary with a configured host), ~10x shorter bound, and the health check runs on
+//its own timer separate from the display push, so an unreachable extension is already known
+//before a push happens and is simply skipped.
 #define EXTENSION_HEALTH_CHECK_INTERVAL_MS (15UL * 1000UL)
 #define EXTENSION_HTTP_TIMEOUT_MS 1500
 unsigned long lastExtensionHealthCheckAt = 0;
 
-//The effective display width for the Primary's own text-composition pipeline
-//(processSentenceToLines()/centerString()/leftString()/rightString(), called from
-//ServiceDisplayJobFunctions.ino) - own units plus every currently-reachable configured extension's
-//own unitsAmount. Returns plain unitsAmount unchanged for every role other than primary (including
-//the default standalone), and for a primary with no reachable extensions configured - by
-//construction, this feature can never change behavior for a device that isn't deliberately opted
-//in AND currently has a live extension to show for it (see multiple-units.md's "Fail-Soft" design).
+//The effective display width for the Primary's own text-composition pipeline - own units plus
+//every currently-reachable configured extension's own unitsAmount. Returns plain unitsAmount
+//unchanged for every other role.
 int combinedUnitsAmount() {
   int total = unitsAmount;
   if (deviceRole != DEVICE_ROLE_PRIMARY) {
@@ -48,9 +28,8 @@ int combinedUnitsAmount() {
   return total;
 }
 
-//Polls every configured extension's existing GET /api/units (no new endpoint needed on that side -
-//see multiple-units.md point 2) once per EXTENSION_HEALTH_CHECK_INTERVAL_MS. Ticked from loop()'s
-//existing per-second block, like every other periodic check there.
+//Polls every configured extension's existing GET /api/units once per
+//EXTENSION_HEALTH_CHECK_INTERVAL_MS. Ticked from loop()'s per-second block.
 void checkExtensionHealth() {
   if (deviceRole != DEVICE_ROLE_PRIMARY || extensionDeviceCount == 0) {
     return;
@@ -90,22 +69,12 @@ void checkExtensionHealth() {
   }
 }
 
-//Sends one already-sliced, already-aligned segment (raw display characters, no further processing
-//needed on the receiving end) to one configured extension's POST /api/extension-display, along
-//with enough animation context (Phase 2, multiple-units.md point 5) for the extension to compute
-//its OWN units' per-unit stagger delay using the exact same computeUnitAnimationDelayMs() formula
-//the primary uses locally: globalOffset (this extension's first unit's position within the
-//combined line - local units always come first, so this is simply the sum of unitsAmount and
-//every earlier configured extension's own UnitsAmount) and combinedWidth (the same total
-//computeUnitAnimationDelayMs() needs). Form-urlencoded, like every other endpoint in this project
-//- urlEncodeForFormBody() (HelpersStringHandling.ino) percent-encodes the segment itself, the only
-//field whose character set isn't already known-safe.
-//
-//Best-effort, no retry - a failed push here is exactly as consequential as a single failed local
-//I2C write (see DisplayJob::hadWriteFailure elsewhere): this one line update on that one device is
-//lost, and the next genuinely new showText() call for different content will simply try again.
+//Sends one already-sliced, already-aligned segment to one configured extension's POST
+///api/extension-display, along with animation context (globalOffset/combinedWidth) so the
+//extension can compute its own units' stagger delay with the same formula the primary uses
+//locally. Best-effort, no retry - a failed push is lost, the next showText() call simply retries.
 //Does NOT re-check reachability itself - callers only invoke this for extensions the last
-//checkExtensionHealth() sweep found reachable (see pushExtensionSegments()).
+//checkExtensionHealth() sweep found reachable.
 bool pushSegmentToExtension(ExtensionDevice &ext, String segment, int globalOffset, int combinedWidth) {
   WiFiClient client;
   HTTPClient http;
@@ -125,14 +94,10 @@ bool pushSegmentToExtension(ExtensionDevice &ext, String segment, int globalOffs
   return httpCode == 200;
 }
 
-//Called once per newly-written display line (ServiceDisplayJobFunctions.ino's DISPLAY_JOB_WRITE_LINE,
-//right alongside the existing local writeDueAnimatedUnits() call - NOT from the animation-stagger
-//re-poll state, since the actual PUSH itself is still a single one-shot HTTP request per line, not
-//staggered network calls - see pushSegmentToExtension()'s comment for how the receiving extension
-//nonetheless staggers its OWN units' writes using the animation context sent along with it) -
-//slices displayJob.currentAlignedLine (already sized to combinedUnitsAmount() by the caller) into
-//one segment per configured, reachable extension, in configuration order, starting right after
-//this device's own unitsAmount characters.
+//Called once per newly-written display line - slices displayJob.currentAlignedLine into one
+//segment per configured, reachable extension, in configuration order, starting right after this
+//device's own unitsAmount characters. The push itself is a one-shot request; the receiving
+//extension staggers its own writes using the animation context sent along with it.
 void pushExtensionSegments() {
   if (deviceRole != DEVICE_ROLE_PRIMARY) {
     return;
@@ -154,21 +119,14 @@ void pushExtensionSegments() {
 }
 
 //Extension-side receiver: writes a pushed segment directly to this device's own units, bypassing
-//showText()/DisplayJob entirely (see multiple-units.md point 3 - an extension has no line-
-//wrap/alignment logic of its own, the primary already did that against the combined width). Uses
-//this device's OWN configured flapSpeed - the primary doesn't know or need to know an extension's
-//speed setting, exactly like it doesn't need to know its alignment preferences.
+//showText()/DisplayJob entirely - an extension has no line-wrap/alignment logic of its own, the
+//primary already did that against the combined width. Uses this device's OWN flapSpeed.
 //
-//Animation coordination (Phase 2, multiple-units.md point 5): globalOffset/combinedWidth let this
-//device compute each of its own units' delay with the exact same computeUnitAnimationDelayMs()
-//formula the primary uses for its own units, so e.g. "outside-in" reads as one continuous
-//animation across both devices instead of two independent local ones. Applied here as a simple
-//blocking wait-until-due loop, NOT the local DisplayJob state machine's non-blocking per-tick
-//sweep - a deliberate, bounded exception to this project's usual non-blocking-write rule (see
-//ServiceExtensionFunctions.ino's own top comment for the same reasoning applied to the HTTP calls
-//themselves): an extension's own unit count is expected to be small, so the worst case (every unit
-//at the maximum stagger apart) is bounded by ANIMATION_STAGGER_MS_MAX times a small number, not an
-//open-ended wait, and it only ever runs on a device an admin explicitly opted into this role.
+//globalOffset/combinedWidth let this device compute each unit's delay with the same
+//computeUnitAnimationDelayMs() formula the primary uses, so e.g. "outside-in" reads as one
+//continuous animation across devices. Applied as a simple blocking wait-until-due loop - a
+//deliberate, bounded exception to the non-blocking rule (small unit count, bounded by
+//ANIMATION_STAGGER_MS_MAX times a small number, opt-in only).
 void applyExtensionDisplaySegment(String segment, String animationMode, unsigned long staggerMs, int globalOffset, int combinedWidth) {
   int speed = convertSpeed(flapSpeed);
   int segmentLength = (int)segment.length();
@@ -187,11 +145,9 @@ void applyExtensionDisplaySegment(String segment, String animationMode, unsigned
   }
 }
 
-//Persists a new extension host list (Primary role, System settings UI) - full replace, same
-//"client always submits the complete list" convention as replaceRotationItemsFromJson(). Resets
-//Reachable/UnitsAmount for every entry (a changed list means the next checkExtensionHealth() sweep
-//should re-establish these from scratch, not carry over a previous entry's stale status onto
-//whatever host now occupies that slot).
+//Persists a new extension host list - full replace, same convention as
+//replaceRotationItemsFromJson(). Resets Reachable/UnitsAmount for every entry so a changed list
+//doesn't carry over a previous entry's stale status.
 bool replaceExtensionDevicesFromJson(String json) {
   JsonDocument doc;
   if (deserializeJson(doc, json) || !doc.is<JsonArray>()) {

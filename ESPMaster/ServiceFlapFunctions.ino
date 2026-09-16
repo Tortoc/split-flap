@@ -5,10 +5,8 @@
 //their own alignment (see checkRotation()).
 //
 //Returns whether the message was actually accepted (already showing, or a job was successfully
-//started) vs. genuinely dropped (no units, or the display was busy and couldn't start a job) -
-//added 2026-09-09, CODE_REVIEW.md #10: callers that consume a one-shot input (scheduled messages
-//dequeuing an entry, /api/text) were previously discarding this entirely and treating every call
-//as successful, silently losing the message whenever the display happened to be busy.
+//started) vs. genuinely dropped (no units, or the display was busy) - callers with a one-shot
+//input (scheduled messages, /api/text) need this to know a message was actually lost.
 bool showText(String message) {
   return showText(message, 0, "");
 }
@@ -17,57 +15,39 @@ bool showText(String message, int delayMillis) {
   return showText(message, delayMillis, "");
 }
 
-//""/-1 = no animation override, use the global animation setting - see the 5-arg overload below
-//and computeUnitAnimationDelayMs()'s own comment. Only Rotation items ever pass a non-default
-//value here (found 2026-09-10, "Animation pro Rotation-Item" - see checkRotation()).
+//""/-1 = no animation override, use the global animation setting. Only Rotation items ever pass a
+//non-default value here (see checkRotation()).
 bool showText(String message, int delayMillis, String alignmentOverride) {
   return showText(message, delayMillis, alignmentOverride, "", -1);
 }
 
 bool showText(String message, int delayMillis, String alignmentOverride, String animationModeOverride, int animationStaggerMsOverride) {
-  //Nothing to display to - see scanI2CBus(). Guarded here (rather than at every call site)
-  //so scheduled messages, countdown, clock/date modes etc. all stay safe automatically. A real
-  //failure to deliver, not a no-op - see the comment above this function.
+  //Nothing to display to - guarded here so scheduled messages, countdown, clock/date modes etc.
+  //all stay safe automatically. A real failure to deliver, not a no-op.
   if (unitsAmount <= 0) {
     return false;
   }
 
-  //Centralized here, not at each individual input path - see normalizeUmlautsForDisplay()'s own
-  //comment (CODE_REVIEW.md #21) for why that matters. Must run before anything below measures
+  //Centralized here, not at each individual input path - must run before anything below measures
   //length/position, including the lastWrittenText cache comparison.
   message = normalizeUmlautsForDisplay(message);
 
-  //Quiet Hours override whatever was actually requested - checked here, not at each call site, so
-  //every path (mode dispatch, Rotation, scheduled messages, the /api/text push endpoint, ...)
-  //parks the display uniformly without needing its own check. Deliberate, not a failure - the
-  //caller asked to show something and quiet hours correctly overrode it.
+  //Quiet Hours override whatever was actually requested - checked here so every path parks the
+  //display uniformly without needing its own check.
   if (isQuietHoursActive()) {
     message = "";
   }
 
-  //"" (no override, the common case) falls back to the global default alignment - same fallback
-  //DISPLAY_JOB_WRITE_LINE itself uses once the job actually runs.
+  //"" (no override) falls back to the global default alignment.
   String effectiveAlignment = alignmentOverride != "" ? alignmentOverride : alignment;
 
   //lastWrittenText/lastWrittenAlignment/lastRenderedGeneration only reflect the LAST COMPLETED
-  //job (set by finishDisplayJob()) - while a job is still running, they describe stale history,
-  //not what's actually on the display right now (found 2026-09-09, CODE_REVIEW_V2.md #9). A cache
-  //hit against them here could therefore report success for a request that has nothing to do with
-  //what's actually mid-flight - e.g. text A finished long ago (cache says A), B is now running;
-  //a fresh request for A would see the stale "A" cache entry and return true without A ever being
-  //shown again. While busy, only a genuine match against the job that's ACTUALLY running counts as
-  //already satisfied - anything else must go through startDisplayJob() like normal, which already
-  //correctly refuses (returns false) while busy, so callers retry once the display is free.
+  //job - while a job is still running, they describe stale history, not what's actually mid-flight.
+  //While busy, only a genuine match against the job that's ACTUALLY running counts as already
+  //satisfied - anything else must go through startDisplayJob() like normal.
   if (isDisplayJobBusy()) {
-    //Compare against the running job's own request, not resolved/global state that could have
-    //moved on independently (alignmentOverride raw, not effectiveAlignment - matches exactly what
-    //startDisplayJob() below would be called with). Also requires the hold time to match -
-    //see the delayMillis reasoning below, same principle applies while busy: a caller explicitly
-    //asking for a hold must not be silently folded into a coincidentally-matching running job that
-    //was never asked to hold that long. Same reasoning extends to the animation override pair
-    //(found 2026-09-10, "Animation pro Rotation-Item") - raw override values, not the resolved
-    //animationModeValue/animationStaggerMsValue (those aren't even known yet at this point in a
-    //job that hasn't reached DISPLAY_JOB_WRITE_LINE for the first time).
+    //Compare against the running job's own raw request fields, not resolved/global state that
+    //could have moved on independently.
     bool matchesRunningJob = displayJob.originalMessage == message &&
       displayJob.alignmentOverride == alignmentOverride &&
       displayJob.animationModeOverride == animationModeOverride &&
@@ -75,15 +55,10 @@ bool showText(String message, int delayMillis, String alignmentOverride, String 
       displayJob.finalPauseMs == (unsigned long)delayMillis;
     if (matchesRunningJob) {
       //A repeated identical request while the job is already sitting in its final hold phase
-      //refreshes that hold for a full fresh duration, rather than silently succeeding against
-      //whatever time happens to already be left on the original countdown - found 2026-09-10,
-      //CODE_REVIEW_V3.md #8 (live-reproduced): a 5s hold started at t=5000 (due to end at
-      //t=10000); an identical repeat request at t=9500 returned true here, but the message still
-      //disappeared at the ORIGINAL t=10000 - only 500ms later, not a fresh 5s from the repeat.
-      //Only applies once the job has actually settled into the hold (DISPLAY_JOB_PAUSE_AFTER_FINISH)
-      //- while it's still WAIT_READY_BEFORE/WRITE_LINE/WAIT_READY_AFTER (genuinely still rendering
-      //toward this same request for the first time), there's no hold running yet to refresh, and
-      //restarting the countdown here would be premature.
+      //refreshes that hold for a full fresh duration, rather than succeeding against whatever
+      //time happens to already be left on the original countdown. Only applies once the job has
+      //actually settled into the hold - while still rendering toward this request for the first
+      //time, there's no hold running yet to refresh.
       if (delayMillis > 0 && displayJob.state == DISPLAY_JOB_PAUSE_AFTER_FINISH) {
         displayJob.pauseUntil = millis() + (unsigned long)delayMillis;
       }
@@ -93,21 +68,13 @@ bool showText(String message, int delayMillis, String alignmentOverride, String 
   }
 
   //Redraw if the text or effective alignment actually differs from what's really on the display,
-  //OR if displayRenderGeneration has moved on since the last completed render even though neither
-  //of those changed - see the comment on displayRenderGeneration (found 2026-09-09,
-  //CODE_REVIEW.md #14: the old check only ever compared message text plus a single global
-  //alignment-changed flag, missing per-item Rotation alignment changes and any hardware-side
-  //desync entirely). Also redraw whenever an explicit hold time is freshly requested (delayMillis
-  //!= 0), even if the text/alignment/generation are all otherwise already correct - found
-  //2026-09-09, CODE_REVIEW_V2.md #8: without this, a caller asking to hold already-visible text
-  //for N ms (e.g. a temporary /api/text push repeating the current text) was silently ignored,
-  //since nothing about the cache comparison itself ever changes just because a hold was requested.
+  //OR if displayRenderGeneration has moved on since the last completed render (see its own
+  //comment), OR whenever an explicit hold time is freshly requested (delayMillis != 0) even if
+  //text/alignment/generation are otherwise already correct - e.g. a temporary /api/text push
+  //repeating the current text still needs to (re)start its own hold.
   if (lastWrittenText != message || lastWrittenAlignment != effectiveAlignment || lastRenderedGeneration != displayRenderGeneration || delayMillis != 0) {
     //If a job is still running, this attempt is silently skipped - lastWrittenText hasn't updated
-    //yet, so the next ~1s loop() tick naturally retries once the display is free. Propagate
-    //startDisplayJob()'s own result rather than assuming success. (isDisplayJobBusy() was already
-    //ruled out above, so this always actually starts here - kept as startDisplayJob()'s own return
-    //value regardless, rather than assuming true, in case that ever changes.)
+    //yet, so the next ~1s loop() tick naturally retries once the display is free.
     return startDisplayJob(message, convertSpeed(flapSpeed), (unsigned long)delayMillis, alignmentOverride, animationModeOverride, animationStaggerMsOverride);
   }
   return true; //already showing this - not a failure, nothing to do
@@ -136,11 +103,8 @@ uint8_t i2cChecksum(uint8_t* data, int len) {
 }
 
 //Write letter position and speed in rpm to single unit. Returns true if the I2C write actually
-//succeeded (Wire.endTransmission() == 0) - previously discarded entirely (found 2026-09-09,
-//CODE_REVIEW.md #15): a NACK'd write left that one unit's flap untouched, but the caller
-//(DISPLAY_JOB_WRITE_LINE) had no way to know and went on to mark the whole line "shown" once every
-//unit merely reported "not moving" - true for a unit that never received a new letter in the first
-//place, not just one that finished moving to it.
+//succeeded (Wire.endTransmission() == 0) - a NACK'd write leaves that unit's flap untouched, and
+//the caller needs to know rather than marking the line "shown" regardless.
 bool writeToUnit(int address, int letter, int flapSpeed) {
   uint8_t sendArray[2] = {(uint8_t)letter, (uint8_t)flapSpeed}; //Array with values to send to unit
 
@@ -163,12 +127,8 @@ bool writeToUnit(int address, int letter, int flapSpeed) {
 }
 
 //Write a new calibration offset to a single unit. The unit recalibrates immediately upon
-//receiving this and ends up showing letter 0 (blank), so that letter is sent along with it
-//to avoid triggering a second, separate rotation. Returns true on a successful I2C write - see
-//writeToUnit()'s comment (CODE_REVIEW.md #15); the caller (/api/units?action=offset) already
-//tells the admin recalibration is in progress rather than instantaneous, so on failure it just
-//logs here rather than retrying - a genuinely stuck offset is already visible via the unit's
-//own reported offset not matching what was requested.
+//receiving this and ends up showing letter 0 (blank), so that letter is sent along with it to
+//avoid triggering a second, separate rotation.
 bool writeOffsetToUnit(int address, uint16_t offset) {
   int currentSpeed = convertSpeed(flapSpeed);
 
@@ -244,28 +204,15 @@ bool readUnitInfo(int address, int &statusOut, int &offsetOut, int &phaseOut, in
   return true;
 }
 
-//Same as the 5-arg overload above, plus the two diagnostic counters added 2026-09-10 (inspired by
-//scottbez1/splitflap's continuous home-sensor plausibility check - see Unit.ino's
-//unexpectedHomeTriggerCount/slowHomeSearchCount comments for the full story). Deliberately a
-//separate overload rather than extending the 5-arg one in place - that one's two existing call
-//sites (ServiceDisplayJobFunctions.ino's job-wait poller, and the routine /api/units listing) only
-//need phase/progress, not these two extra bytes on every poll. Used only where the diagnostics are
-//actually surfaced (GET /api/units?detail=1).
+//Same as the 5-arg overload above, plus the two diagnostic counters. Deliberately a separate
+//overload rather than extending the 5-arg one in place - its two existing call sites only need
+//phase/progress. Used only where the diagnostics are actually surfaced (GET /api/units?detail=1).
 //
-//IMPORTANT, found live-testing this on 2026-09-10: an EARLIER version of this function tried to
-//distinguish "unit not yet updated to the newer Unit.ino" (only ANSWER_SIZE=6 real bytes written)
-//from a genuine read failure by comparing Wire.available() against ANSWER_SIZE_DIAG=8, and
-//substituting -1 for the two new fields when short. That doesn't work: I2C has no
-//short-response/length-prefix mechanism - once Wire.requestFrom(address, 8, ...) succeeds at all,
-//the master ends up with 8 bytes available regardless of how many the slave actually had prepared;
-//the "extra" bytes just come back as whatever the idle, pulled-up bus reads as (empirically 0xFF =
-//255 on this hardware), not some detectable "nothing sent" marker. Live-confirmed against all 10
-//real (not-yet-updated) units: every one reported unexpectedHomeTriggerCount=
-//slowHomeSearchCount=255, not -1. **So until every unit has received the Unit.ino update (see the
-//plan's Phase C), these two fields read 255 for any not-yet-updated unit - not a real count, not
-//a distinguishable "unsupported" sentinel either.** Documented in API.md/the Hilfe tab rather than
-//solved here - solving it properly would need an explicit capability signal from the unit (e.g. a
-//firmware-version byte), out of scope for this round.
+//IMPORTANT: I2C has no short-response/length-prefix mechanism - once Wire.requestFrom() succeeds
+//at all, the master gets ALL requested bytes regardless of how many the slave actually prepared;
+//a not-yet-updated unit's "extra" bytes come back as 0xFF (idle bus), not a detectable "nothing
+//sent" marker. So these two fields read 255, not -1, for a not-yet-updated unit - not a real
+//count, not a distinguishable "unsupported" sentinel either.
 bool readUnitInfo(int address, int &statusOut, int &offsetOut, int &phaseOut, int &progressOut, int &unexpectedHomeTriggerCountOut, int &slowHomeSearchCountOut) {
   Wire.requestFrom(address, ANSWER_SIZE_DIAG, 1);
 
@@ -296,17 +243,10 @@ bool readUnitInfo(int address, int &statusOut, int &offsetOut, int &phaseOut, in
   return true;
 }
 
-//Same as the 7-arg overload above, plus Unit.ino's own firmware version (major/minor/patch),
-//added 2026-09-16 alongside this project's first formal Unit firmware versioning. Separate
-//overload rather than growing the 7-arg one in place, same reasoning as that one's own comment:
-//its two existing call sites don't need this. Used only where the version is actually surfaced
-//(GET /api/units?detail=1).
-//
-//IMPORTANT, same caveat as the 7-arg overload's own comment for unexpectedHomeTriggerCount/
-//slowHomeSearchCount: a unit running firmware from before this version byte existed still answers
-//an 11-byte request without error - the last 3 bytes read back as 255/255/255 (idle bus), not a
-//distinguishable "unsupported" marker. Report that triple as "unknown" in the UI, not as a literal
-//"v255.255.255".
+//Same as the 7-arg overload above, plus Unit.ino's own firmware version (major/minor/patch).
+//Same caveat: a unit running firmware from before this version byte existed still answers without
+//error - the last 3 bytes read back as 255/255/255, not a distinguishable "unsupported" marker.
+//Report that triple as "unknown" in the UI, not as a literal "v255.255.255".
 bool readUnitInfo(int address, int &statusOut, int &offsetOut, int &phaseOut, int &progressOut, int &unexpectedHomeTriggerCountOut, int &slowHomeSearchCountOut, int &fwVersionMajorOut, int &fwVersionMinorOut, int &fwVersionPatchOut) {
   Wire.requestFrom(address, ANSWER_SIZE_VERSION, 1);
 
@@ -342,8 +282,4 @@ bool readUnitInfo(int address, int &statusOut, int &offsetOut, int &phaseOut, in
 
 //The old blocking waitForUnitReady()/waitForAllUnitsReady()/showMessage() wait loop now lives as
 //the non-blocking pollDisplayJobWaitAllUnitsReady() state machine in ServiceDisplayJobFunctions.ino.
-//isDisplayMoving()/checkIfMoving()/the global displayState[] array they used were this wait loop's
-//own leftover helpers - never called by anything else, already silently dropped by the linker
-//(--gc-sections; verified via nm on the built .elf, 2026-09-12 RAM-savings review) but still
-//present, misleadingly, in source. Removed outright.
 
