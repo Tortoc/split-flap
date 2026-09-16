@@ -2502,11 +2502,9 @@ void setup() {
         return;
       }
 
-      //Checked up front, before either branch below, not just discovered via showText()'s bool
-      //return value (found 2026-09-09, CODE_REVIEW_V2.md #10): the permanent branch below never
-      //even looked at showText()'s result at all, so a too-long text silently got "OK" back and
-      //was then retried forever, uselessly, by the normal 1s mode-dispatch loop. A clear, honest
-      //400 here is strictly better than that for both branches.
+      //Checked up front, before either branch below - the permanent branch never looks at
+      //showText()'s result at all, so a too-long text would otherwise silently get "OK" back and
+      //be retried forever, uselessly, by the normal 1s mode-dispatch loop.
       if (isMessageTooLongToRender(newText)) {
         request->send(400, "text/plain", "text needs more lines than fit to display - shorten it or add fewer line breaks");
         return;
@@ -2516,12 +2514,10 @@ void setup() {
         //Temporary: deviceMode/inputText are deliberately left untouched, same pattern
         //checkScheduledMessages() already uses for a non-indefinite scheduled message - once the
         //hold time elapses, the next 1s tick's normal mode loop redisplays whatever deviceMode
-        //currently is on its own, no extra "revert" logic needed here. Because of that, there's no
-        //other code path that will ever retry this specific call - unlike the permanent branch
-        //below, a busy display here means the message is genuinely lost, not just delayed. Report
-        //that honestly instead of claiming success (found 2026-09-09, CODE_REVIEW.md #10).
-        //The "too many lines" reason is already ruled out above (CODE_REVIEW_V2.md #10) - a false
-        //here can now only mean a busy display.
+        //currently is on its own. Unlike the permanent branch below, no other code path will ever
+        //retry this specific call - a busy display here means the message is genuinely lost, so
+        //report that honestly instead of claiming success. The "too many lines" reason is already
+        //ruled out above - a false here can only mean a busy display.
         if (!showText(newText, (int)(durationSeconds * 1000))) {
           request->send(503, "text/plain", "Nothing was displayed - the display is busy right now. Try again shortly.");
           return;
@@ -2544,11 +2540,9 @@ void setup() {
     });
 
     //Extension-side receiver for a primary's already-sliced, already-aligned display segment plus
-    //animation context - see multiple-units.md point 3/5 and ServiceExtensionFunctions.ino's own
-    //comments (pushSegmentToExtension()/applyExtensionDisplaySegment()). Plain form-urlencoded
-    //POST, same as every other endpoint in this file (Phase 2 switched away from Phase 1's raw-body
-    //handler once more than one field needed sending - no reason to keep a bespoke body callback
-    //once that was true).
+    //animation context - see multiple-units.md and ServiceExtensionFunctions.ino's own comments
+    //(pushSegmentToExtension()/applyExtensionDisplaySegment()). Plain form-urlencoded POST, same
+    //as every other endpoint in this file.
     webServer.on("/api/extension-display", HTTP_POST, [](AsyncWebServerRequest * request) {
       if (String(otaPassword) != "") {
         String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
@@ -2581,9 +2575,9 @@ void setup() {
       request->send(200, "text/plain", "OK");
     });
 
-    //Primary-side extension host list (multiple-units.md point 1) - GET returns the configured
-    //hosts plus their last-known health-check status, POST replaces the whole list (same "client
-    //always submits the complete list" convention as /api/rotation-items).
+    //Primary-side extension host list (multiple-units.md) - GET returns the configured hosts plus
+    //their last-known health-check status, POST replaces the whole list (same "client always
+    //submits the complete list" convention as /api/rotation-items).
     webServer.on("/api/extension-devices", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
 
@@ -2646,13 +2640,10 @@ void setup() {
     //quirk down, this single-registration form sidesteps it and saves even more).
     webServer.on("/api/wifi", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
       if (request->method() == HTTP_GET) {
-        //Found 2026-09-10: unlike every POST action on this endpoint (all gated on
-        //accessControlWifiPublic), these two GET polling reads were never checked at all - leaked
-        //nearby-network scan results (SSID/RSSI/security) and the device's own currently-connected
-        //SSID/IP to anyone unauthenticated on the LAN, regardless of the Wifi category toggle.
-        //Consistent to gate here too: the same browser/session that started a scan or connect via
-        //the (already-gated) POST action already has the password, so this doesn't block normal
-        //polling of an attempt that was actually allowed to start.
+        //Gated same as every POST action on this endpoint - these GET polling reads would
+        //otherwise leak nearby-network scan results and the device's own currently-connected
+        //SSID/IP to anyone unauthenticated on the LAN. The same browser/session that started a
+        //scan or connect via the (already-gated) POST action already has the password.
         if (rejectIfPasswordRequired(request, accessControlWifiPublic)) return;
 
         String type = request->hasParam("type") ? request->getParam("type")->value() : "";
@@ -2802,12 +2793,10 @@ void setup() {
       }
 
       if (action == "set-hostname") {
-        //Shares this endpoint's registration rather than getting a dedicated route - see
-        //POST /api/quiet-hours' comment above ("every registered handler costs a small permanent
-        //heap allocation that's never freed") for why that's a deliberate choice here, not an
-        //oversight. Gated by the same accessControlWifiPublic as every other action on this route
-        //(the "Netzwerk" tab in the UI) - the hostname isn't a secret, but changing it is a
-        //device-state change like the others here.
+        //Shares this endpoint's registration rather than getting a dedicated route - each
+        //registered handler costs a small permanent heap allocation that's never freed. Gated by
+        //the same accessControlWifiPublic as every other action on this route - the hostname
+        //isn't a secret, but changing it is a device-state change like the others here.
         if (!request->hasParam("hostname", true)) {
           request->send(400, "text/plain", "'hostname' is required");
           return;
@@ -2843,10 +2832,9 @@ void setup() {
     });
 #endif
 
-    //CODE_REVIEW.md #29: this endpoint used to also have a GET returning the password itself in
-    //plaintext, unauthenticated "by design" (this device has no separate login) - removed
-    //entirely. The per-category access-control toggle STATES (not the password) are public,
-    //non-secret info and are read via GET /api/settings instead (see minimalDoc there).
+    //This endpoint has no GET - a password must never be returned in plaintext. The per-category
+    //access-control toggle STATES (not the password) are public, non-secret info and are read via
+    //GET /api/settings instead (see minimalDoc there).
     //
     //POST changes the password and/or the access-control toggles together, always gated behind
     //the CURRENT password matching - this is the one place in the whole access-control system
