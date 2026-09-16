@@ -26,19 +26,14 @@
 
 //"Update complete" gate the bootloader checks before ever booting into the app - see Change 2 in
 //Unit/bootloader/twiboot/main.c's file header comment. Must exactly match that file's
-//EEPROM_UPDATE_MARKER_ADDR (E2END, i.e. the last EEPROM byte on whatever MCU twiboot is built
-//for - 1023 on the atmega328p this project uses) and EEPROM_UPDATE_MARKER_INPROGRESS. Also the
-//opposite end of the EEPROM from Unit.ino's own calOffset (address 0-1) - kept deliberately far
-//apart. pushFirmwareToUnit() double-checks this against the unit's own reported EEPROM size
-//before trusting it, in case a future MCU port ever changes it.
+//EEPROM_UPDATE_MARKER_ADDR/INPROGRESS. Opposite end of the EEPROM from Unit.ino's own calOffset.
 #define UNIT_BOOTLOADER_UPDATE_MARKER_ADDR         1023
 #define UNIT_BOOTLOADER_UPDATE_MARKER_INPROGRESS   0x00
 #define UNIT_BOOTLOADER_UPDATE_MARKER_COMPLETE     0xFF
 
 //Expected AVR chip signature for the ATmega328p this project targets - used by
 //scanForBootloaderAddress() to tell a genuine twiboot reply apart from a live Unit.ino app's
-//reply to the same read (see the comment there; found+verified live 2026-09-09, CODE_REVIEW.md
-//#7). If a future hardware revision changes the MCU, this needs updating alongside it.
+//reply to the same read (see the comment there). Needs updating if the MCU ever changes.
 #define UNIT_EXPECTED_CHIP_SIGNATURE_0 0x1E
 #define UNIT_EXPECTED_CHIP_SIGNATURE_1 0x95
 #define UNIT_EXPECTED_CHIP_SIGNATURE_2 0x0F
@@ -46,11 +41,9 @@
 //TwibootChipInfo struct is defined in Classes.h (must be a real header, see comment there)
 
 //Tells the unit's running app (not the bootloader) to reboot into twiboot - see Unit.ino's
-//receiveLetter()/CMD_ENTER_BOOTLOADER handling. Sent to the unit's normal app address.
-//Returns Wire.endTransmission()'s result (0 = success) - previously discarded entirely, added
-//2026-09-09 while diagnosing repeated "unit did not respond in bootloader mode" failures: if this
-//write itself silently fails, the whole retry loop that follows is racing a bootloader window
-//that was never opened in the first place, and the old code had no way to tell the two apart.
+//receiveLetter()/CMD_ENTER_BOOTLOADER handling. Sent to the unit's normal app address. Returns
+//Wire.endTransmission()'s result (0 = success) so the caller can tell a silently-failed write
+//apart from a genuinely unopened bootloader window.
 uint8_t requestUnitEnterBootloader(int unitIndex) {
   //Checksum byte appended, same as every other write path - this command reboots the unit, so
   //it's important it isn't triggered by a spurious/misread byte sequence.
@@ -69,44 +62,15 @@ uint8_t requestUnitEnterBootloader(int unitIndex) {
 //Two passes, not one repeated-start read per address: a repeated-start read against an address
 //with nothing listening leaves the ESP8266's software I2C state stuck (esp8266/Arduino #5718). So:
 //a cheap presence check against every address first, then a real chip-info read for every
-//candidate that ACKs it.
+//candidate that ACKs it. yield() only every 8th address, not every one - calling it 64 times
+//risked missing twiboot's un-extended ~1000ms idle-boot window under real WiFi/AsyncWebServer load.
 //
-//Bug found 2026-09-09: a bare address-only probe (no data bytes) never reaches twiboot's
-//TWI_data_write() (see main.c's TWI_vect(), case 0x60/0xA0) - only a real data-carrying
-//transaction (like twibootReadChipInfo() below) resets its boot_timeout. So this whole 64-address
-//sweep races the SAME un-extended ~1000ms window from the original reset, and yield()ing after
-//EVERY address (64 calls) turned out to no longer reliably fit in that window now that yield()
-//has more WiFi/AsyncWebServer background work to do than when this was last verified working
-//(2026-08-15) - live-reproduced as 3 consecutive "unit did not respond in bootloader mode"
-//failures against a real unit. Calling yield() only every 8th address cuts that overhead ~8x
-//while still keeping the WiFi stack reasonably serviced.
-//
-//Second bug found 2026-09-09 (CODE_REVIEW.md #7): the bootloader address range (base 0x29=41,
-//so 41-104) and the application address range (0-63) structurally overlap from 41 units upward -
-//a running app at address 41+ ACKs the bare presence check below just as readily as a real
-//bootloader does, and the old code counted every such ACK as a hit. At 42+ installed units this
-//permanently wedges every scan into the foundCount>1 "ambiguous" rejection, since the genuine
-//bootloader candidate is never alone. Not reachable on this project's current 10-unit install
-//(app addresses 0-9 don't reach into 41-104 yet), but a real, structural bug for any future
-//scale-up - fixed now rather than left for whoever hits it. A bare ACK only proves *something*
-//is listening, not that it's actually twiboot.
-//
-//A real chip-info read alone does NOT reliably distinguish them, contrary to the first
-//assumption here - live-tested 2026-09-09 against real running app addresses and
-//twibootReadChipInfo() returned SUCCESS every time, just with garbage content: the chip-info
-//write's 4 bytes fail the app's own checksum validation harmlessly (see receiveLetter()), but the
-//following 8-byte read then hits the app's requestEvent(), which always replies with its own,
-//different fixed 6-byte status packet (currentlyrotating, calOffset lo/hi, currentPhase,
-//currentPhaseProgress lo/hi) - the ESP8266 Wire master library happily accepts this as a
-//"successful" 8-byte transaction, silently padding the missing 2 bytes. The result lands in
-//TwibootChipInfo's fields at their normal byte offsets, so it's fully deterministic garbage, not
-//random: signature[0]=currentlyrotating (always 0 or 1), signature[2]=currentPhase (always
-//0/1/2 - PHASE_IDLE/CALIBRATING/ROTATING), pageSize=currentPhaseProgress's low byte (often 0),
-//eepromSize=0xFFFF (the 2 phantom padding bytes). Confirmed against 4 different live units'
-//real app addresses - signature[1] varied (it's each unit's own calOffset low byte - matched
-//exactly), but signature[0]/[2]/pageSize were 0 every time, structurally incapable of matching a
-//real AVR signature (currentlyrotating/currentPhase can never reach 0x1E/0x0F). So: verify the
-//exact expected signature, not just read success.
+//The bootloader address range (base 0x29=41, so 41-104) and the application range (0-63)
+//structurally overlap from 41 units upward - a running app ACKs the bare presence check just as
+//readily as a real bootloader, and a chip-info read alone doesn't reliably distinguish them
+//either (an app's requestEvent() reply lands in TwibootChipInfo's fields as deterministic garbage
+//that "succeeds" as a read but can never match a real AVR signature). So: verify the exact
+//expected signature, not just read success.
 #define UNIT_IS_EXPECTED_CHIP_SIGNATURE(info) \
   ((info).signature[0] == UNIT_EXPECTED_CHIP_SIGNATURE_0 && \
    (info).signature[1] == UNIT_EXPECTED_CHIP_SIGNATURE_1 && \
@@ -118,9 +82,8 @@ int scanForBootloaderAddress(TwibootChipInfo &infoOut) {
   for (int address = UNIT_BOOTLOADER_BASE_ADDRESS; address < UNIT_BOOTLOADER_BASE_ADDRESS + 64; address++) {
     Wire.beginTransmission(address);
     if (Wire.endTransmission() == 0) {
-      //Verify every candidate that ACKs, not just the (assumed-unique) survivor - see the second
-      //comment above this function. Read success alone isn't enough (a live app "succeeds" too,
-      //with garbage) - the signature must actually match.
+      //Verify every candidate that ACKs, not just the (assumed-unique) survivor - read success
+      //alone isn't enough (a live app "succeeds" too, with garbage).
       TwibootChipInfo candidateInfo;
       if (twibootReadChipInfo(address, candidateInfo) && UNIT_IS_EXPECTED_CHIP_SIGNATURE(candidateInfo)) {
         foundCount++;
@@ -213,12 +176,9 @@ bool twibootReadChipInfo(int bootAddress, TwibootChipInfo &infoOut) {
   return true;
 }
 
-//Reads twiboot's own 16-byte version string (e.g. "TWIBOOT v3.2" - upstream's own VERSION_STRING
-//constant, unchanged by any of this project's 3 documented fork changes, see main.c's header
-//comment). Same real-STOP-instead-of-repeated-START workaround as twibootReadChipInfo() above.
-//versionOut must be at least 17 bytes (16 raw bytes + a null terminator this function adds, since
-//twiboot's info[] array is a fixed-size byte buffer, not a null-terminated C string, and any
-//trailing bytes past the actual text are whatever was in flash at compile time, not necessarily 0).
+//Reads twiboot's own 16-byte version string. Same real-STOP-instead-of-repeated-START workaround
+//as twibootReadChipInfo() above. versionOut must be at least 17 bytes (16 raw bytes + a null
+//terminator this function adds, since twiboot's info[] array isn't itself null-terminated).
 bool twibootReadVersion(int bootAddress, char* versionOut, size_t bufSize) {
   if (bufSize < 17) {
     return false;
@@ -353,20 +313,15 @@ bool twibootStartApplication(int bootAddress) {
 
 //Pushes the firmware currently stored at unitFirmwarePath to the given unit over I2C.
 //
-//Safety (corrected 2026-09-09 - the original version of this comment was wrong, see
-//UNIT_BOOTLOADER_UPDATE_MARKER_ADDR's comment for the full story): every page except page 0 (the
-//vector table) is written and verified FIRST, page 0 only after everything else is confirmed
-//byte-for-byte - but on the atmega328p this project uses, the reset vector's actual jump TARGET
-//already lands in page 1, not page 0, so "page 0 last" alone does NOT make an aborted update
-//safe to boot from after a reset. The real safety net is the EEPROM update-marker, armed via
-//twibootWriteAndVerifyEepromByte() before any page is touched and cleared only after page 0 is
-//confirmed - twiboot itself refuses to boot into the app while the marker says "in progress" (see
-//Unit/bootloader/twiboot/main.c's Change 2), regardless of what state the app pages are actually
-//in. The bootloader itself is never touched, so a stuck unit isn't bricked - it just stays
-//resident until a successful push clears the marker.
+//Safety: every page except page 0 (the vector table) is written and verified FIRST, page 0 only
+//after everything else is confirmed byte-for-byte - but the real safety net is the EEPROM
+//update-marker (armed before any page is touched, cleared only after page 0 is confirmed), since
+//the reset vector's actual jump target lands in page 1, not page 0. twiboot itself refuses to
+//boot into the app while the marker says "in progress" (see main.c's Change 2), regardless of
+//page state. The bootloader itself is never touched, so a stuck unit isn't bricked.
 //
 //writeAndVerifyPage() retries with a bus-recovery pass in between - a repeated-start read can
-//occasionally corrupt just the read-back (not the actual write), and a retry clears that.
+//occasionally corrupt just the read-back, and a retry clears that.
 bool writeAndVerifyPage(int bootAddress, uint16_t flashAddress, uint8_t* writeBuffer, uint8_t* verifyBuffer,
                          uint8_t pageSize, String &failureReasonOut) {
   const int maxAttempts = 3;
@@ -441,28 +396,22 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   }
 
   //App addresses (0-63) and bootloader addresses (UNIT_BOOTLOADER_BASE_ADDRESS=41..104)
-  //structurally overlap from 41 installed units upward - unitIndex's bootloader address
-  //(UNIT_BOOTLOADER_BASE_ADDRESS + unitIndex) would then be the SAME physical I2C address as
-  //another unit's already-running app, a real electrical bus conflict, not just a software
-  //ambiguity (found 2026-09-09, CODE_REVIEW_V2.md #16 - not reachable on this project's current
-  //10-unit install, but a real structural hazard for any future scale-up). unitsAmount (the live
-  //app-address scan result) is a best-effort proxy for "how many real units exist" - it can
-  //undercount while some are already sitting in a bootloader (an existing, separate, unrelated
-  //limitation), so this check is conservative in the SAFE direction (it can
-  //only ever reject a push that's actually fine, never silently allow a real collision).
+  //structurally overlap from 41 installed units upward - unitIndex's bootloader address would
+  //then be the SAME physical I2C address as another unit's already-running app, a real electrical
+  //bus conflict. This check is conservative in the SAFE direction: it can only ever reject a push
+  //that's actually fine, never silently allow a real collision.
   int expectedBootAddressForCollisionCheck = UNIT_BOOTLOADER_BASE_ADDRESS + unitIndex;
   if (expectedBootAddressForCollisionCheck < unitsAmount) {
     firmwareFile.close();
     result["success"] = false;
     result["error"] = F("Refusing to update Unit ") + String(unitIndex) + F(": its bootloader address (0x") +
       String(expectedBootAddressForCollisionCheck, HEX) + F(") would collide with another unit's live app address at "
-        "this installation's current size. Nothing was written - see CODE_REVIEW_V2.md #16.");
+        "this installation's current size. Nothing was written.");
     serializeJson(result, resultJsonOut);
     return false;
   }
-  //Separate, fixed collision - see isReservedI2CAddress()'s own comment (ESPMaster.ino,
-  //Code_REVIEW_V5.md #04). Independent of unitsAmount: reachable even without a real Unit 63
-  //installed, since this check above only guards against ANOTHER UNIT's live app address.
+  //Separate, fixed collision - see isReservedI2CAddress()'s own comment. Independent of
+  //unitsAmount: the check above only guards against ANOTHER UNIT's live app address.
   if (isReservedI2CAddress(expectedBootAddressForCollisionCheck)) {
     firmwareFile.close();
     result["success"] = false;
@@ -477,14 +426,9 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   uint8_t enterBootloaderResult = requestUnitEnterBootloader(unitIndex);
   SerialPrintln(F("  requestUnitEnterBootloader() Wire.endTransmission() = ") + String(enterBootloaderResult) + F(" (0 = success)"));
 
-  //Give the watchdog reset + twiboot startup time to happen, then retry a few times in case
-  //the exact timing needs more slack than expected - tune on the bench per BOOTLOADER_SETUP.md.
-  //Timed (2026-09-09, see scanForBootloaderAddress()'s comment) - this races a fixed ~1000ms
-  //window from the reset, so logging exactly where the time goes matters more here than for a
-  //normal, non-time-critical operation. Probes ONLY unitIndex's own expected address, not a full
-  //scan of the whole bootloader address range - see findExpectedBootloaderAddress()'s comment
-  //(CODE_REVIEW_V2.md #15, also folds in CODE_REVIEW.md #8's "bind to the right unit" check below,
-  //now structural instead of a separate runtime comparison).
+  //Give the watchdog reset + twiboot startup time to happen, then retry a few times - this races
+  //a fixed ~1000ms window from the reset, so logging exactly where the time goes matters here.
+  //Probes ONLY unitIndex's own expected address, not a full scan of the bootloader range.
   TwibootChipInfo chipInfo;
   int expectedBootAddress = UNIT_BOOTLOADER_BASE_ADDRESS + unitIndex;
   int bootAddress = findExpectedBootloaderAddress(unitIndex, chipInfo, bootloaderSearchStart) ? expectedBootAddress : -1;
@@ -564,14 +508,9 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
       break;
     }
     size_t bytesRead = firmwareFile.read(writeBuffer, pageSize);
-    //Only the LAST page (known from firmwareSize, not just "whatever read() happened to return")
-    //is allowed to come back short - anything else is a genuine read error (found 2026-09-09,
-    //CODE_REVIEW_V2.md #17): the old code padded ANY short read with 0xFF unconditionally, so a
-    //filesystem read failure on a supposedly-FULL page would silently become a page mostly filled
-    //with 0xFF instead of the real firmware bytes - and the very next verify-read would then
-    //"successfully" match that same wrong content, since it's comparing against the same corrupted
-    //writeBuffer, not the actual intended firmware. The marker would then get cleared and the unit
-    //would boot into this corrupted image.
+    //Only the LAST page is allowed to come back short - anything else is a genuine read error.
+    //Padding a short read on a supposedly-full page would silently write/verify wrong content and
+    //still clear the marker, booting the unit into a corrupted image.
     size_t expectedBytesThisPage = (size_t)pageSize < (firmwareSize - flashAddress) ? (size_t)pageSize : (firmwareSize - flashAddress);
     if (bytesRead != expectedBytesThisPage) {
       allOk = false;
@@ -604,9 +543,7 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   }
   if (allOk) {
     size_t bytesRead = firmwareFile.read(writeBuffer, pageSize);
-    //Same "only the actual last page may come back short" reasoning as the loop above
-    //(CODE_REVIEW_V2.md #17) - page 0 is the last page written when firmwareSize <= pageSize
-    //(a one-page image), otherwise it must always come back full.
+    //Same "only the actual last page may come back short" reasoning as the loop above.
     size_t expectedBytesThisPage = (size_t)pageSize < firmwareSize ? (size_t)pageSize : firmwareSize;
     if (bytesRead != expectedBytesThisPage) {
       allOk = false;
