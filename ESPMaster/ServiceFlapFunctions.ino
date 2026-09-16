@@ -296,6 +296,50 @@ bool readUnitInfo(int address, int &statusOut, int &offsetOut, int &phaseOut, in
   return true;
 }
 
+//Same as the 7-arg overload above, plus Unit.ino's own firmware version (major/minor/patch),
+//added 2026-09-16 alongside this project's first formal Unit firmware versioning - see
+//BUGFIX_LOG.md. Separate overload rather than growing the 7-arg one in place, same reasoning as
+//that one's own comment: its two existing call sites don't need this. Used only where the version
+//is actually surfaced (GET /api/units?detail=1).
+//
+//IMPORTANT, same caveat as the 7-arg overload's own comment for unexpectedHomeTriggerCount/
+//slowHomeSearchCount: a unit running firmware from before this version byte existed still answers
+//an 11-byte request without error - the last 3 bytes read back as 255/255/255 (idle bus), not a
+//distinguishable "unsupported" marker. Report that triple as "unknown" in the UI, not as a literal
+//"v255.255.255".
+bool readUnitInfo(int address, int &statusOut, int &offsetOut, int &phaseOut, int &progressOut, int &unexpectedHomeTriggerCountOut, int &slowHomeSearchCountOut, int &fwVersionMajorOut, int &fwVersionMinorOut, int &fwVersionPatchOut) {
+  Wire.requestFrom(address, ANSWER_SIZE_VERSION, 1);
+
+  //Only the base ANSWER_SIZE (6) is required for a successful read - see the 7-arg overload's own
+  //comment for why a not-yet-updated unit's response is still exactly ANSWER_SIZE_VERSION (11)
+  //bytes from this function's point of view, just with the last 5 not being real data.
+  if (Wire.available() < ANSWER_SIZE) {
+    SerialPrint(F("ERROR: Unit "));
+    SerialPrint(address);
+    SerialPrintln(F(" - No/incomplete response reading status+offset+diagnostics+version"));
+
+    recoverI2CBus();
+
+    return false;
+  }
+
+  statusOut = Wire.read();
+  int offsetLow = Wire.read();
+  int offsetHigh = Wire.read();
+  offsetOut = offsetLow + (offsetHigh << 8);
+  phaseOut = Wire.read();
+  int progressLow = Wire.read();
+  int progressHigh = Wire.read();
+  progressOut = progressLow + (progressHigh << 8);
+  unexpectedHomeTriggerCountOut = Wire.available() >= 5 ? Wire.read() : -1;
+  slowHomeSearchCountOut = Wire.available() >= 4 ? Wire.read() : -1;
+  fwVersionMajorOut = Wire.available() >= 3 ? Wire.read() : -1;
+  fwVersionMinorOut = Wire.available() >= 2 ? Wire.read() : -1;
+  fwVersionPatchOut = Wire.available() >= 1 ? Wire.read() : -1;
+
+  return true;
+}
+
 //The old blocking waitForUnitReady()/waitForAllUnitsReady()/showMessage() wait loop now lives as
 //the non-blocking pollDisplayJobWaitAllUnitsReady() state machine in ServiceDisplayJobFunctions.ino.
 //isDisplayMoving()/checkIfMoving()/the global displayState[] array they used were this wait loop's

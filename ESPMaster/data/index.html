@@ -1076,6 +1076,14 @@
 			text-align: left;
 		}
 
+		.unit-row .unit-fwversion {
+			width: 110px;
+			text-align: left;
+			color: var(--color-text-muted);
+			font-family: var(--font-mono);
+			font-size: 0.85rem;
+		}
+
 		.unit-row .unit-input {
 			display: flex;
 			align-items: center;
@@ -2131,6 +2139,12 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 								<br>
 								<select id="unitFirmwareTarget" style="padding: 8px 10px; border-radius: 4px;"></select>
 								<button id="unitFirmwarePushButton" class="btn-primary" onclick="pushUnitFirmware()">Update starten</button>
+								<button id="unitBootloaderProbeButton" onclick="probeUnitBootloader()">Bootloader-Info abrufen</button>
+							</p>
+							<p class="note">
+								"Bootloader-Info abrufen" versetzt die Ziel-Unit kurz in den Bootloader-Modus (die
+								App wird dabei unterbrochen, die Unit re-homed danach neu) und liest u.a. die
+								twiboot-Versionskennung aus - kein Firmware-Schreibvorgang.
 							</p>
 						</div>
 
@@ -4599,7 +4613,9 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				showAdminBannerMessage("Network error while loading unit data.");
 			};
 
-			xhrRequest.open("GET", "/api/units", true);
+			//?detail=1 also gets Unit.ino's own firmware version (added 2026-09-16) - negligible extra
+			//I2C cost (3 bytes/unit) for a one-shot load like this, unlike a tight poll loop.
+			xhrRequest.open("GET", "/api/units?detail=1", true);
 			xhrRequest.send();
 		}
 
@@ -4629,6 +4645,12 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				offsetElement.id = "unitOffset" + unit.index;
 				offsetElement.innerText = unit.online ? ("Offset: " + unit.offset) : "Offset: -";
 
+				var fwVersionElement = document.createElement("div");
+				fwVersionElement.className = "unit-fwversion";
+				//null (not just missing) = a unit whose firmware predates version reporting - see
+				//ESPMaster.ino's readUnitInfo() 10-arg overload comment. Distinct from "-" (offline).
+				fwVersionElement.innerText = !unit.online ? "" : (unit.firmwareVersion ? ("FW " + unit.firmwareVersion) : "FW unbekannt");
+
 				var inputContainer = document.createElement("div");
 				inputContainer.className = "unit-input";
 
@@ -4654,6 +4676,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				row.appendChild(labelElement);
 				row.appendChild(statusElement);
 				row.appendChild(offsetElement);
+				row.appendChild(fwVersionElement);
 				row.appendChild(inputContainer);
 
 				container.appendChild(row);
@@ -5180,6 +5203,81 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				html += '<p>Seiten geschrieben/verifiziert: ' + result.pagesWritten + ' von ' + result.totalPages + '</p>';
 			}
 
+			resultEl.innerHTML = html;
+		}
+
+		//Reads twiboot's version string (and chip info) from the target Unit via the existing
+		//POST /api/units/firmware-push?action=probe endpoint - a real, disruptive action (briefly
+		//reboots the unit into the bootloader) reusing this project's only existing bootloader-talk
+		//path, not a routine status read. See ESPMaster.ino's probe handler comment for why the
+		//reported version is twiboot's own upstream string, not this project's fork version.
+		function probeUnitBootloader() {
+			var select = document.getElementById("unitFirmwareTarget");
+			var button = document.getElementById("unitBootloaderProbeButton");
+			var resultEl = document.getElementById("unitFirmwareResult");
+
+			if (!select.value) {
+				alert("Keine Ziel-Unit verfügbar.");
+				return;
+			}
+
+			if (!confirm("Unit " + select.value + " kurz in den Bootloader versetzen, um dessen Version auszulesen? Die App wird dabei unterbrochen und rehomed danach neu.")) {
+				return;
+			}
+
+			if (localDevelopment) {
+				resultEl.innerHTML = '<p class="status-online-ready">Bootloader-Version (simuliert): TWIBOOT v3.2</p>';
+				return;
+			}
+
+			button.disabled = true;
+			resultEl.innerHTML = '<p>Bootloader wird abgefragt, bitte warten...</p>';
+
+			var xhr = new XMLHttpRequest();
+			xhr.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					button.disabled = false;
+
+					if (this.status == 401) {
+						clearAdminPassword();
+						resultEl.innerHTML = '<p class="status-offline">Abgelehnt: falsches Administrator-Passwort.</p>';
+						return;
+					}
+
+					try {
+						var responseObject = JSON.parse(this.responseText);
+						renderUnitBootloaderProbeResult(responseObject);
+					} catch (e) {
+						resultEl.innerHTML = '<p class="status-offline">Antwort konnte nicht gelesen werden: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</p>';
+					}
+
+					loadUnits();
+				}
+			};
+
+			xhr.onerror = function () {
+				button.disabled = false;
+				resultEl.innerHTML = '<p class="status-offline">Netzwerkfehler während der Bootloader-Abfrage.</p>';
+			};
+
+			xhr.open("POST", "/api/units/firmware-push", true);
+			xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhr.setRequestHeader("X-OTA-Password", getAdminPassword());
+			xhr.send("action=probe&id=" + encodeURIComponent(select.value));
+		}
+
+		function renderUnitBootloaderProbeResult(result) {
+			var resultEl = document.getElementById("unitFirmwareResult");
+			if (!result.success) {
+				resultEl.innerHTML = '<p class="status-offline">' + escapeHtml(result.error || "Bootloader-Abfrage fehlgeschlagen.") + '</p>';
+				return;
+			}
+
+			var version = result.bootloaderVersion ? escapeHtml(result.bootloaderVersion) : "unbekannt (Lesefehler)";
+			var html = '<p class="status-online-ready">Bootloader-Version: ' + version + '</p>';
+			html += '<p class="note">Chip-Signatur: ' + escapeHtml(result.signature || "-") +
+				' &middot; Page-Größe: ' + escapeHtml(String(result.pageSize)) +
+				' &middot; Bootloader-Start: 0x' + escapeHtml(Number(result.bootloaderStart).toString(16)) + '</p>';
 			resultEl.innerHTML = html;
 		}
 

@@ -70,6 +70,12 @@
                                //updated to the newer Unit.ino still answers an 8-byte request
                                //without error - the last 2 bytes just read back as 255 (idle bus),
                                //not a detectable "unsupported" marker.
+#define ANSWER_SIZE_VERSION 11 //adds the 3 firmware-version bytes (major/minor/patch), added
+                               //2026-09-16 - see readUnitInfo()'s 10-arg overload. Same caveat as
+                               //ANSWER_SIZE_DIAG above: a unit not yet updated to report its version
+                               //reads back 255/255/255, not a distinguishable "unsupported" marker -
+                               //treat exactly that triple as "unknown (pre-versioning firmware)" in
+                               //the UI, not as a real "v255.255.255".
 #define FLAP_AMOUNT         45
 #define MIN_SPEED           1
 #define MAX_SPEED           12
@@ -291,8 +297,14 @@ IPAddress wifiPrimaryDns(8, 8, 8, 8);
 #endif
 
 //--- Core state - normal running of the system, be careful changing these ---
-//The current version of code to display on the UI
-const char* espVersion = "2.3.0-Scott";
+//The current version of code to display on the UI. "2.3.0-Scott" was JonnyBooker/split-flap's own
+//version at the point this project's initial commit forked it (2026-08-09) - never actually bumped
+//since, despite everything documented in BUGFIX_LOG.md. Reconstructed 2026-09-16 by walking every
+//commit since that fork forward through semver rules (feature commit = minor, bugfix commit =
+//patch, breaking/protocol change = major) - see BUGFIX_LOG.md's versioning entry for the full
+//per-commit derivation. This is now this project's own independent version line, no longer tracking
+//JonnyBooker's upstream releases (hence dropping the inherited "-Scott" codename).
+const char* espVersion = "4.8.1";
 
 //All the letters on the units that we have to be displayed. You can change these if it so pleases at your own risk
 const char letters[] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '$', '&', '#', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', '-', '?', '!'};
@@ -3651,11 +3663,22 @@ void loop() {
         int progress = -1;
         int unexpectedHomeTriggerCount = -1;
         int slowHomeSearchCount = -1;
-        online = readUnitInfo(unitIndex, status, offset, phase, progress, unexpectedHomeTriggerCount, slowHomeSearchCount);
+        int fwVersionMajor = -1;
+        int fwVersionMinor = -1;
+        int fwVersionPatch = -1;
+        online = readUnitInfo(unitIndex, status, offset, phase, progress, unexpectedHomeTriggerCount, slowHomeSearchCount, fwVersionMajor, fwVersionMinor, fwVersionPatch);
         doc["units"][unitIndex]["phase"] = phase;
         doc["units"][unitIndex]["progress"] = progress;
         doc["units"][unitIndex]["unexpectedHomeTriggerCount"] = unexpectedHomeTriggerCount;
         doc["units"][unitIndex]["slowHomeSearchCount"] = slowHomeSearchCount;
+        //255/255/255 means "unit firmware predates version reporting" (idle-bus read, not a real
+        //version) - see readUnitInfo()'s 10-arg overload comment. Reported as null, not "v255.255.255".
+        bool versionKnown = !(fwVersionMajor == 255 && fwVersionMinor == 255 && fwVersionPatch == 255) && fwVersionMajor >= 0;
+        if (versionKnown) {
+          doc["units"][unitIndex]["firmwareVersion"] = String(fwVersionMajor) + "." + String(fwVersionMinor) + "." + String(fwVersionPatch);
+        } else {
+          doc["units"][unitIndex]["firmwareVersion"] = (char*)0; //serializes as JSON null
+        }
       } else {
         online = readUnitInfo(unitIndex, status, offset);
       }
@@ -3953,6 +3976,21 @@ void loop() {
       doc["signature"] = sigBuf;
       doc["pageSize"] = chipInfo.pageSize;
       doc["bootloaderStart"] = chipInfo.bootloaderStart;
+
+      //Reads twiboot's own version string while still in the bootloader - cheap (one more small
+      //I2C transaction) and this is already the one place this project talks to the bootloader on
+      //demand, so no reason for a separate probe just for this. See twibootReadVersion()'s comment
+      //for why this reports twiboot's own upstream string ("TWIBOOT v3.2" as of this project's
+      //current fork, unchanged by any of the 3 documented Change entries in main.c's header) rather
+      //than this project's own fork version - the wire protocol was never extended to report that
+      //separately, so today this only tells you the unit was flashed with SOME twiboot build, not
+      //which of this project's own bootloader revisions.
+      char bootloaderVersion[17];
+      if (twibootReadVersion(bootAddress, bootloaderVersion, sizeof(bootloaderVersion))) {
+        doc["bootloaderVersion"] = bootloaderVersion;
+      } else {
+        doc["bootloaderVersion"] = (char*)0; //serializes as JSON null - read failed, don't guess
+      }
 
       //Unconditional re-init: repeated-start I2C reads can leave the software I2C state stuck even
       //when the physical bus is idle - recoverI2CBus() alone doesn't catch that.

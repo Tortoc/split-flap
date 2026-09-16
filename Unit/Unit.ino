@@ -18,6 +18,17 @@
 //letter indices (0-44), so it can never collide with a normal display request.
 #define CMD_ENTER_BOOTLOADER 255
 
+//This project's own semver for Unit.ino, reconstructed 2026-09-16 by walking this file's own
+//git history from the initial fork (feature commits = minor, bugfix commits = patch) - see
+//BUGFIX_LOG.md's versioning entry for the full derivation. Bump on every functionally meaningful
+//change (not pure comment/formatting cleanup). Reported to ESPMaster via requestEvent()'s 3
+//trailing bytes, added below - see ESPMaster.ino's ANSWER_SIZE_VERSION/readUnitInfo() comments for
+//why a unit running older firmware without these bytes reads back as 255/255/255 ("unknown"),
+//not a crash.
+#define UNIT_FW_VERSION_MAJOR 2
+#define UNIT_FW_VERSION_MINOR 2
+#define UNIT_FW_VERSION_PATCH 2
+
 //Address jumper block (J4 "AddressJumpers" on the fae-pcb schematic), 6 bits = 64 addresses. J4
 //has 8 pin pairs; D5/D6 (topmost) stay unused - I2C addresses are 7 bits wide and twiboot adds a
 //fixed 0x29 base (Unit/bootloader/twiboot/main.c, must stay in sync), so 6 bits (0-63, bootloader
@@ -639,6 +650,12 @@ void requestEvent() {
   //ANSWER_SIZE_DIAG) sees these two.
   Wire.write(unexpectedHomeTriggerCount);
   Wire.write(slowHomeSearchCount);
+  //Firmware version, appended 2026-09-16 - same backwards-compatible append-only extension as the
+  //two diagnostic counters above. A master still requesting only ANSWER_SIZE/ANSWER_SIZE_LIGHT/
+  //ANSWER_SIZE_DIAG bytes simply never reads these three.
+  Wire.write(UNIT_FW_VERSION_MAJOR);
+  Wire.write(UNIT_FW_VERSION_MINOR);
+  Wire.write(UNIT_FW_VERSION_PATCH);
   /*
     #ifdef SERIAL_ENABLE
     Serial.print("Status ");

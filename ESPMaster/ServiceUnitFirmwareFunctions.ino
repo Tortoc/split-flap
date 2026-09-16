@@ -213,6 +213,34 @@ bool twibootReadChipInfo(int bootAddress, TwibootChipInfo &infoOut) {
   return true;
 }
 
+//Reads twiboot's own 16-byte version string (e.g. "TWIBOOT v3.2" - upstream's own VERSION_STRING
+//constant, unchanged by any of this project's 3 documented fork changes, see main.c's header
+//comment). Same real-STOP-instead-of-repeated-START workaround as twibootReadChipInfo() above.
+//versionOut must be at least 17 bytes (16 raw bytes + a null terminator this function adds, since
+//twiboot's info[] array is a fixed-size byte buffer, not a null-terminated C string, and any
+//trailing bytes past the actual text are whatever was in flash at compile time, not necessarily 0).
+bool twibootReadVersion(int bootAddress, char* versionOut, size_t bufSize) {
+  if (bufSize < 17) {
+    return false;
+  }
+  Wire.beginTransmission(bootAddress);
+  Wire.write(TWIBOOT_CMD_SWITCH_APP); //same opcode as CMD_READ_VERSION (0x01) - see main.c's protocol comment
+  if (Wire.endTransmission(true) != 0) { //real STOP - see the comment above this function
+    return false;
+  }
+  delayMicroseconds(500);
+
+  if (Wire.requestFrom(bootAddress, 16) != 16) {
+    return false;
+  }
+
+  for (int i = 0; i < 16; i++) {
+    versionOut[i] = (char)Wire.read();
+  }
+  versionOut[16] = '\0';
+  return true;
+}
+
 //Reads `len` bytes of flash starting at `flashAddress` - used for the verify pass after every write.
 //Same repeated-start -> STOP change as twibootReadChipInfo() above.
 bool twibootReadFlash(int bootAddress, uint16_t flashAddress, uint8_t* bufferOut, uint8_t len) {
