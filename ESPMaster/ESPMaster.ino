@@ -946,12 +946,8 @@ void setup() {
         html += "<div style='color: #888;'>Loading diagnostics...</div>";
         html += "</div>";
         html += "<script>";
-        //Was a 1s-interval poll of /log - that route (and its RAM ring buffer) was removed in an
-        //earlier heap-headroom pass, leaving this page polling a dead endpoint (404 every second)
-        //whenever debug mode was on. Switched to the diagnostic sources that actually exist now
-        //(/api/crash-log, /api/diag?type=heap) - a one-shot fetch on load plus a manual refresh
-        //button, not a re-added interval poll, to avoid reintroducing the same kind of steady-state
-        //cost the earlier removal was for.
+        //One-shot fetch of the diagnostic sources that exist (/api/crash-log, /api/diag?type=heap)
+        //plus a manual refresh button - deliberately not an interval poll, to avoid steady-state cost.
         html += "function loadDiag() {";
         html += "  var container = document.getElementById('logContainer');";
         html += "  container.innerHTML = '<div style=\"color: #888;\">Loading diagnostics...</div>';";
@@ -999,9 +995,8 @@ void setup() {
         html += "  return text.replace(/[&<>\"']/g, function(m) { return map[m]; });";
         html += "}";
         html += "function continueToNormal() {";
-        //Same sessionStorage keys as index.html's getAdminPassword() (CODE_REVIEW.md #29) - this
-        //page is served from the same origin, so a password already entered on the main page this
-        //browser tab's session is reused here without asking again, and vice versa.
+        //Same sessionStorage keys as index.html's getAdminPassword() - same origin, so a password
+        //already entered on the main page is reused here without asking again, and vice versa.
         html += "  var password = '';";
         html += "  if (sessionStorage.getItem('splitflapAdminPasswordKnown') === '1') {";
         html += "    password = sessionStorage.getItem('splitflapAdminPassword') || '';";
@@ -1068,14 +1063,10 @@ void setup() {
       minimalDoc["animationMode"] = animationMode;
       minimalDoc["animationStaggerMs"] = animationStaggerMs;
       minimalDoc["deviceMode"] = deviceMode;
-      //Found 2026-09-10 (live user report): a browser reload always left the main Text field
-      //empty - this response never included inputText at all, so the client had nothing to
-      //repopulate it with even though the server-side value was still fully intact. inputText is
-      //a SHARED variable every mode's own per-second update (clock/date/countdown/countup/
-      //rotation) also writes its own rendered content into - only meaningful as "what the user
-      //actually typed for Text mode" while deviceMode is really "text" (see how the /api/settings
-      //POST handler above only ever assigns to it under that same condition); the client gates its
-      //use on deviceMode too, so sending it unconditionally here is harmless.
+      //inputText is a SHARED variable every mode's own per-second update (clock/date/countdown/
+      //countup/rotation) also writes its rendered content into - only meaningful as "what the user
+      //actually typed for Text mode" while deviceMode is really "text"; the client gates its use on
+      //deviceMode too, so sending it unconditionally here is harmless.
       minimalDoc["inputText"] = inputText;
       minimalDoc["version"] = espVersion;
       minimalDoc["lastTimeReceivedMessageDateTime"] = lastReceivedMessageDateTime;
@@ -1099,9 +1090,8 @@ void setup() {
       minimalDoc["mqttConnected"] = mqttEnabled && mqttClient.connected();
 #endif
       //timezone included so Administration can populate from this one fetch, given this device's
-      //hard 5-connection TCP limit. The password itself is NEVER sent back (CODE_REVIEW.md #29) -
-      //only whether one is currently set, plus the (non-secret) per-category toggle states, both
-      //safe to expose unauthenticated same as everything else on this GET.
+      //hard 5-connection TCP limit. The password itself is NEVER sent back - only whether one is
+      //currently set, plus the (non-secret) per-category toggle states.
       minimalDoc["otaPasswordSet"] = otaPassword != "";
       minimalDoc["accessControlTextPublic"] = accessControlTextPublic;
       minimalDoc["accessControlSettingsPublic"] = accessControlSettingsPublic;
@@ -1120,20 +1110,10 @@ void setup() {
       minimalDoc["quietHoursStart"] = quietHoursStart;
       minimalDoc["quietHoursEnd"] = quietHoursEnd;
 
-      //Bug #117: scheduled messages used to be serialized right here, and this handler would
-      //hang/crash the whole device (reason 254/abort, stack trace through umm_free_core - heap
-      //corruption) whenever a message actually sat in the queue. Two things were changed to fix
-      //it, following the exact same pattern already proven safe below for rotationItemCount/
-      //GET /api/rotation-items: (1) an isolated minimal repro (a standalone JsonDocument outside
-      //this handler) showed assigning an unbound JsonArray() to a field and then writing into it
-      //via nested [i][field] indexing corrupts the heap on this ArduinoJson version; switching to
-      //the documented-safe .to<JsonArray>()+.add<JsonObject>() pattern alone did NOT fix the crash
-      //here, though - (2) the yield() this loop used (for a >1s time budget across many messages)
-      //turned out to be the same known trap noted below for rotation items: yield() from inside
-      //this handler, combined with JSON-document operations, overflows the AsyncWebServer
-      //callback's small stack. Moved the whole thing to its own handler (GET /api/scheduled-
-      //messages) that mirrors rotation-items exactly: no yield() in the loop, just the item count
-      //here so the client knows there's something to fetch.
+      //Scheduled messages used to be serialized right here and could crash the device (heap
+      //corruption via nested JsonArray [i][field] indexing, plus a yield()-inside-handler stack
+      //overflow). Moved to its own handler (GET /api/scheduled-messages) that mirrors
+      //rotation-items below: no yield() in the loop, just the item count here.
       minimalDoc["scheduledMessageCount"] = scheduledMessages.size();
 
       //Rotation items themselves aren't built here - looping over them in this handler caused a
@@ -1154,36 +1134,33 @@ void setup() {
       webRequestActive = false;
     });
 
-    //Attempted merging this with the GET handler above into one HTTP_GET|HTTP_POST registration
-    //(same pattern as /api/wifi etc.) - reproducibly broken on real hardware: a genuine POST
-    //request received the GET handler's JSON response instead of "OK", and invalid POST bodies
-    //got 200 instead of 400. Root cause not chased down (this handler's combined body is far
-    //larger than every other successfully-merged pair - likely relevant, but unconfirmed);
-    //reverted to two separate registrations, verified working again.
+    //Merging this with the GET handler above into one HTTP_GET|HTTP_POST registration (same
+    //pattern as /api/wifi etc.) was reproducibly broken on real hardware: a genuine POST request
+    //received the GET handler's JSON response instead of "OK", and invalid POST bodies got 200
+    //instead of 400. Reverted to two separate registrations, verified working again.
     webServer.on("/api/settings", HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
 
       SerialPrintln(F("DEBUG: Request Post of Form Received"));
 
       bool submissionError = false;
-      //Set if replaceRotationItemsFromJson() rejects invalid JSON - see CODE_REVIEW.md #24. Kept
-      //separate from submissionError above: unlike that flag (which aborts the whole request
-      //with 400 before touching anything), the rest of this request still gets processed
-      //normally either way - only the final response wording changes.
+      //Set if replaceRotationItemsFromJson() rejects invalid JSON. Kept separate from
+      //submissionError above: unlike that flag (which aborts the whole request with 400 before
+      //touching anything), the rest of this request still gets processed normally either way -
+      //only the final response wording changes.
       bool rotationItemsUpdateRejected = false;
       //Set if a submitted scheduled message needs more lines than fit and could therefore never
-      //actually be shown - checked at acceptance time now, not just discovered (and then stuck
-      //forever) once due (found 2026-09-09, CODE_REVIEW_V2.md #10). Same "reject, don't silently
-      //drop/accept" pattern as rotationItemsUpdateRejected above.
+      //actually be shown - checked at acceptance time, not just discovered (and then stuck
+      //forever) once due. Same "reject, don't silently drop/accept" pattern as
+      //rotationItemsUpdateRejected above.
       bool scheduledMessageRejected = false;
-      //Distinct human-readable detail for scheduledMessageRejected, since it's now set for two
-      //different reasons (too long to render, or a past-due timestamp - see
-      //addAndPersistScheduledMessage()'s new return value below, CODE_REVIEW_V4.md #12) that
-      //deserve different explanations in the final response.
+      //Distinct human-readable detail for scheduledMessageRejected, since it's set for two
+      //different reasons (too long to render, or a past-due timestamp) that deserve different
+      //explanations in the final response.
       String scheduledMessageRejectionReason = "";
-      //Set if a direct (non-scheduled) text submission needs more lines than fit - see
-      //Code_REVIEW_V5.md #06, where this is actually checked, further down. Mutually exclusive
-      //with scheduledMessageRejected (gated on the same newMessageScheduleEnabledValue branch).
+      //Set if a direct (non-scheduled) text submission needs more lines than fit. Mutually
+      //exclusive with scheduledMessageRejected (gated on the same newMessageScheduleEnabledValue
+      //branch).
       bool directTextRejected = false;
 
       //Separate declarations - `bool a, b = false;` only initializes b, not a.
