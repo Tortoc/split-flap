@@ -588,20 +588,16 @@ unsigned long rotationItemElapsedRealSeconds = 0;
 //Set by checkRotation() from the current item's Alignment field ("" = inherit the default) and
 //threaded through to showText() as an override.
 String rotationCurrentAlignment = "";
-//Same pattern as rotationCurrentAlignment above, for the per-item animation override (found
-//2026-09-10, "Animation pro Rotation-Item") - "" / -1 = inherit the global animationMode/
-//animationStaggerMs.
+//Same pattern as rotationCurrentAlignment above, for the per-item animation override -
+//"" / -1 = inherit the global animationMode/animationStaggerMs.
 String rotationCurrentAnimationMode = "";
 int rotationCurrentAnimationStaggerMs = -1;
 Timezone timezone;
 
-//Bug (found while fixing #117): despite the name/parameter, neither timezone.now() nor
-//timezone.tzTime(TIME_NOW, UTC_TIME) actually return UTC - both return local time (verified
-//empirically via a temporary /api/diag?type=timetest probe: both were identical to each other and
-//exactly getOffset() minutes ahead of a known-correct external UTC clock). Reversing the offset
-//by hand is the only way found to get real UTC seconds out of this library - needed everywhere
-//this compares against a client-supplied Unix timestamp (scheduled messages, countdown/countup,
-//rotation items), since the client always sends real UTC seconds (e.g. JS Date.now()/1000).
+//Neither timezone.now() nor timezone.tzTime(TIME_NOW, UTC_TIME) actually return UTC despite the
+//name - both return local time. Reversing the offset by hand is the only way to get real UTC
+//seconds, needed wherever this compares against a client-supplied Unix timestamp (scheduled
+//messages, countdown/countup, rotation items).
 long getRealUtcNow() {
   return timezone.now() + (long)timezone.getOffset() * 60;
 }
@@ -644,20 +640,13 @@ bool firmwareUpdateAuthFailed = false;
 //AsyncWebServer callback (too little stack there).
 #define OTA_CHUNK_SIZE 4096 //must match CHUNK_SIZE in index.html's uploadFirmware()
 uint8_t* otaChunkBuffer = nullptr; //allocated only while an upload is in progress
-//Which request currently "owns" otaChunkBuffer/otaChunkLen while its body is still streaming in -
-//found 2026-09-10, CODE_REVIEW_V3.md #1 (live-reproduced with the extracted body handler): the
-//existing otaPendingPhase!=OTA_PHASE_NONE check in the body handler only catches a SECOND request
-//starting once a FIRST request's entire body has already been fully received and its outer
-//handler has run (that's the only thing that ever sets otaPendingPhase away from NONE). Two
-//requests whose bodies are BOTH still streaming in concurrently - fully possible on this
-//single-threaded event loop, since AsyncTCP services multiple open connections' incoming data in
-//whatever order packets arrive - see otaPendingPhase stay OTA_PHASE_NONE the entire time either
-//body is mid-transfer, so neither ever rejects the other; repro: buffer holding "AA" (chunk A's
-//first fragment) ends up "BBaa" once B's index==0 fragment resets otaChunkLen out from under A's
-//still-in-flight remainder. otaChunkOwner closes that gap directly: claimed by whichever request's
-//body arrives at index==0 first, checked (not just otaPendingPhase) by every later request's own
-//index==0, and released once its owning request's outer handler runs (body fully received) or by
-//the abandoned-upload watchdog if the connection vanishes before that.
+//Which request currently "owns" otaChunkBuffer/otaChunkLen while its body is still streaming in.
+//Two requests' bodies can stream in concurrently on this single-threaded event loop (AsyncTCP
+//services connections in whatever order packets arrive), so a simple otaPendingPhase!=NONE check
+//alone can't catch a second upload starting mid-transfer of a first. Claimed by whichever
+//request's body arrives at index==0 first, checked by every later request's own index==0, and
+//released once its owning request's outer handler runs (body fully received) or by the
+//abandoned-upload watchdog if the connection vanishes before that.
 AsyncWebServerRequest* otaChunkOwner = nullptr;
 volatile size_t otaChunkLen = 0;
 enum OtaPhase { OTA_PHASE_NONE, OTA_PHASE_BEGIN, OTA_PHASE_WRITE, OTA_PHASE_FINISH };
@@ -665,21 +654,14 @@ volatile OtaPhase otaPendingPhase = OTA_PHASE_NONE; //what loop() should do next
 volatile OtaPhase otaCompletedPhase = OTA_PHASE_NONE;
 volatile uint32_t otaBeginSize = 0;
 //Bytes actually handed to Update.write() so far, tracked ourselves rather than trusting
-//Update.progress() at finish time (found 2026-09-09, live-verified against a real firmware image
-//- see the comment at the finish-phase comparison below for why Update.progress() alone is wrong).
+//Update.progress() at finish time (see the finish-phase comparison below for why).
 volatile size_t otaBytesWritten = 0;
-//Removed 2026-09-10, CODE_REVIEW_V4.md #1: this used to be a single shared/global "reject this
-//chunk" flag, set by EITHER the true owner's own body OR a losing concurrent request's body, and
-//cleared by whichever request's outer handler happened to run next - regardless of which one
-//actually caused/deserved it. Repro: A owns a chunk, B loses the ownership race and sets the
-//shared flag, A's own next fragment gets silently dropped because of it, A's outer handler then
-//reports 400 and (wrongly) clears the flag on B's behalf, letting B's later fragment fall through
-//and get appended onto A's leftover buffer - a Frankenstein "AAbb" chunk gets accepted for
-//writing. Fixed by never letting a losing request's body touch ANY shared state at all (see the
-//per-fragment "otaChunkOwner != request" check below) and having the outer handler derive its
-//response purely from "was I (still) the owner when my body finished" (a request-pointer
-//comparison, inherently request-scoped) plus statelessly re-checked facts (password,
-//request->contentLength()) instead of a mutable shared flag.
+//A single shared "reject this chunk" flag would let a losing concurrent request's body poison a
+//legitimate owner's result (each side's outer handler could clear/set it on the other's behalf).
+//Fixed by never letting a losing request's body touch shared state at all (see the per-fragment
+//"otaChunkOwner != request" check below) and having the outer handler derive its response purely
+//from "was I still the owner when my body finished" (a request-pointer comparison) plus
+//statelessly re-checked facts (password, request->contentLength()).
 volatile bool otaResultReady = false;
 volatile bool otaResultSuccess = false;
 String otaResultMessage = "";
@@ -691,48 +673,32 @@ PendingRequestSlot pendingFirmwareUploadSlot; //reused in turn by all three /api
 #endif
 #if UNIT_BOOTLOADER_ENABLE == true
 //Set when the upload couldn't be written/moved into place (open() or write() failure, or the
-//final rename() failing) - see the temp-file+atomic-rename pattern on that handler
-//(CODE_REVIEW.md #5). Safe to keep global/shared despite CODE_REVIEW_V4.md #1/#2 (unlike the
-//removed ...AuthFailed/...BusyFailed flags below): only ever SET inside the "am I the current
-//owner" gated section of the body handler, and only ever READ/cleared by the outer handler after
-//confirming (via wasOwner) that THIS request still is that same owner - and reset to false the
-//moment a NEW request claims ownership, so a vanished previous owner's leftover true can never
-//leak into the next one's result.
+//final rename() failing) - see the temp-file+atomic-rename pattern on that handler. Safe to keep
+//global/shared: only ever SET inside the "am I the current owner" gated section of the body
+//handler, and only ever READ/cleared by the outer handler after confirming (via wasOwner) that
+//THIS request still is that same owner - reset to false the moment a new request claims ownership,
+//so a vanished previous owner's leftover true can never leak into the next one's result.
 bool unitFirmwareUploadWriteFailed = false;
 //Which request currently "owns" the shared static unitFirmwareFile/temp-file state while its body
-//is still streaming in - found 2026-09-10, CODE_REVIEW_V3.md #2 (live-reproduced against the
-//extracted callback): the earlier CODE_REVIEW_V2.md #3 fix only reordered the password check
-//ahead of the cleanup step, so an UNAUTHENTICATED request could no longer disrupt an
-//authenticated one - but two AUTHENTICATED uploads (e.g. an accidental double-submit, or two
-//admin sessions) still shared the exact same static File/temp-path with no per-request isolation
-//at all, so their fragments could still interleave: A writes "AA", B starts and closes/replaces
-//A's temp file, A's later "aa" fragment then writes through B's now-reassigned handle - repro
-//confirmed: published file contains "BBaa". Claimed by whichever request's body arrives at
-//index==0 first, checked by every later request's own index==0 (in addition to, not instead of,
-//the existing password check), and released once its owning request's outer handler runs (body
-//fully received) or immediately via onDisconnect if the connection vanishes before that.
+//is still streaming in. Two AUTHENTICATED uploads (accidental double-submit, or two admin
+//sessions) could otherwise share the same static File/temp-path with no per-request isolation, so
+//their fragments interleave (A writes "AA", B starts and closes/replaces A's temp file, A's later
+//"aa" fragment writes through B's now-reassigned handle). Claimed by whichever request's body
+//arrives at index==0 first, checked by every later request's own index==0 (in addition to the
+//password check), and released once its owning request's outer handler runs (body fully received)
+//or immediately via onDisconnect if the connection vanishes before that.
 //
-//unitFirmwareUploadAuthFailed/unitFirmwareUploadBusyFailed (removed 2026-09-10,
-//CODE_REVIEW_V4.md #2) used to be shared/global flags set by ANY request's body handler (including
-//a losing/rejected one) and cleared by ANY request's outer handler - so a concurrent request B's
-//bad password or busy-rejection could silently poison the flags a completely different, legitimate
-//owner A's own outer handler then read, e.g. making A's real fragment look "already failed" and
-//get dropped, or making A's outer handler clear B's flag on B's behalf, letting a later fragment of
-//B's fall through and get appended onto A's file. Repro (see CODE_REVIEW_V4.md #2): file ends up
-//"AAzz" (missing "aa"), A gets 200, B gets 401. Fixed by never touching shared state for a request
-//that fails before claiming ownership, and by having the outer handler re-derive its response from
-//data that's either independently stateless (the password, re-checked directly) or inherently
-//request-scoped (wasOwner, a request-pointer comparison against unitFirmwareUploadOwner) instead of
-//a mutable flag any other request's callback could also write to.
+//A single shared unitFirmwareUploadAuthFailed/BusyFailed flag would let any request's rejection
+//(bad password, busy) poison the result a different, legitimate owner's outer handler then reads.
+//Fixed by never touching shared state for a request that fails before claiming ownership, and by
+//deriving the outer handler's response from stateless facts (password, re-checked directly) or
+//request-scoped ones (wasOwner, a pointer comparison) instead of a flag any other request could
+//also write to.
 AsyncWebServerRequest* unitFirmwareUploadOwner = nullptr;
 #endif
-//Same reasoning/lifetime as unitFirmwareUploadWriteFailed above (CODE_REVIEW_V4.md #2) - only set
-//within the "am I owner" gated section, only read/cleared once wasOwner is confirmed true, reset
-//to false the moment a new request claims ownership.
+//Same reasoning/lifetime as unitFirmwareUploadWriteFailed above.
 bool webFileUploadWriteFailed = false;
-//Same ownership pattern as unitFirmwareUploadOwner above (CODE_REVIEW_V3.md #2). The former
-//webFileUploadAuthFailed/webFileUploadBusyFailed shared flags were removed for the identical
-//cross-request-poisoning reason documented on unitFirmwareUploadOwner above (CODE_REVIEW_V4.md #2).
+//Same ownership pattern as unitFirmwareUploadOwner above.
 AsyncWebServerRequest* webFileUploadOwner = nullptr;
 
 String debugStatus = "";
@@ -789,15 +755,10 @@ void setup() {
   recoverI2CBus();
 
   //Optional DS3231 RTC (see ServiceRtcFunctions.ino) - probed and, if present and trustworthy,
-  //used to seed the clock RIGHT HERE, deliberately before initWiFi() below and unconditional on
-  //its outcome (not just in the WiFi-succeeded branch further down) - the whole point is a
-  //correct-ish clock independent of WiFi/NTP, so it must not itself depend on WiFi succeeding.
-  //ntpSyncApplyResult() (ServiceAsyncTimeSyncFunctions.ino) is reused as-is rather than
-  //duplicating its careful offset math - same reasoning there applies to a raw UTC value from
-  //the RTC as it does to one from NTP. The timezone RULE (DST-aware offset) isn't resolved from
-  //the network yet at this point - exactly the same brief "shows UTC until the async timezone
-  //lookup catches up" window the existing NTP path already has and already treats as harmless
-  //(see startTimezoneLookup()'s own call site comment further down), no new limitation here.
+  //used to seed the clock RIGHT HERE, before initWiFi() and unconditional on its outcome, so the
+  //clock is correct-ish independent of WiFi/NTP. Reuses ntpSyncApplyResult()'s offset math as-is.
+  //The timezone RULE isn't resolved from the network yet - same brief "shows UTC until the async
+  //timezone lookup catches up" window the NTP path already has (see startTimezoneLookup() below).
   probeRtc();
   if (rtcPresent) {
     time_t rtcUtc;
@@ -814,16 +775,13 @@ void setup() {
 #endif
 
   //Anchors the safety ceiling for the unit-readiness wait below - captured here, at the earliest
-  //practical point, not when loop() first reaches UNIT_READINESS_POLLING, so the 30s ceiling
-  //really is measured from boot (matching the old fixed-wait's own timing) rather than starting
-  //fresh only once the SCAN phase happens to finish.
+  //practical point, so the 30s ceiling is measured from boot rather than from when the SCAN phase
+  //happens to finish.
   unitReadinessStartedAt = millis();
 
-  // The I2C scan/unit-readiness wait itself (unitReadinessPhase) is driven synchronously further
-  // down in THIS function, right before initWiFi() - not deferred to loop() as an earlier version
-  // of this comment claimed. loop() cannot run until setup() returns, so anything left waiting
-  // for loop() alone would still sit behind initWiFi()'s own blocking autoConnect() call
-  // regardless - see tickUnitReadiness()'s own comment for the full story.
+  //The I2C scan/unit-readiness wait (unitReadinessPhase) is driven synchronously further down in
+  //THIS function, right before initWiFi() - loop() cannot run until setup() returns, so deferring
+  //it to loop() would still sit behind initWiFi()'s own blocking autoConnect() call regardless.
   SerialPrintln(F(""));
   SerialPrintln(F("#######################################################"));
   SerialPrintln(F("..............Split Flap Display Starting.............."));
@@ -831,39 +789,28 @@ void setup() {
   debugStatus = "Starting";
   SerialPrintln(F("DEBUG: Status = ") + debugStatus);
 
-  //Config load + crash-log persistence, unconditional and as early as possible - found
-  //2026-09-11 while addressing "why does it still take ~40s to show the right time": this used
-  //to run in TWO places (once in the WiFi-succeeded branch below, once in the WiFi-failed branch
-  //added for CODE_REVIEW_V4.md's crash-log/WiFi-independence fix, Punkt 199) - consolidated into
-  //one call here, before initWiFi() even runs. Neither function has any WiFi dependency, and
-  //loadValuesFromFileSystem() is what actually knows the previously configured deviceMode/
-  //inputText/rotationItems/alignment/etc. - the whole point of this move is to have that known as
-  //early as physically possible, independent of WiFi outcome, so the previously configured mode
-  //can render (once units report ready, see unitReadinessPhase below) as fast as possible.
+  //Config load + crash-log persistence, unconditional and as early as possible, before initWiFi()
+  //even runs - neither function has a WiFi dependency, and loadValuesFromFileSystem() is what
+  //knows the previously configured deviceMode/inputText/rotationItems/alignment/etc., so the
+  //previously configured mode can render (once units report ready, see unitReadinessPhase below)
+  //as fast as possible regardless of WiFi outcome.
   debugStatus = "File System Init";
   SerialPrintln(F("DEBUG: Status = ") + debugStatus);
   initialiseFileSystem();
   loadValuesFromFileSystem();
   checkAndPersistCrashLog(); // see ServiceCrashLogFunctions.ino - must run after LittleFS mounts
 
-  //Show the previously configured mode BEFORE WiFi - found 2026-09-11, same day tickUnitReadiness()
-  //was factored out of loop() for the same reason: loop() (where the display update state machine
-  //actually runs) cannot start until setup() returns, so nothing could ever render before
-  //initWiFi()'s blocking autoConnect() call finished, no matter how "non-blocking" the code after
-  //it was written to be. Deliberately NOT attempting to fix WiFi connect time itself here - a
-  //prior, unrelated custom WiFi-reconnect rewrite this same project already tried made things
-  //WORSE and had to be reverted - so this leaves WiFiManager's own connect logic completely
-  //untouched and instead does the one thing available without touching it: gets the
-  //unit-readiness wait and one real display update to happen BEFORE initWiFi()'s blocking call,
-  //spun synchronously right here since nothing else in setup() is waiting on this yet (WiFi/the
-  //web server haven't started regardless of how long this takes). Safety ceiling below matches
-  //UNIT_READINESS_MAX_WAIT_MS's own reasoning - never worse than doing nothing extra here if
-  //units never respond. (The dominant boot-time cost turned out to be elsewhere entirely, but
-  //this move is still correct and worth keeping on its own merits.)
+  //Show the previously configured mode BEFORE WiFi: loop() (where the display update state
+  //machine runs) cannot start until setup() returns, so nothing could ever render before
+  //initWiFi()'s blocking autoConnect() call finished, however non-blocking the code after it is.
+  //Deliberately not touching WiFiManager's own connect logic (a prior custom reconnect rewrite
+  //made things worse and had to be reverted) - instead gets the unit-readiness wait and one real
+  //display update to happen BEFORE initWiFi()'s blocking call, spun synchronously here since
+  //nothing else in setup() is waiting on this yet. Safety ceiling below matches
+  //UNIT_READINESS_MAX_WAIT_MS's own reasoning.
   //Apply the cached POSIX rule (if any) from the LAST successful timezoned.rop.nl lookup, before
-  //rendering anything below - see cachedTimezonePosix's own comment. Skipped entirely if empty
-  //(fresh device, or a device that has never had network access) - Clock/Date mode then falls
-  //back to showing UTC until the real network lookup resolves, exactly as before this feature.
+  //rendering anything below - see cachedTimezonePosix's own comment. Skipped if empty (fresh
+  //device); Clock/Date mode then falls back to showing UTC until the real network lookup resolves.
   if (cachedTimezonePosix != "") {
     timezone.setPosix(cachedTimezonePosix);
     SerialPrintln(F("DEBUG: Applied cached timezone POSIX rule (pre-WiFi): ") + cachedTimezonePosix);
@@ -901,10 +848,9 @@ void setup() {
     SerialPrintln(F("DEBUG: Status = ") + debugStatus);
 
     //ezTime's own auto-sync (events()-driven updateNTP()) is fully disabled - setInterval(0)
-    //makes events() a permanent no-op (see ezTime.cpp: "if (_ntp_interval) updateNTP();"). Our own
-    //ServiceAsyncTimeSyncFunctions.ino (checkNtpSync()) takes over that job instead, ticked from
-    //loop() further down - a genuinely non-blocking replacement, see that file's header comment
-    //for why (the original blocking DNS+UDP calls could crash the device under network stress).
+    //makes events() a permanent no-op. Our own ServiceAsyncTimeSyncFunctions.ino (checkNtpSync())
+    //takes over that job instead, ticked from loop() - a genuinely non-blocking replacement (the
+    //original blocking DNS+UDP calls could crash the device under network stress).
     setInterval(0);
 
     //Not setDebug(INFO) - ezTime's own internal logging fires extremely often around WiFi
@@ -937,32 +883,19 @@ void setup() {
       SerialPrintln(F("DEBUG: WARNING - NTP sync failed or timed out, continuing anyway"));
     }
 
-    // Must come after loadValuesFromFileSystem() - needs timezoneSetting, populated from there.
-    // (loadValuesFromFileSystem() itself now runs once, unconditionally, before initWiFi() above -
-    // see that call site's own comment, found 2026-09-11.)
-    // Was a blocking timezone.setLocation() call - missed in the first pass of the CODE_REVIEW.md
-    // #30 async rewrite (only the /api/timezone endpoint's own call was replaced at first; this
-    // separate boot-time one, setting the timezone RULE the persisted setting refers to rather
-    // than the current time-of-day, was still calling the blocking version and still showed up
-    // live as "DEBUG: Timezone set to: ..." printing only after the old synchronous network wait -
-    // found by checking the serial boot log for it, not by inspection alone). Fire-and-forget here
-    // instead of waiting for it: checkTimezoneLookup() (ticked every loop() tick, same as the
-    // endpoint's own lookups) picks it up and applies it (timezone.setPosix()) within the first
-    // couple of loop() iterations once the network's up. Update 2026-09-11: the first Clock/Date
-    // render now happens BEFORE this call even runs (see the pre-WiFi display block above) - with
-    // cachedTimezonePosix populated (the common case, after the very first successful lookup
-    // ever), that first render is already correct LOCAL time, no UTC window at all. Only a device
-    // that has never once resolved its timezone (fresh install, or LittleFS wiped) still shows UTC
-    // until this lookup completes, same accepted trade-off as before, just narrower. Fire-and-
-    // forget here rather than waiting for it either way - blocking setup() on a network round-trip
-    // can itself trip the software watchdog under network stress (see
-    // ServiceAsyncTimeSyncFunctions.ino's header comment).
+    //Must come after loadValuesFromFileSystem() - needs timezoneSetting, populated from there.
+    //Fire-and-forget rather than a blocking timezone.setLocation() call: checkTimezoneLookup()
+    //(ticked every loop() tick) picks it up and applies it (timezone.setPosix()) within the first
+    //couple of loop() iterations once the network's up - blocking setup() on a network round-trip
+    //can itself trip the software watchdog under network stress. The first Clock/Date render
+    //already happened before this (see the pre-WiFi display block above); with cachedTimezonePosix
+    //populated (the common case) that render is already correct LOCAL time. Only a device that has
+    //never once resolved its timezone still shows UTC until this lookup completes.
     startTimezoneLookup(timezoneSetting);
     bootTimezoneLookupPending = true; //see its own comment - lets loop() retry this specific attempt on failure
     SerialPrintln(F("DEBUG: Timezone lookup started (non-blocking) for: ") + timezoneSetting);
     
-    // Debug mode was already loaded at the very top of setup() - just log the already-known
-    // value here.
+    //Debug mode was already loaded at the very top of setup() - just log the already-known value.
 #if DEBUG_ENABLE == true
     SerialPrintln(F("DEBUG: Debug mode: ") + String(showDebugPage ? F("enabled") : F("disabled")) + F(" (controls startup page, error status, page load log, and serial log)"));
 #endif
@@ -971,14 +904,11 @@ void setup() {
     debugStatus = "Web Server Setup";
     SerialPrintln(F("DEBUG: Status = ") + debugStatus);
 
-    //Was `webServer.serveStatic("/", LittleFS, "/")` - a filesystem-wide static route. The only
-    //real static asset is index.html(.gz), already served explicitly below (GET "/") - the
-    //favicon is an embedded base64 data URI in that same HTML, no separate file. This catch-all
-    //route served NO legitimate purpose beyond that: it exposed every runtime config file in
-    //LittleFS root directly and unauthenticated, INCLUDING the OTA password itself
-    //(GET /otapassword.txt returned it in plaintext, completely bypassing every password check
-    //in this file - found 2026-09-09, CODE_REVIEW.md #29). Removed entirely rather than adding an
-    //allowlist filter - there was nothing legitimate left to allow through it.
+    //A filesystem-wide static route (`webServer.serveStatic("/", LittleFS, "/")`) was removed
+    //entirely: the only real static asset is index.html(.gz), already served explicitly below
+    //(GET "/") - the favicon is an embedded base64 data URI in that same HTML. The catch-all route
+    //served no legitimate purpose beyond that and exposed every runtime config file in LittleFS
+    //root unauthenticated, including the OTA password itself in plaintext.
 
     //All API routes below live under a single "/api/" prefix - full endpoint reference in API.md.
     webServer.on("/", HTTP_GET, [](AsyncWebServerRequest * request) {
