@@ -49,6 +49,9 @@ void checkExtensionHealth() {
     if (ext.Host == "") {
       continue;
     }
+    bool wasReachable = ext.Reachable;
+    int previousUnitsAmount = ext.UnitsAmount;
+
     WiFiClient client;
     HTTPClient http;
     http.setTimeout(EXTENSION_HTTP_TIMEOUT_MS);
@@ -66,6 +69,14 @@ void checkExtensionHealth() {
     ext.Reachable = ok;
     ext.LastCheckedAt = millis();
     SerialPrintln(F("Extension device \"") + ext.Host + F("\": ") + (ok ? (F("reachable, ") + String(ext.UnitsAmount) + F(" units")) : F("unreachable")));
+
+    //combinedUnitsAmount() only reflects THIS extension's units while Reachable - a transition
+    //either way, or a changed unit count while already reachable, changes the effective combined
+    //width even though the requested text itself never changed. See displayRenderGeneration's own
+    //comment (CODE_REVIEW_V6.md #3).
+    if (ext.Reachable != wasReachable || ext.UnitsAmount != previousUnitsAmount) {
+      displayRenderGeneration++;
+    }
   }
 }
 
@@ -182,5 +193,9 @@ bool replaceExtensionDevicesFromJson(String json) {
   String extensionDevicesJsonOut;
   serializeJson(outDoc, extensionDevicesJsonOut);
   writeFile(LittleFS, extensionDevicesPath, extensionDevicesJsonOut.c_str());
+
+  //The configured host list is part of the effective combined width/topology - see
+  //displayRenderGeneration's own comment (CODE_REVIEW_V6.md #3).
+  displayRenderGeneration++;
   return true;
 }

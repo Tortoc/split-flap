@@ -2649,6 +2649,9 @@ void setup() {
         deviceRole = newRole;
         writeFile(LittleFS, deviceRolePath, deviceRole.c_str());
         checkBootSnapshotFreshness();
+        //combinedUnitsAmount() changes the moment this device stops/starts counting extensions -
+        //see displayRenderGeneration's own comment (CODE_REVIEW_V6.md #3).
+        displayRenderGeneration++;
       }
       request->send(200, "text/plain", "OK");
     });
