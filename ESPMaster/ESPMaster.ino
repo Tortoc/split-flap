@@ -3627,17 +3627,16 @@ void loop() {
       unsigned long bootloaderSearchStart = millis();
       uint8_t enterBootloaderResult = requestUnitEnterBootloader(unitIndex);
       SerialPrintln(F("  requestUnitEnterBootloader() Wire.endTransmission() = ") + String(enterBootloaderResult) + F(" (0 = success)"));
-      //Invalidate the display cache - found 2026-09-10, CODE_REVIEW_V3.md #10: this interrupts and
-      //reboots the unit's running app regardless of whether the probe below actually finds it in
-      //the bootloader afterward - see the identical fix/comment on pushFirmwareToUnit()'s call
-      //site above. Not reached in the collisionRisk branch above, which deliberately never sends
-      //this command at all - nothing to invalidate there.
+      //Invalidate the display cache - this interrupts and reboots the unit's running app
+      //regardless of whether the probe below actually finds it in the bootloader afterward - see
+      //the identical fix/comment on pushFirmwareToUnit()'s call site above. Not reached in the
+      //collisionRisk branch above, which deliberately never sends this command at all.
       displayRenderGeneration++;
 
       //Same retry/backoff as pushFirmwareToUnit() - give the watchdog reset + twiboot startup
       //time to happen. Probes ONLY unitIndex's own expected address, not a full scan of the whole
       //bootloader address range - see findExpectedBootloaderAddress()'s comment
-      //(ServiceUnitFirmwareFunctions.ino, CODE_REVIEW_V2.md #15).
+      //(ServiceUnitFirmwareFunctions.ino).
       TwibootChipInfo chipInfo;
       int bootAddress = findExpectedBootloaderAddress(unitIndex, chipInfo, bootloaderSearchStart) ? expectedBootAddress : -1;
 
@@ -3657,12 +3656,8 @@ void loop() {
 
       //Reads twiboot's own version string while still in the bootloader - cheap (one more small
       //I2C transaction) and this is already the one place this project talks to the bootloader on
-      //demand, so no reason for a separate probe just for this. See twibootReadVersion()'s comment
-      //for why this reports twiboot's own upstream string ("TWIBOOT v3.2" as of this project's
-      //current fork, unchanged by any of the 3 documented Change entries in main.c's header) rather
-      //than this project's own fork version - the wire protocol was never extended to report that
-      //separately, so today this only tells you the unit was flashed with SOME twiboot build, not
-      //which of this project's own bootloader revisions.
+      //demand. Reports the SF-TWIBOOT vX.Y string from VERSION_STRING (see twibootReadVersion()'s
+      //comment) - tells you which fork build the unit was flashed with.
       char bootloaderVersion[17];
       if (twibootReadVersion(bootAddress, bootloaderVersion, sizeof(bootloaderVersion))) {
         doc["bootloaderVersion"] = bootloaderVersion;
@@ -3720,21 +3715,15 @@ void loop() {
 #endif
 
   //isWifiConfigured only ever LATCHES true, once, inside initWiFi() (setup()) - it never gets
-  //corrected back if the initial connect attempt genuinely failed (as opposed to a brief drop
-  //after a successful connect, which the SDK's own auto-reconnect already handles - see the
-  //comment above this block). Found via Code_REVIEW_V5.md #02: this used to mean a router/AP
-  //outage that happens to overlap exactly with THIS device's boot window left it permanently
-  //stuck showing "OFFLINE" until a manual power cycle - overwriting deviceMode/alignment/flapSpeed
-  //in the process, which also stopped the RTC-seeded clock from ever being shown again even though
-  //the whole point of that feature is to keep working without WiFi. Fixed in two parts: (1) render
-  //"OFFLINE" as a transient overlay via showText()'s own alignment-override parameter instead of
-  //mutating the user's real settings - once WiFi recovers, the original deviceMode was never
-  //actually touched; (2) periodically retry the STA connection ourselves in the background
-  //(WiFiManager's own portal has already given up for good by the time control reaches loop() -
-  //see initWiFi()'s comment - so nothing else would ever retry this on its own) and, on success,
-  //perform a single controlled reboot to run the exact same successful-boot sequence a normal
-  //connect would have - far lower-risk than trying to duplicate the ~2000 lines of one-time web
-  //server/NTP/MQTT setup that normally only ever runs once, inline, from within setup() itself.
+  //corrected back if the initial connect attempt genuinely failed (a brief drop after a
+  //successful connect is instead handled by the SDK's own auto-reconnect). A router/AP outage
+  //overlapping THIS device's boot window would otherwise leave it stuck showing "OFFLINE" until a
+  //manual power cycle. Fixed in two parts: (1) render "OFFLINE" as a transient overlay via
+  //showText()'s own alignment-override parameter instead of mutating the user's real settings -
+  //the original deviceMode is never touched; (2) periodically retry the STA connection ourselves
+  //in the background (WiFiManager's own portal has already given up for good by the time control
+  //reaches loop() - see initWiFi()'s comment) and, on success, perform a single controlled reboot
+  //to run the exact same successful-boot sequence a normal connect would have.
   if (!isWifiConfigured) {
     showText("OFFLINE", 0, ALIGNMENT_MODE_CENTER);
     delay(100);
@@ -3774,13 +3763,9 @@ void loop() {
   
   //ezTime's own auto-sync is disabled (setInterval(0) in setup()) - events() is now a permanent
   //no-op, not called here anymore. checkNtpSync() (ServiceAsyncTimeSyncFunctions.ino) replaces it
-  //with a genuinely non-blocking implementation instead of the wdtDisable()/wdtEnable() bracket
-  //tried and reverted earlier (2026-09-09, CODE_REVIEW.md #30 - that bracket caused a NEW, worse
-  //crash type on this ESP8266 core/SDK version when applied to this
-  //every-tick call site). checkTimezoneLookup() is the equivalent replacement for the
-  ///api/timezone endpoint's own network lookup - see pendingTimezoneSlot's processing block
-  //further down for how it's driven. Neither call below ever blocks - both are cheap, immediate
-  //checks on every tick where nothing is in flight.
+  //with a genuinely non-blocking implementation. checkTimezoneLookup() is the equivalent
+  //replacement for the /api/timezone endpoint's own network lookup - see pendingTimezoneSlot's
+  //processing block further down for how it's driven. Neither call below ever blocks.
   checkNtpSync();
   checkTimezoneLookup();
 
@@ -3801,8 +3786,8 @@ void loop() {
 
     //No-op for every role except primary (and even then, only once per
     //EXTENSION_HEALTH_CHECK_INTERVAL_MS) - see ServiceExtensionFunctions.ino's own top comment for
-    //why a short-bounded blocking call here is an accepted, documented exception to this project's
-    //usual "no blocking network calls" rule.
+    //why a short-bounded blocking call here is an accepted exception to the usual "no blocking
+    //network calls" rule.
     checkExtensionHealth();
 
     if (millisReached(lastBootSnapshotCheckAt + BOOT_SNAPSHOT_CHECK_INTERVAL_MS)) {
@@ -3880,10 +3865,9 @@ int scanI2CBus() {
   unitsAmount = detectedAmount;
   //A rescan can mean a unit restarted and lost its displayed letter (or the unit count itself
   //changed) - either way the physical display may no longer match the text-content cache, even
-  //though the cache's own text/alignment never changed. See displayRenderGeneration's comment -
-  //CODE_REVIEW.md #14. Bumped unconditionally (including at boot, harmless there) rather than
-  //only when detectedAmount differs from before, since a unit restarting mid-scan with the SAME
-  //final count is exactly the case this needs to catch.
+  //though the cache's own text/alignment never changed. See displayRenderGeneration's comment.
+  //Bumped unconditionally rather than only when detectedAmount differs, since a unit restarting
+  //mid-scan with the SAME final count is exactly the case this needs to catch.
   displayRenderGeneration++;
 
   // Summary report
