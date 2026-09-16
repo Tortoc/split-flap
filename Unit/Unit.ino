@@ -357,16 +357,14 @@ int markerLetterIndex() {
 //post-calibration full-rotation move) - both only ever call this with letterSteps < AMOUNTFLAPS
 //(diffPosition/posLetter are always 0..44), so a single call here never covers a full revolution.
 //
-//`startLetter` is the absolute letter index this specific move starts FROM (-1 for the
-//post-calibration full-rotation call, which always starts fresh right at letter 0, immediately
-//after calibrate() itself just left the marker behind - a move of well under one AMOUNTFLAPS from
-//there can never reach back around to it, so -1 there keeps every marker reading anomalous). For a
-//"direct" move (rotateToLetter()'s other branch), it's NOT true that "once already homed, this
-//never crosses the home marker again": calOffset can place the marker's own letter-space position
-//(see markerLetterIndex() above) ANYWHERE within the 0..AMOUNTFLAPS-1 range, not necessarily
-//exactly at the 0/AMOUNTFLAPS-1 boundary, so a direct move that happens to span across it is a
-//perfectly legitimate crossing, not a bumped-drum/slipped-step anomaly - see the hall-sensor check
-//below (see unexpectedHomeTriggerCount's own comment) for how this is taken into account.
+//`startLetter` is the absolute letter index this specific move starts FROM - always 0 for the
+//post-calibration full-rotation call, since calibrate() itself already left the drum exactly at
+//letter 0 (see its own comment). calOffset can place the marker's own letter-space position (see
+//markerLetterIndex() above) ANYWHERE within the 0..AMOUNTFLAPS-1 range, not necessarily exactly at
+//the 0/AMOUNTFLAPS-1 boundary, so a move that happens to span across it - post-calibration or a
+//"direct" move (rotateToLetter()'s other branch) alike - is a perfectly legitimate crossing, not a
+//bumped-drum/slipped-step anomaly - see the hall-sensor check below (unexpectedHomeTriggerCount's
+//own comment) for how this is taken into account.
 void stepLetters(int letterSteps, int startLetter) {
   //Precompute the one loop iteration `i` (if any) within THIS move where the marker is
   //legitimately expected, so the check below can tell "the marker was crossed exactly where
@@ -504,7 +502,7 @@ void rotateToLetter(int toLetter) {
         }
         //startMotor();
         currentPhase = PHASE_ROTATING; //calibrate() left it at PHASE_CALIBRATING, we're rotating to the target letter now
-        stepLetters(posLetter, -1); //fresh from letter 0, right after calibrate() - see stepLetters()'s own comment
+        stepLetters(posLetter, 0); //fresh from letter 0, right after calibrate() - see stepLetters()'s own comment
       }
       //store new position
       displayedLetter = toLetter;
