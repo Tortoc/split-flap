@@ -2063,6 +2063,12 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					</div>
 
 					<div id="firmwareTabEsp">
+						<p>
+							<label>Aktuelle Firmware-Version</label>
+							<br>
+							<span id="currentEspVersionDisplay" style="font-family: var(--font-mono); font-size: 1.1rem;">wird geladen...</span>
+						</p>
+						<hr>
 						<p style="font-size: 1rem;">
 							Lädt eine kompilierte <code>.bin</code>-Datei (Sketch, exportiert über
 							<i>Sketch &gt; Export compiled Binary</i> in der Arduino IDE) direkt per Browser
@@ -3611,6 +3617,10 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						document.getElementById("accessControlTimezone").checked = !!responseObject.accessControlTimezonePublic;
 						document.getElementById("accessControlSystem").checked = !!responseObject.accessControlSystemPublic;
 						document.getElementById("currentTimezoneDisplay").innerText = responseObject.timezone || "(leer)";
+						var currentEspVersionEl = document.getElementById("currentEspVersionDisplay");
+						if (currentEspVersionEl) {
+							currentEspVersionEl.innerText = responseObject.version || "unbekannt";
+						}
 						document.getElementById("currentMdnsHostnameDisplay").innerText = responseObject.mdnsHostname || "split-flap";
 						document.getElementById("deviceRoleSelect").value = responseObject.deviceRole || "standalone";
 						document.getElementById("extensionDevicesSection").classList.toggle("hidden", responseObject.deviceRole !== "primary");
