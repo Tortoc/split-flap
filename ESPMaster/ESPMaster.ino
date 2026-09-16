@@ -15,34 +15,20 @@
                                     //is auto-detected at startup via scanI2CBus()
 #define SERIAL_BAUDRATE     115200
 #define WIFI_USE_DIRECT     false  //false = AP config portal (WiFiManager), true = direct connect
-#define USE_MULTICAST       true   //broadcast a "<mdnsName>.local" hostname on the local network
-                                   //(found missing vs. the real upstream, JonnyBooker/split-flap
-                                   //commit b3465b1/PR #30 - our fork branched off an earlier point
-                                   //via the scientress fork and never picked this up). If running
-                                   //more than one display on the same network, mdnsName below must
-                                   //be unique per device.
-//Numbered boot-progress blink codes (1-8, one per setup() stage) were removed 2026-09-10 on user
-//request - they blocked every boot for ~8.7s of delay() regardless of outcome, and (since
-//ledOn() only actually lights up while showDebugPage is on, see its own comment) usually didn't
-//even visibly blink in normal production use. LED_ENABLE now only gates the "WiFi totally failed
-//to connect" continuous error blink at the end of setup() - see that block's own comment.
+#define USE_MULTICAST       true   //broadcast a "<mdnsName>.local" hostname on the local network.
+                                   //If running more than one display on the same network, mdnsName
+                                   //below must be unique per device.
+//LED_ENABLE only gates the "WiFi totally failed to connect" continuous error blink at the end of
+//setup() - see that block's own comment.
 #define LED_ENABLE          true
 #define DEBUG_ENABLE true  //startup debug page, error panel, page-load log, serial debug log -
                            //gated at runtime by showDebugPage (POST /api/debug-mode, persisted
                            //in /debugmode.txt)
-#define MQTT_ENABLE false  //MQTT + Home Assistant auto-discovery (found 2026-09-10 in two
-                           //independent forks, see
-                           //ServiceMqttFunctions.ino). This flag alone decides whether the
-                           //feature exists in the firmware AT ALL - PubSubClient's own buffer is
-                           //malloc()'d from its constructor (initMqtt() grows it to 600 bytes, see
-                           //that function's own comment), so a compile-time false here is the only
-                           //way to avoid that cost entirely; the separate, persisted mqttEnabled
-                           //(runtime, via POST /api/mqtt) never actually prevented it. Turned off
-                           //2026-09-12 (RAM-savings review) - this device has never had
-                           //mqttEnabled=true, reclaims ~700 bytes (108 static + the 600-byte
-                           //buffer). Flip back to true (+ rebuild/redeploy) if MQTT/Home-Assistant
-                           //integration is ever actually wanted here; nothing is lost by turning it
-                           //back on later, mqttBrokerHost/etc. stay persisted either way.
+#define MQTT_ENABLE false  //MQTT + Home Assistant auto-discovery. This flag alone decides whether
+                           //the feature exists in the firmware AT ALL - PubSubClient's own buffer
+                           //is malloc()'d from its constructor, so a compile-time false here is
+                           //the only way to avoid that cost entirely. Flip to true + rebuild if
+                           //MQTT/Home-Assistant integration is ever wanted.
 
 #define WIFI_STATIC_IP      false //try a router-assigned static IP instead of DHCP
 #define FAE_MOD                   //modified PCB with an ESP-12F module
@@ -53,44 +39,27 @@
 #define LED_ON HIGH
 #define LED_OFF LOW
 
-//The numbered per-stage startup blink codes this comment used to document were removed
-//2026-09-10 (see LED_ENABLE's own comment) - the only LED behavior left is a continuous blink at
-//the end of setup() if WiFi never connects at all, only visible while debug mode is on
-//(see ledOn()'s own comment).
-
 //--- Constants - only change if you know what you're doing ---
 #define ANSWER_SIZE         6 //status + offset + phase + progress bytes, must match Unit.ino's requestEvent()
 #define ANSWER_SIZE_LIGHT   3 //status + offset only, see readUnitInfo()'s 3-arg overload
-#define ANSWER_SIZE_DIAG    8 //adds the two diagnostic counters (found 2026-09-10, inspired by
-                               //scottbez1/splitflap) - see readUnitInfo()'s 7-arg overload. Unit's
-                               //requestEvent() always writes all 8 bytes now; a master still using
-                               //ANSWER_SIZE or ANSWER_SIZE_LIGHT just reads fewer of them, same
-                               //backwards-compatible relationship those two already had. IMPORTANT
-                               //(see readUnitInfo()'s 7-arg overload comment): a unit not yet
-                               //updated to the newer Unit.ino still answers an 8-byte request
-                               //without error - the last 2 bytes just read back as 255 (idle bus),
-                               //not a detectable "unsupported" marker.
-#define ANSWER_SIZE_VERSION 11 //adds the 3 firmware-version bytes (major/minor/patch), added
-                               //2026-09-16 - see readUnitInfo()'s 10-arg overload. Same caveat as
-                               //ANSWER_SIZE_DIAG above: a unit not yet updated to report its version
-                               //reads back 255/255/255, not a distinguishable "unsupported" marker -
-                               //treat exactly that triple as "unknown (pre-versioning firmware)" in
-                               //the UI, not as a real "v255.255.255".
+#define ANSWER_SIZE_DIAG    8 //adds the two diagnostic counters - see readUnitInfo()'s 7-arg
+                               //overload. A unit not yet updated to the newer Unit.ino still
+                               //answers without error - the last 2 bytes just read back as 255
+                               //(idle bus), not a detectable "unsupported" marker.
+#define ANSWER_SIZE_VERSION 11 //adds the 3 firmware-version bytes (major/minor/patch) - see
+                               //readUnitInfo()'s 10-arg overload. Same 255-byte caveat as
+                               //ANSWER_SIZE_DIAG above.
 #define FLAP_AMOUNT         45
 #define MIN_SPEED           1
 #define MAX_SPEED           12
 #define UNIT_STEPS          2038    //must match STEPS in Unit.ino
 #define UNIT_BOOTLOADER_CMD 255     //must match CMD_ENTER_BOOTLOADER in Unit.ino
 #define UNIT_BOOTLOADER_BASE_ADDRESS 0x29 //start of the twiboot bootloader address range (0x29-0x68) -
-                                           //NOTE: 0x68 is also RTC_I2C_ADDRESS below - no real conflict
-                                           //at the current 10-unit installation (bootloader addresses
-                                           //only reach 0x29+9=0x32), but would collide if ever expanded
-                                           //to near the structural 64-unit ceiling (UNITS_AMOUNT_MAX).
+                                           //NOTE: 0x68 is also RTC_I2C_ADDRESS below - would collide
+                                           //if ever expanded near the structural 64-unit ceiling.
 #define CRASH_LOG_PATH "/crash-log.jsonl"
-//Optional DS3231 RTC module on the same I2C bus (added 2026-09-11 on user request, see
-//ServiceRtcFunctions.ino) - fixed address per the DS3231 datasheet, not configurable. Entirely
-//optional/auto-detected (probeRtc()) - every other build/device without one attached behaves
-//exactly as before this feature existed.
+//Optional DS3231 RTC module on the same I2C bus - fixed address per the DS3231 datasheet, not
+//configurable. Entirely optional/auto-detected (probeRtc()).
 #define RTC_I2C_ADDRESS 0x68
 
 //Named so ServiceI2CRecoveryFunctions.ino's bus-recovery routine can reuse the exact same pins.
@@ -119,10 +88,9 @@
 #include <ESPAsyncTCP.h>
 #include <ESPAsyncWebSrv.h>
 #include <ESP8266WiFi.h>
-#include <ESP8266HTTPClient.h> //Primary->Extension push/health-check (ServiceExtensionFunctions.ino,
-                               //multiple-units.md) - verified IRAM-neutral vs. plain WiFiClient
-                               //before adding this dependency (two isolated test builds, byte-
-                               //identical IRAM usage; see multiple-units.md's own note).
+#include <ESP8266HTTPClient.h> //Primary->Extension push/health-check (ServiceExtensionFunctions.ino) -
+                               //verified IRAM-neutral vs. plain WiFiClient before adding this
+                               //dependency (byte-identical IRAM usage in isolated test builds).
 #if USE_MULTICAST == true
 #include <ESP8266mDNS.h>
 #endif
@@ -136,7 +104,7 @@
 //twi.h's raw twi_writeTo() is used for twiboot flash-page writes instead of Wire - a page write is
 //132 bytes, which exceeds Wire's 128-byte TX buffer and silently drops the tail.
 #include <twi.h>
-#include <memory> //std::shared_ptr - PendingRequestSlot's per-generation disconnect flag, CODE_REVIEW_V2.md #1
+#include <memory> //std::shared_ptr - PendingRequestSlot's per-generation disconnect flag
 #include <atomic> //std::atomic<bool> - same reason
 #include <user_interface.h> //struct rst_info, for the crash reporter
 #include <lwip/priv/tcp_priv.h> //exposes tcp_active_pcbs/etc. for /api/tcp-status
@@ -146,11 +114,8 @@
 
 //--- User-facing settings ---
 //Hostname broadcast via mDNS when USE_MULTICAST is enabled - reachable as "<mdnsHostname>.local"
-//on networks whose clients support mDNS (most desktop OSes and phones; not universal on all
-//routers/IoT-only networks). Persisted, not a compile-time constant (found 2026-09-10: with only
-//one device on this repo's hardware, a fixed name was fine at first, but the user asked to be
-//able to change it themselves - e.g. once a second display joins the same network and needs a
-//unique name) - see POST /api/wifi's "set-hostname" action (Netzwerk tab in the UI).
+//on networks whose clients support mDNS. Persisted, not a compile-time constant - see POST
+///api/wifi's "set-hostname" action (Netzwerk tab in the UI).
 String mdnsHostname = "split-flap";
 
 //Used if connecting via "WIFI_USE_DIRECT" of "true" - Otherwise, leave blank
@@ -159,34 +124,21 @@ const char* wifiDirectPassword = "";
 
 //Runtime-changeable OTA password, persisted to LittleFS (see /api/ota-password). Default "splitflap".
 //Empty string = password protection globally OFF - every endpoint below (including firmware/
-//flash ones) is then unauthenticated, no exceptions, regardless of the toggles below (found
-//2026-09-09, CODE_REVIEW.md #29 - the previous design applied this check to only 4 firmware-
-//related endpoints, left the password itself readable unauthenticated via this same field over
-//GET /api/settings and a dedicated GET /api/ota-password [both removed], AND separately exposed
-//every persisted config file - including this very password - directly via serveStatic()'s
-//filesystem-wide static route [also fixed, see the comment there]).
+//flash ones) is then unauthenticated, no exceptions, regardless of the toggles below.
 String otaPassword = "";
 const char* otaPasswordPath = "/otapassword.txt";
 const char* mdnsHostnamePath = "/mdnsname.txt";
 
 //Unit 63's bootloader address is UNIT_BOOTLOADER_BASE_ADDRESS(0x29) + 63 = 0x68 - EXACTLY
-//RTC_I2C_ADDRESS. Found via Code_REVIEW_V5.md #04: every existing bootloader-address collision
-//check (pushFirmwareToUnit(), the /api/units/firmware-push "probe" action) only compared against
-//unitsAmount (the live app-address scan result) to catch unit-vs-unit address overlap - none of
-//them knew about this SEPARATE, fixed collision with the RTC, reachable even with fewer than 64
-//units actually installed. twibootReadChipInfo() alone sent to the RTC's address writes a
-//register pointer of 0x02 (hours) followed by three zero bytes (day-of-week, date) via the DS3231's
-//own register auto-increment - a "read-only diagnostic" against the wrong device that actually
-//corrupts its time registers. Checked at every bootloader-address entry point, independent of
-//unitsAmount, alongside (not instead of) the existing unitsAmount check.
+//RTC_I2C_ADDRESS. twibootReadChipInfo() sent to the RTC's address writes a register pointer of
+//0x02 (hours) followed by three zero bytes via the DS3231's own register auto-increment - a
+//"read-only diagnostic" against the wrong device that actually corrupts its time registers.
+//Checked at every bootloader-address entry point, independent of unitsAmount.
 //
-//Must live here, AFTER this file's own #include block above - found the hard way: a real function
-//definition placed BEFORE those includes (where RTC_I2C_ADDRESS itself is #defined, much earlier
-//in this file) confuses arduino-cli's auto-prototype-generator into inserting its whole generated
-//prototype block (String/AsyncWebServerRequest*/time_t/... signatures included) ahead of the
-//#include lines that actually declare those types - breaking the ENTIRE sketch's compile with
-//"'String' was not declared in this scope" and similar, everywhere, not just here. #defines don't
-//have this problem (pure text substitution), only real function/variable definitions do.
+//Must live here, AFTER this file's own #include block above - a real function/variable definition
+//placed BEFORE those includes confuses arduino-cli's auto-prototype-generator into inserting its
+//generated prototype block ahead of the #include lines that actually declare those types,
+//breaking the entire sketch's compile. #defines don't have this problem.
 bool isReservedI2CAddress(int address) {
   return address == RTC_I2C_ADDRESS;
 }
@@ -217,13 +169,10 @@ const char* mqttPasswordPath = "/mqttpassword.txt";
 #endif
 
 //Per-category "reachable without the password" toggles - only consulted when otaPassword is
-//non-empty (an empty password already means everything is open, see its own comment). Each
-//gates a specific, named group of state-changing endpoints - see isRequestAllowedWithoutPassword()
-//(ServiceAccessControlFunctions.ino) for exactly which. Firmware/flash endpoints
-//(/api/web-file, /api/units/firmware*, /api/firmware-*) and this access-control configuration
-//itself deliberately have NO toggle - always protected whenever a password is set, per explicit
-//user requirement. Default false (protected) for every toggle - a newly-added category defaults
-//to the safe state, not accidentally-public.
+//non-empty. Each gates a specific, named group of state-changing endpoints - see
+//isRequestAllowedWithoutPassword() (ServiceAccessControlFunctions.ino) for exactly which.
+//Firmware/flash endpoints and this access-control configuration itself deliberately have NO
+//toggle - always protected whenever a password is set. Default false for every toggle.
 bool accessControlTextPublic = false;      //POST /api/text
 bool accessControlSettingsPublic = false;  //POST /api/settings
 bool accessControlUnitsPublic = false;     //POST /api/units?action=offset|reset
@@ -243,15 +192,11 @@ String timezoneSetting = "";
 const char* timezonePath = "/timezone.txt";
 
 //Cached result of the last successful timezoned.rop.nl lookup (a POSIX TZ rule string, e.g.
-//"CET-1CEST,M3.5.0,M10.5.0/3") - added 2026-09-11, same investigation as tickUnitReadiness()'s
-//comment. Applied immediately at boot (setup(), right before the pre-WiFi display block) via
-//timezone.setPosix() when non-empty, so Clock/Date mode's very first pre-WiFi render already
-//shows correct LOCAL time (DST rule included) instead of UTC for the many-seconds-to-tens-of-
-//seconds it now takes WiFi to connect - a POSIX rule already encodes its own DST transition
-//dates, so this stays correct across DST changes without needing a fresh network lookup on every
-//single boot, unlike re-resolving the Olson name each time. Written back (see
-//ServiceAsyncTimeSyncFunctions.ino's checkTimezoneLookup()) after every successful fresh lookup,
-//so it tracks a change in timezoneSetting itself without any extra plumbing.
+//"CET-1CEST,M3.5.0,M10.5.0/3"). Applied immediately at boot via timezone.setPosix() when
+//non-empty, so Clock/Date mode's very first pre-WiFi render already shows correct LOCAL time
+//instead of UTC - a POSIX rule encodes its own DST transition dates, so this stays correct across
+//DST changes without a fresh network lookup on every boot. Written back after every successful
+//fresh lookup.
 String cachedTimezonePosix = "";
 const char* timezonePosixCachePath = "/timezone-posix-cache.txt";
 
