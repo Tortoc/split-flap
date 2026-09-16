@@ -2134,17 +2134,11 @@ void setup() {
 
           //"index.html.gz" is the only valid target - the whole UI is one gzip-compressed file,
           //served automatically with Content-Encoding: gzip. An invalid filename gives up
-          //ownership again immediately (found 2026-09-10, CODE_REVIEW_V4.md #2 - this used to be a
-          //separate shared static `webUploadFilenameValid` bool with the identical
-          //any-request-can-clobber-it problem as the auth/busy flags above; ownership alone
-          //already fully covers it, since a request that never keeps ownership automatically
-          //fails every later fragment's "webFileUploadOwner != request" check below too). Does
-          //NOT send a response itself (found while implementing #2, not itself part of that
-          //review): this body handler running to completion doesn't stop the separate outer
-          //(onRequest) handler above from ALSO running once the body finishes arriving over the
-          //wire - sending a response from both would be a double response for one request. The
-          //outer handler re-derives "was my own filename invalid" itself and sends the one actual
-          //reply.
+          //ownership again immediately (ownership alone fully covers it, since a request that
+          //never keeps ownership automatically fails every later fragment's
+          //"webFileUploadOwner != request" check below too). Does NOT send a response itself -
+          //the separate outer (onRequest) handler above also runs once the body finishes
+          //arriving, and re-derives "was my own filename invalid" itself to send the one reply.
           if (filename != "index.html.gz") {
             SerialPrintln(F("Web file upload rejected: filename not in allowlist: ") + filename);
             webFileUploadOwner = nullptr;
@@ -2153,9 +2147,9 @@ void setup() {
 
           SerialPrintln(F("DEBUG: Web file upload starting: ") + filename);
           //Same temp-file + atomic rename() pattern as /api/units/firmware above - an
-          //aborted/failed upload must never leave the live web UI file truncated (found
-          //2026-09-09, CODE_REVIEW.md #5). The stale-"/index.html"-removal below moved to right
-          //before the swap too, so a failed upload can't leave neither file in place.
+          //aborted/failed upload must never leave the live web UI file truncated. The stale-
+          //"/index.html"-removal below happens right before the swap too, so a failed upload
+          //can't leave neither file in place.
           webUploadTmpPath = "/" + filename + ".tmp";
           webUploadFile = LittleFS.open(webUploadTmpPath, "w");
           if (!webUploadFile) {
@@ -2165,9 +2159,7 @@ void setup() {
         }
 
         //Per-fragment ownership check, not a sticky flag - see the identical /api/units/firmware
-        //comment above for why this must compare live ownership on every fragment. Also the only
-        //thing needed to drop a rejected (bad password/busy/bad filename) request's later
-        //fragments, now that none of those paths touch any shared flag any more.
+        //comment above for why this must compare live ownership on every fragment.
         if (webFileUploadOwner != request) {
           return;
         }
@@ -2189,13 +2181,10 @@ void setup() {
             SerialPrintln(F("DEBUG: Web file upload failed, previous file (if any) left untouched"));
           } else {
             //Rename the new file into place FIRST, only remove the old uncompressed "/index.html"
-            //AFTER that's confirmed - found via Code_REVIEW_V5.md #13: the old order removed
-            //"/index.html" unconditionally, then attempted the rename - if THAT failed (e.g. a
-            //power cut between the two), the previously-working uncompressed UI was already gone
-            //while the new ".gz" never actually landed, even though the error response claims "the
-            //previous file (if any) is unchanged". The two paths never collide with each other
-            //("/index.html" vs "/index.html.gz"), so there was never a need to clear the old one
-            //first.
+            //AFTER that's confirmed - if the rename failed first (e.g. a power cut between the
+            //two removal-then-rename steps), the previously-working uncompressed UI would already
+            //be gone while the new ".gz" never landed. The two paths never collide with each
+            //other, so there's no need to clear the old one first.
             if (LittleFS.rename(webUploadTmpPath, "/" + filename)) {
               SerialPrintln(F("DEBUG: Web file upload finished: ") + filename + F(", total bytes: ") + String(index + len));
               //A leftover uncompressed "/index.html" would take precedence over "/index.html.gz" -
@@ -2255,10 +2244,9 @@ void setup() {
     //the next one, giving natural backpressure.
     webServer.on("/api/firmware-chunk", HTTP_POST,
       [checkOtaPassword](AsyncWebServerRequest * request) {
-        //Capture ownership BEFORE releasing it - this is the one and only thing that reliably
-        //tells THIS specific outer-handler invocation whether its own body ever got to claim the
-        //shared buffer, independent of anything any other concurrent request's body did (see
-        //otaChunkOwner's declaration comment and CODE_REVIEW_V4.md #1 for the bug this replaces).
+        //Capture ownership BEFORE releasing it - this reliably tells THIS specific outer-handler
+        //invocation whether its own body ever got to claim the shared buffer, independent of
+        //anything any other concurrent request's body did (see otaChunkOwner's declaration comment).
         bool wasOwner = (otaChunkOwner == request);
         if (wasOwner) {
           otaChunkOwner = nullptr;
@@ -2285,9 +2273,7 @@ void setup() {
         }
         //Reject an overlapping request outright rather than silently overwriting the still-pending
         //one's state - same "already busy" pattern used for every other pending-request slot in
-        //this file (found 2026-09-09, CODE_REVIEW.md #3: nothing previously stopped a second chunk
-        //or a finish from clobbering pendingFirmwareUploadRequest/otaPendingPhase while loop()
-        //hadn't finished processing an earlier one yet).
+        //this file.
         if (otaPendingPhase != OTA_PHASE_NONE) {
           request->send(503, "text/plain", "Still processing the previous chunk, try again shortly");
           return;
@@ -2302,32 +2288,23 @@ void setup() {
           //Check auth HERE too, not just in the request handler above - that one only runs once
           //the ENTIRE body has already streamed in, but this body handler runs incrementally AS
           //each piece of the raw POST body arrives, writing straight into the shared, global
-          //otaChunkBuffer. Found 2026-09-09, CODE_REVIEW.md #3: without this, an unauthenticated
-          //POST here could already corrupt an in-progress, correctly-authenticated upload's
-          //buffered data before its own password is ever checked (which only happens afterward,
-          //in the request handler above, by which point the damage is already done). On failure,
-          //just return WITHOUT touching any shared state at all (found 2026-09-10,
-          //CODE_REVIEW_V4.md #1) - this request simply never becomes otaChunkOwner, which the
-          //per-fragment check below and the outer handler's wasOwner re-derivation are both built
-          //to handle on their own, with nothing to leak into a different, legitimate request.
+          //otaChunkBuffer. On failure, just return WITHOUT touching any shared state - this
+          //request simply never becomes otaChunkOwner, which the per-fragment check below and the
+          //outer handler's wasOwner re-derivation are both built to handle on their own.
           if (!checkOtaPassword(request)) {
             return;
           }
           //Reject an overlapping chunk's body HERE too, before touching otaChunkLen/otaChunkBuffer
           //at all - not just in the outer request handler above, which only runs once this ENTIRE
-          //body has already streamed in and overwritten them. Found 2026-09-09,
-          //CODE_REVIEW_V2.md #2, live-reproduced with the extracted body handler: a buffer holding
-          //"AAAA" contained "BBBB" after a second body ran while the first chunk was still
-          //pending (loop() hadn't called Update.write() for it yet).
+          //body has already streamed in and overwritten them.
           if (otaPendingPhase != OTA_PHASE_NONE) {
             return;
           }
           //Reject a SECOND body that's ALSO still mid-transfer, not just one whose outer handler
-          //has already run - found 2026-09-10, CODE_REVIEW_V3.md #1: the otaPendingPhase check
-          //above only ever changes once a body is FULLY received, so two bodies that are BOTH
-          //still streaming in concurrently (their fragments interleaved by AsyncTCP servicing
-          //multiple open connections) previously passed both checks and corrupted each other -
-          //see otaChunkOwner's own declaration comment for the full mechanism and repro.
+          //has already run - the otaPendingPhase check above only ever changes once a body is
+          //FULLY received, so two bodies that are BOTH still streaming in concurrently (fragments
+          //interleaved by AsyncTCP servicing multiple open connections) could otherwise pass both
+          //checks and corrupt each other - see otaChunkOwner's own declaration comment.
           if (otaChunkOwner != nullptr && otaChunkOwner != request) {
             return;
           }
@@ -2340,22 +2317,18 @@ void setup() {
           otaChunkOwner = request;
           otaChunkLen = 0;
         }
-        //Per-fragment ownership check (not a shared "rejected" flag, see CODE_REVIEW_V4.md #1) -
-        //a request that never claimed ownership above, or that has since lost it (watchdog
-        //timeout, or its own overflow guard below), always fails this and is silently dropped -
-        //by construction this can never affect a DIFFERENT request's legitimate buffer, since the
-        //comparison is against this specific fragment's own `request` pointer.
+        //Per-fragment ownership check (not a shared "rejected" flag) - a request that never
+        //claimed ownership above, or that has since lost it (watchdog timeout, or its own
+        //overflow guard below), always fails this and is silently dropped.
         if (otaChunkOwner != request) {
           return;
         }
-        //Re-check on EVERY fragment, not just index==0 (found 2026-09-09, CODE_REVIEW_V2.md #4,
-        //statically traced): the abandoned-upload watchdog (loop(), see otaLastActivityAt below)
-        //could previously free/null otaChunkBuffer mid-transfer, between two fragments of one
-        //slow-arriving body, since otaLastActivityAt was only updated once the FULL chunk (and
-        //its outer handler) had completed - a later fragment's memcpy would then write through a
-        //dangling/null pointer. Updating otaLastActivityAt on every fragment (not just at the
-        //end) additionally means a genuinely still-arriving, slow-but-active body no longer looks
-        //"abandoned" to that same watchdog in the first place.
+        //Re-check on EVERY fragment, not just index==0: the abandoned-upload watchdog (loop(),
+        //see otaLastActivityAt below) could otherwise free/null otaChunkBuffer mid-transfer,
+        //between two fragments of one slow-arriving body, since otaLastActivityAt was only
+        //updated once the FULL chunk had completed. Updating it on every fragment also means a
+        //genuinely still-arriving, slow-but-active body no longer looks "abandoned" in the first
+        //place.
         otaLastActivityAt = millis();
         if (otaChunkBuffer == nullptr || otaChunkLen + len > OTA_CHUNK_SIZE) {
           //Shouldn't happen given the total check at index==0 above, but never overflow the buffer.
@@ -2380,7 +2353,7 @@ void setup() {
         request->send(400, "text/plain", "No firmware upload in progress");
         return;
       }
-      //Same "already busy" guard as /api/firmware-chunk above (CODE_REVIEW.md #3).
+      //Same "already busy" guard as /api/firmware-chunk above.
       if (otaPendingPhase != OTA_PHASE_NONE) {
         request->send(503, "text/plain", "Still processing a previous chunk, try again shortly");
         return;
@@ -2438,11 +2411,10 @@ void setup() {
       isPendingReboot = true;
     });
 
-    //Moved out of GET /api/settings, mirrors GET /api/rotation-items exactly
-    //(own small JsonDocument, .to<JsonArray>()+.add<JsonObject>(), deliberately no yield() in the
-    //loop - a yield() here previously overflowed the AsyncWebServer callback's small stack).
-    //Deliberately a separate registration, not merged with DELETE below - not worth stacking any
-    //more risk onto this fix given the other GET/POST routing quirk found this session.
+    //Mirrors GET /api/rotation-items exactly (own small JsonDocument,
+    //.to<JsonArray>()+.add<JsonObject>(), deliberately no yield() in the loop - a yield() here
+    //previously overflowed the AsyncWebServer callback's small stack). Deliberately a separate
+    //registration, not merged with DELETE below.
     webServer.on("/api/scheduled-messages", HTTP_GET, [](AsyncWebServerRequest * request) {
       JsonDocument scheduledDoc;
       JsonArray scheduledArray = scheduledDoc.to<JsonArray>();
