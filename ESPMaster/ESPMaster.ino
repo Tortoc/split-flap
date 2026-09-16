@@ -2913,13 +2913,9 @@ void setup() {
       //isTimezoneLookupBusy() covers a PREVIOUS request whose slot was already taken but whose
       //async lookup (checkTimezoneLookup(), ServiceAsyncTimeSyncFunctions.ino) hasn't finished
       //yet - pendingTimezoneSlot.request alone would miss that window. timezoneLookupDeferredRequest
-      //additionally covers the narrow gap AFTER the lookup finishes (tzLookupState already back to
-      //IDLE, so isTimezoneLookupBusy() alone would already say "no") but BEFORE loop()'s own finish
-      //block below has actually persisted the result and responded - found 2026-09-09,
-      //CODE_REVIEW_V2.md #14/Nachtrag: without this, a request accepted during exactly that gap
-      //could overwrite pendingTimezoneValue before the first request's own result is saved under
-      //it. (timezoneLookupDeferredValue's own snapshot, taken at kickoff below, closes the second
-      //half of that same finding - even if a new request somehow still slipped in here.)
+      //additionally covers the narrow gap AFTER the lookup finishes but BEFORE loop()'s own finish
+      //block below has actually persisted the result and responded, so a request accepted during
+      //exactly that gap can't overwrite pendingTimezoneValue before the first result is saved under it.
       if (pendingTimezoneSlot.request != nullptr || isTimezoneLookupBusy() || timezoneLookupDeferredRequest != nullptr) {
         request->send(503, "text/plain", "Another timezone change is already in progress, try again shortly");
         return;
@@ -2933,9 +2929,8 @@ void setup() {
 
 #if MQTT_ENABLE == true
     //Own registration, like /api/timezone above - a genuinely new settings category, no existing
-    //route it naturally shares with (see the "every registered handler costs a small permanent
-    //heap allocation" comment on /api/quiet-hours below for why that's a deliberate, not-free
-    //choice here, not an oversight).
+    //route it naturally shares with (each registered handler costs a small permanent heap
+    //allocation that's never freed, see /api/quiet-hours below - a deliberate, not-free choice).
     webServer.on("/api/mqtt", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
       if (request->method() == HTTP_GET) {
         JsonDocument doc;
@@ -2956,18 +2951,13 @@ void setup() {
       // request->method() == HTTP_POST
       if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
 
-      //Validate EVERYTHING into local temporaries before touching any persisted/live state -
-      //found 2026-09-10, CODE_REVIEW_V4.md #4: this used to mutate and persist mqttEnabled/
-      //mqttBrokerHost, THEN validate brokerPort - a request with a valid host but an invalid port
-      //got 400, yet the host change (and its file write) had already happened. Worse,
-      //applyMqttSettingsChange() (the only place that re-points the live PubSubClient's
-      //setServer() at mqttBrokerHost's CURRENT buffer) never ran on that early return, so the
-      //client kept using whatever raw pointer an earlier setServer() call had captured - if
-      //mqttBrokerHost's String reallocated its buffer on that partial reassignment (as String
-      //commonly does), the client was left holding a dangling pointer into freed memory. Now: on
-      //any validation failure, nothing has changed at all; on success, every field is applied and
-      //persisted together, immediately followed by the one applyMqttSettingsChange() call that
-      //refreshes the client's server pointer against the final, current buffer.
+      //Validate EVERYTHING into local temporaries before touching any persisted/live state: a
+      //partial mutate-then-validate (e.g. host applied, then port rejected) would leave
+      //applyMqttSettingsChange() never called, so the live PubSubClient keeps a raw pointer into
+      //mqttBrokerHost's OLD buffer - a String reassignment elsewhere can reallocate that buffer,
+      //leaving the client holding a dangling pointer. On any validation failure, nothing changes
+      //at all; on success, every field is applied and persisted together, immediately followed by
+      //the one applyMqttSettingsChange() call that refreshes the pointer against the final buffer.
       bool newMqttEnabled = request->hasParam("enabled", true); //same checkbox semantics as accessControl*
       String newBrokerHost = request->hasParam("brokerHost", true) ? request->getParam("brokerHost", true)->value() : mqttBrokerHost;
       uint16_t newBrokerPort = mqttBrokerPort;
@@ -3074,11 +3064,9 @@ void setup() {
     SerialPrintln(F("#######################################################"));
   }
   else {
-    //Config load + crash-log persistence (found 2026-09-10, then moved even earlier on
-    //2026-09-11 - see the single call site right before initWiFi() above, and its own comment)
-    //used to be duplicated here for this exact branch, since neither has any WiFi dependency at
-    //all and both matter regardless of whether WiFi came up. Now handled unconditionally before
-    //WiFi is even attempted, so nothing is needed here any more.
+    //Config load + crash-log persistence is handled unconditionally before WiFi is even
+    //attempted (see the single call site right before initWiFi() above), so nothing is needed
+    //here for this branch - neither has any WiFi dependency.
 
     if (isPendingReboot) {
       SerialPrintln(F("Reboot is pending to be able to continue device function. Hold please..."));
@@ -3099,21 +3087,15 @@ void setup() {
   }
 }
 
-//Adaptive unit-readiness wait, replacing a fixed 30s post-boot wait present since this project's
-//very first commit (found 2026-09-11, user-reported: the display still took ~40s to show
-//anything even after the RTC fix made the correct time known almost instantly - the RTC fix
-//solved "does the software know the right time", not "when can it physically show it").
+//Adaptive unit-readiness wait, replacing a fixed 30s post-boot wait - the RTC fix solved "does the
+//software know the right time", not "when can it physically show it".
 //
-//Factored out of loop() (2026-09-11, same day) so setup() can also drive it synchronously, right
-//before initWiFi() - loop() itself cannot run until setup() returns, and initWiFi()'s blocking
-//autoConnect() call sits in setup() BEFORE loop() ever gets a chance to, so anything "non-
-//blocking" written into loop() alone was always gated behind it regardless. A function called
-//from both setup() (blocking here is fine - nothing else is waiting on setup() yet) and loop()
-//(ticked once per iteration, as before - a no-op once DONE) actually decouples unit readiness/the
-//first display from WiFi (the real bottleneck this whole investigation was chasing turned out to
-//be a slow flash chip in loadValuesFromFileSystem(), not WiFi itself, but this move is still
-//correct and worth keeping: it's what lets the first display render independently of however long
-//WiFi ends up taking).
+//Factored out of loop() so setup() can also drive it synchronously, right before initWiFi() -
+//loop() itself cannot run until setup() returns, and initWiFi()'s blocking autoConnect() call
+//sits in setup() BEFORE loop() ever gets a chance to, so anything "non-blocking" written into
+//loop() alone was always gated behind it regardless. A function called from both setup() (blocking
+//here is fine - nothing else is waiting on setup() yet) and loop() (ticked once per iteration, a
+//no-op once DONE) decouples unit readiness/the first display from however long WiFi ends up taking.
 void tickUnitReadiness() {
   if (unitReadinessPhase == UNIT_READINESS_SCAN) {
     //One scan attempt (with its own internal not-found retry, unchanged) to learn which
@@ -3178,18 +3160,16 @@ void checkBootSnapshotFreshness() {
 
 //One tick of the mode-driven display update - scheduled messages, countdown/countup text
 //recompute, rotation advance, then showText() for whichever deviceMode is active. Factored out of
-//loop() (2026-09-11) so setup() can also run it once, synchronously, BEFORE initWiFi() - see
-//tickUnitReadiness()'s comment for why that's now necessary to actually show anything before
-//WiFi connects, not just theoretically possible. Deliberately excludes checkWifiScanRequest()/
-//checkWifiConnectAttempt()/checkMqttState() - all meaningless before WiFi/the web server exist,
-//and still called separately, only from loop(), right after this.
+//loop() so setup() can also run it once, synchronously, BEFORE initWiFi() - see
+//tickUnitReadiness()'s comment for why that's necessary to actually show anything before WiFi
+//connects. Deliberately excludes checkWifiScanRequest()/checkWifiConnectAttempt()/checkMqttState()
+//- all meaningless before WiFi/the web server exist, and still called separately from loop().
 void performOneSecondDisplayTick() {
   //An extension's own display content decisions are entirely ceded to whichever primary is
-  //configured to reach it (multiple-units.md point 3) - its units are driven only by
+  //configured to reach it (multiple-units.md) - its units are driven only by
   //POST /api/extension-display, never by this device's own deviceMode/scheduled-messages/
-  //rotation/etc. Everything below this stays fully live and unaffected for every other role
-  //(including the default standalone), and an extension's own web UI/API remain fully usable -
-  //only this one per-second content-decision loop is skipped.
+  //rotation/etc. Everything below this stays fully live for every other role, and an extension's
+  //own web UI/API remain fully usable - only this one per-second content-decision loop is skipped.
   if (deviceRole == DEVICE_ROLE_EXTENSION) {
     return;
   }
@@ -3206,14 +3186,11 @@ void performOneSecondDisplayTick() {
     if (deviceMode == DEVICE_MODE_ROTATION) {
       //rotationCurrentAlignment ("" = inherit the default) is set every tick by checkRotation().
       //Only count this second toward the current item's duration if it was actually accepted -
-      //see rotationItemAcceptedSeconds' own comment (CODE_REVIEW_V2.md #13). Additionally
-      //requires the display to have actually SETTLED (!isDisplayJobBusy()) before counting -
-      //found 2026-09-10, CODE_REVIEW_V3.md #9: showText() already returns true the moment a
-      //job merely STARTS toward this item (matching CODE_REVIEW_V2.md #9's "already in progress"
-      //check), well before the flaps have actually finished moving - counting from there meant
-      //part of an item's configured duration was consumed by motor movement time rather than
-      //genuinely stationary, readable display time, especially for a large flap-position change
-      //or a multi-line item.
+      //see rotationItemAcceptedSeconds' own comment. Additionally requires the display to have
+      //actually SETTLED (!isDisplayJobBusy()) before counting: showText() already returns true
+      //the moment a job merely STARTS toward this item, well before the flaps have actually
+      //finished moving - counting from there would consume part of an item's configured duration
+      //with motor movement time rather than genuinely stationary, readable display time.
       bool rotationTextAccepted = showText(inputText, 0, rotationCurrentAlignment, rotationCurrentAnimationMode, rotationCurrentAnimationStaggerMs);
       if (rotationTextAccepted && !isDisplayJobBusy()) {
         rotationItemAcceptedSeconds++;
