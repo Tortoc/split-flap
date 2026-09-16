@@ -30,55 +30,47 @@
  * for firmware updates too, without needing a per-unit bootloader reflash.
  * See Unit/BOOTLOADER_SETUP.md for the full rationale.
  *
- * Change 2 (2026-09-09): an EEPROM byte at EEPROM_UPDATE_MARKER_ADDR now
- * gates the app-boot decision (see the for(;;) wrapper around the main
- * command loop below). Application pages are written 1..N-1 first, page 0
- * (the reset vector) last - but that only protects the jump instruction
- * itself, not its target: on the atmega328p the real entry point the reset
- * vector jumps to already lands in page 1, i.e. exactly the pages rewritten
- * FIRST. An update aborted partway through (e.g. a power loss between
- * pages) followed by any reset would otherwise auto-boot the old (untouched)
- * page 0 straight into a mix of old and new code once the idle timeout (or
- * an explicit CMD_SWITCH_APPLICATION) fires. The marker makes twiboot stay
- * resident instead - see ESPMaster/ServiceUnitFirmwareFunctions.ino's
+ * Change 2: an EEPROM byte at EEPROM_UPDATE_MARKER_ADDR now gates the app-boot
+ * decision (see the for(;;) wrapper around the main command loop below).
+ * Application pages are written 1..N-1 first, page 0 (the reset vector) last
+ * - but that only protects the jump instruction itself, not its target: on
+ * the atmega328p the real entry point the reset vector jumps to already
+ * lands in page 1, i.e. exactly the pages rewritten FIRST. An update aborted
+ * partway through (e.g. a power loss between pages) followed by any reset
+ * would otherwise auto-boot the old (untouched) page 0 straight into a mix
+ * of old and new code once the idle timeout (or an explicit
+ * CMD_SWITCH_APPLICATION) fires. The marker makes twiboot stay resident
+ * instead - see ESPMaster/ServiceUnitFirmwareFunctions.ino's
  * pushFirmwareToUnit(), which arms the marker before writing any page and
  * only clears it after page 0 is written AND verified.
  *
- * Change 3 (2026-09-09, CODE_REVIEW.md #9): unmodified upstream TWI_data_write()
- * sets boot_timeout = 0 ("abort countdown") on every real command (chip-info
- * read, flash/eeprom access, WAIT heartbeat) and NEVER sets it back to a
- * nonzero value anywhere else in this file - so the ~1000ms idle-boot
- * countdown isn't restarted, it's permanently disabled for the rest of this
- * power cycle the moment any real command arrives, which is true of nearly
- * every real session. A master that then abandons the session before ever
- * arming the Change-2 EEPROM marker (e.g. rejects the target after reading
- * chip info, or crashes/loses network before starting to write) leaves the
- * unit stuck in the bootloader with no working automatic recovery path at
- * all - confirmed by direct code trace and reproduced live during this
- * session (a unit left this way needed a manual power cycle; twiboot also
- * disables the watchdog on entry, see disable_wdt_timer() below, so there's
- * no independent hardware fallback either). Changed to re-arm
- * TIMER_MSEC2IRQCNT(TIMEOUT_MS) instead of disabling on every command,
- * making it a rolling idle timer: the unit now auto-boots ~1s after the
- * master goes quiet, in EVERY abandonment scenario, not just the ones an
- * ESPMaster-side fix could enumerate up front. This does not weaken Change
- * 2's protection - jump_to_app()'s marker check still runs on every trip
- * through the for(;;) loop regardless of which of the three paths
- * (idle timeout / explicit switch-app / SLA+W junk byte) set
+ * Change 3: unmodified upstream TWI_data_write() sets boot_timeout = 0
+ * ("abort countdown") on every real command (chip-info read, flash/eeprom
+ * access, WAIT heartbeat) and never sets it back to a nonzero value anywhere
+ * else in this file - so the ~1000ms idle-boot countdown is permanently
+ * disabled for the rest of the power cycle the moment any real command
+ * arrives. A master that then abandons the session before ever arming the
+ * Change-2 EEPROM marker leaves the unit stuck in the bootloader with no
+ * automatic recovery path (twiboot also disables the watchdog on entry, see
+ * disable_wdt_timer() below, so there's no independent hardware fallback
+ * either). Changed to re-arm TIMER_MSEC2IRQCNT(TIMEOUT_MS) instead of
+ * disabling on every command, making it a rolling idle timer: the unit now
+ * auto-boots ~1s after the master goes quiet, in every abandonment scenario.
+ * This does not weaken Change 2's protection - jump_to_app()'s marker check
+ * still runs on every trip through the for(;;) loop regardless of which of
+ * the three paths (idle timeout / explicit switch-app / SLA+W junk byte) set
  * cmd = CMD_BOOT_APPLICATION, and sends it back to CMD_WAIT if a write is
  * genuinely still in progress.
  *
- * This fork's own version (2026-09-16, continuing upstream's own MAJOR.MINOR-only tag scheme -
- * v1.0/v1.1/v1.2/v2.0/v2.1/v3.0 on GitHub - forward from the v3.2 this fork's base commit already
- * carries in VERSION_STRING below, rather than resetting to a fresh v1.0: v3.2 + Change 1 (new
- * capability) = v3.3, + Change 2 (new capability) = v3.4, + Change 3 (bugfix) = v3.5):
- * v3.5, reported as-is in VERSION_STRING below since 2026-09-16 ("SF-TWIBOOT v3.5"). Before that
- * date VERSION_STRING was deliberately left as upstream's own "TWIBOOT v3.2" to avoid requiring an
- * ISP reflash of every already-deployed unit just for a version string (no OTA path exists for the
- * bootloader itself, by design - it's what makes app OTA possible in the first place) - changed
- * once a full bootloader reflash of every unit was already happening for other reasons anyway, so
- * updating this cost nothing extra. A unit whose bootloader predates this change still answers
- * `Show bootloader version` with the old "TWIBOOT v3.2" string - that's expected, not a bug.
+ * This fork's own version, continuing upstream's own MAJOR.MINOR-only tag
+ * scheme (v1.0/v1.1/v1.2/v2.0/v2.1/v3.0 on GitHub) forward from the v3.2
+ * this fork's base commit already carries in VERSION_STRING, rather than
+ * resetting to a fresh v1.0: v3.2 + Change 1 = v3.3, + Change 2 = v3.4,
+ * + Change 3 = v3.5. Reported as-is in VERSION_STRING below ("SF-TWIBOOT
+ * v3.5"). A unit whose bootloader predates this version string change still
+ * answers `Show bootloader version` with the old "TWIBOOT v3.2" string -
+ * that's expected, not a bug (no OTA path exists for the bootloader itself,
+ * by design - it's what makes app OTA possible in the first place).
  *
  * Everything else in this file is unmodified upstream code. This file
  * remains licensed under GPL-2.0 (see LICENSE in this directory), as
@@ -89,11 +81,9 @@
 #include <avr/boot.h>
 #include <avr/pgmspace.h>
 
-//Fork version (see this file's own header comment above for the full v3.2->v3.5 derivation),
-//reported on the wire since 2026-09-16 - previously left as upstream's own "TWIBOOT v3.2" to avoid
-//requiring an ISP reflash of every already-deployed unit, but the user was already reflashing
-//every unit's bootloader for other reasons, so updating it here cost nothing extra. Exactly 15
-//characters + the array's implicit trailing byte = 16, fitting info[16] below without truncation.
+//Fork version (see this file's own header comment above for the full v3.2->v3.5 derivation).
+//Exactly 15 characters + the array's implicit trailing byte = 16, fitting info[16] below without
+//truncation.
 #define VERSION_STRING          "SF-TWIBOOT v3.5"
 #define EEPROM_SUPPORT          1
 #define LED_SUPPORT             1
