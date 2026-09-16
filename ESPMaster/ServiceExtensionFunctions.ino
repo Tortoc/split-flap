@@ -2,14 +2,12 @@
 //display logic across its own units plus one or more configured "extension" devices' units.
 //
 //DELIBERATE, DOCUMENTED DEVIATION from this project's "no blocking network calls" lesson
-//(ServiceAsyncTimeSyncFunctions.ino's non-blocking DNS+UDP rewrite, Punkt 172): the health check
-//and display push below both use HTTPClient with a SHORT, bounded timeout
-//(EXTENSION_HTTP_TIMEOUT_MS). Materially different from that earlier anti-pattern: opt-in only
-//(deviceRole==primary with a configured host), ~10x shorter bound, and the health check runs on
-//its own timer separate from the display push, so an unreachable extension is already known
-//before a push happens and is simply skipped.
-#define EXTENSION_HEALTH_CHECK_INTERVAL_MS (15UL * 1000UL)
-#define EXTENSION_HTTP_TIMEOUT_MS 1500
+//(ServiceAsyncTimeSyncFunctions.ino's non-blocking DNS+UDP rewrite, Punkt 172): the health check,
+//display push, and extension-readiness poll below all use HTTPClient with a SHORT, bounded timeout
+//(EXTENSION_HTTP_TIMEOUT_MS, declared in ESPMaster.ino - see its own comment for why). Materially
+//different from that earlier anti-pattern: opt-in only (deviceRole==primary with a configured
+//host), ~10x shorter bound, and the health check runs on its own timer separate from the display
+//push, so an unreachable extension is already known before a push happens and is simply skipped.
 unsigned long lastExtensionHealthCheckAt = 0;
 
 //The effective display width for the Primary's own text-composition pipeline - own units plus

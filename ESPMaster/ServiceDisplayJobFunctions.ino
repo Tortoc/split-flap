@@ -97,6 +97,13 @@ struct DisplayJob {
   int8_t waitLastPhase[UNITS_AMOUNT_MAX];    //-1 = no sample yet; else 0..UNIT_PHASE_MAX
   int16_t waitLastProgress[UNITS_AMOUNT_MAX]; //-1 = no sample yet; else 0..UNIT_PROGRESS_MAX
   unsigned long waitLastProgressAt[UNITS_AMOUNT_MAX]; //already the platform's native word size - no narrowing available
+
+  //Extension counterpart to waitUnitsReadyMask - bit i set once configured extension i is confirmed
+  //ready (all its units idle) or given up on. See pollDisplayJobWaitAllExtensionsReady()
+  //(CODE_REVIEW_V6.md #5): without this, a job could finish (and the next line's write, or the
+  //hold timer, could start) while a remote extension's motors are still physically moving.
+  uint8_t waitExtensionsReadyMask = 0; //EXTENSION_DEVICES_MAX (4) comfortably fits in one byte
+  unsigned long waitExtensionsNextPollAt = 0;
 };
 
 DisplayJob displayJob;
@@ -116,6 +123,83 @@ void resetDisplayJobWaitSubstate() {
     displayJob.waitLastPhase[i] = -1;
     displayJob.waitLastProgress[i] = -1;
   }
+  displayJob.waitExtensionsReadyMask = 0;
+  displayJob.waitExtensionsNextPollAt = now;
+}
+
+//Extension counterpart to pollDisplayJobWaitAllUnitsReady() - polls each reachable, configured
+//extension's own GET /api/units (same endpoint checkExtensionHealth() already uses) once per
+//second until every unit it reports is idle, so this device's own hold timer/next line doesn't
+//start before a remote extension's motors have actually settled (CODE_REVIEW_V6.md #5). A no-op
+//returning true immediately for every role other than primary with at least one reachable
+//extension.
+bool pollDisplayJobWaitAllExtensionsReady() {
+  if (deviceRole != DEVICE_ROLE_PRIMARY || extensionDeviceCount == 0) {
+    return true;
+  }
+
+  //Deliberately much shorter than the local 90s ceiling - a genuinely stuck UNIT is already caught
+  //by that extension's own pollDisplayJobWaitAllUnitsReady() over there; this ceiling only guards
+  //against an extension that stops answering entirely (network drop, reboot mid-move).
+  const unsigned long maxTotalWaitMs = 30000;
+
+  uint8_t relevantMask = 0;
+  for (int i = 0; i < extensionDeviceCount; i++) {
+    if (extensionDevices[i].Host != "" && extensionDevices[i].Reachable) {
+      relevantMask |= (1 << i);
+    }
+  }
+  if (relevantMask == 0) {
+    return true; //nothing configured/reachable to wait on
+  }
+  if ((displayJob.waitExtensionsReadyMask & relevantMask) == relevantMask) {
+    return true; //every relevant extension already confirmed ready or given up on
+  }
+  if (!millisReached(displayJob.waitExtensionsNextPollAt)) {
+    return false; //not due yet this tick
+  }
+  displayJob.waitExtensionsNextPollAt = millis() + 1000; //same cadence as the local unit poll
+
+  for (int i = 0; i < extensionDeviceCount; i++) {
+    uint8_t bit = (uint8_t)(1 << i);
+    if (!(relevantMask & bit) || (displayJob.waitExtensionsReadyMask & bit)) {
+      continue;
+    }
+    ExtensionDevice &ext = extensionDevices[i];
+    bool done = false;
+
+    WiFiClient client;
+    HTTPClient http;
+    http.setTimeout(EXTENSION_HTTP_TIMEOUT_MS);
+    if (http.begin(client, "http://" + ext.Host + "/api/units")) {
+      if (http.GET() == 200) {
+        JsonDocument doc;
+        if (!deserializeJson(doc, http.getString())) {
+          bool allIdle = true;
+          for (JsonVariant unit : doc["units"].as<JsonArray>()) {
+            if ((int)(unit["status"] | 1) == 1) {
+              allIdle = false;
+              break;
+            }
+          }
+          done = allIdle;
+          SerialPrintln(F("Extension \"") + ext.Host + F("\" - ") + (allIdle ? F("ready") : F("still moving")));
+        }
+      }
+      http.end();
+    }
+
+    if (!done && millisReached(displayJob.waitPhaseStartedAt + maxTotalWaitMs)) {
+      SerialPrintln(F("WARNING: Extension \"") + ext.Host + F("\" - no ready confirmation within ") + String(maxTotalWaitMs / 1000) + F("s, giving up and continuing"));
+      done = true;
+    }
+
+    if (done) {
+      displayJob.waitExtensionsReadyMask |= bit;
+    }
+  }
+
+  return (displayJob.waitExtensionsReadyMask & relevantMask) == relevantMask;
 }
 
 //How long unit `unitIndex` (of `unitsAmount` total) should wait, relative to the line's own start,
@@ -440,11 +524,16 @@ void updateDisplayJob() {
       }
       return;
 
-    case DISPLAY_JOB_WAIT_READY_BEFORE:
-      if (pollDisplayJobWaitAllUnitsReady()) {
+    case DISPLAY_JOB_WAIT_READY_BEFORE: {
+      //Both polled unconditionally every tick (not short-circuited) so neither's own ~1s poll
+      //cadence gets needlessly delayed by the other still being busy.
+      bool localReady = pollDisplayJobWaitAllUnitsReady();
+      bool extensionsReady = pollDisplayJobWaitAllExtensionsReady();
+      if (localReady && extensionsReady) {
         displayJob.state = DISPLAY_JOB_WRITE_LINE;
       }
       return;
+    }
 
     case DISPLAY_JOB_WRITE_LINE: {
       //Only pull from the split lines when there's more than one - a single line always uses
@@ -519,8 +608,10 @@ void updateDisplayJob() {
       }
       return;
 
-    case DISPLAY_JOB_WAIT_READY_AFTER:
-      if (pollDisplayJobWaitAllUnitsReady()) {
+    case DISPLAY_JOB_WAIT_READY_AFTER: {
+      bool localReady = pollDisplayJobWaitAllUnitsReady();
+      bool extensionsReady = pollDisplayJobWaitAllExtensionsReady();
+      if (localReady && extensionsReady) {
         if (displayJob.isMultiLine) {
           //Matches the old code's loop condition exactly (`linesIndex <= messageLines.size()`,
           //always true given linesIndex's range) - the 3s "give time to read" pause fires after
@@ -535,6 +626,7 @@ void updateDisplayJob() {
         }
       }
       return;
+    }
 
     case DISPLAY_JOB_PAUSE_BETWEEN_LINES:
       if (millisReached(displayJob.pauseUntil)) {

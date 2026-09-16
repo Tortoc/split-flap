@@ -383,6 +383,15 @@ int pendingFirmwarePushUnitIndex = -1;
 PendingRequestSlot pendingBootloaderProbeSlot;
 int pendingBootloaderProbeUnitIndex = -1;
 
+//Shared by ServiceExtensionFunctions.ino's health check/display push AND
+//ServiceDisplayJobFunctions.ino's pollDisplayJobWaitAllExtensionsReady() - declared here, not in
+//either of those files, since Arduino concatenates .ino files alphabetically and
+//ServiceDisplayJobFunctions.ino comes before ServiceExtensionFunctions.ino (same reasoning as
+//pendingTimezoneSlot's own comment above for why a shared value used by an earlier file can't be
+//#define'd in a later one).
+#define EXTENSION_HEALTH_CHECK_INTERVAL_MS (15UL * 1000UL)
+#define EXTENSION_HTTP_TIMEOUT_MS 1500
+
 //Same deferred-request pattern, for POST /api/extension-display (CODE_REVIEW_V6.md #1):
 //applyExtensionDisplaySegment() blocks with its own yield()-based wait loop, which the ESP8266
 //core panics on when called directly from an AsyncWebServer callback - deferring it to loop()
