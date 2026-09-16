@@ -68,9 +68,12 @@
  * cmd = CMD_BOOT_APPLICATION, and sends it back to CMD_WAIT if a write is
  * genuinely still in progress.
  *
- * This fork's own version (2026-09-16, reconstructed by walking Change 1/2/3 above as
- * major/minor/patch bumps from an initial v1.0.0 - see BUGFIX_LOG.md's versioning entry):
- * v1.1.1. NOT the same as VERSION_STRING below, which stays upstream twiboot's own "TWIBOOT v3.2"
+ * This fork's own version (2026-09-16, continuing upstream's own MAJOR.MINOR-only tag scheme -
+ * v1.0/v1.1/v1.2/v2.0/v2.1/v3.0 on GitHub - forward from the v3.2 this fork's base commit already
+ * carries in VERSION_STRING below, rather than resetting to a fresh v1.0: v3.2 + Change 1 (new
+ * capability) = v3.3, + Change 2 (new capability) = v3.4, + Change 3 (bugfix) = v3.5 - see
+ * BUGFIX_LOG.md's versioning entry for the full derivation):
+ * v3.5. NOT the same as VERSION_STRING below, which stays upstream twiboot's own "TWIBOOT v3.2"
  * and is unchanged by any of Change 1/2/3 - updating it to report this fork's own version would
  * require every already-deployed unit's bootloader to be re-flashed via ISP (no OTA path exists
  * for the bootloader itself, by design - it's what makes app OTA possible in the first place), so

@@ -35,12 +35,17 @@ line-referenced rationale behind each one. Summary:
    in the bootloader indefinitely, needing a manual power cycle. Changed to re-arm the countdown
    on every command instead, making it a rolling idle timer that always recovers on its own.
 
-None of this changes the wire protocol documented below - `Show bootloader version` still
-returns upstream's own `"TWIBOOT v3.2"` string unchanged (this fork's own version, tracked
-separately in `main.c`'s header comment, is not reported over I2C - doing so would need every
-already-deployed unit's bootloader re-flashed via ISP, since there is no OTA path for the
-bootloader itself by design). Everything else - chip info, flash/EEPROM read/write, application
-start, clockstretching - is exactly the upstream protocol.
+**This fork's own version:** upstream tags releases as MAJOR.MINOR only (v1.0, v1.1, v1.2, v2.0,
+v2.1, v3.0 on GitHub), and this fork's base commit already carries `"TWIBOOT v3.2"` in
+`VERSION_STRING` (5 commits past the v3.0 tag, version bumped in source ahead of a formal tag).
+Continuing that same scheme forward through the three changes above (each new capability a MINOR
+bump, the bugfix a MINOR bump as well since upstream has no separate patch level): v3.2 -> **v3.3**
+(dynamic addressing) -> **v3.4** (EEPROM update marker) -> **v3.5** (idle-timeout fix). This
+number is tracked in `main.c`'s header comment, not reported over I2C - `Show bootloader version`
+still returns upstream's own `"TWIBOOT v3.2"` string unchanged, since updating it would need every
+already-deployed unit's bootloader re-flashed via ISP (no OTA path exists for the bootloader
+itself, by design). Everything else - chip info, flash/EEPROM read/write, application start,
+clockstretching - is exactly the upstream protocol.
 
 twiboot acts as a slave device on a TWI/I2C bus and allows reading/writing of the internal flash memory.
 As a compile time option (EEPROM_SUPPORT) twiboot also allows reading/writing of the whole internal EEPROM memory.
