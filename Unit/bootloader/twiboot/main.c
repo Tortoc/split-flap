@@ -73,11 +73,13 @@
  * carries in VERSION_STRING below, rather than resetting to a fresh v1.0: v3.2 + Change 1 (new
  * capability) = v3.3, + Change 2 (new capability) = v3.4, + Change 3 (bugfix) = v3.5 - see
  * BUGFIX_LOG.md's versioning entry for the full derivation):
- * v3.5. NOT the same as VERSION_STRING below, which stays upstream twiboot's own "TWIBOOT v3.2"
- * and is unchanged by any of Change 1/2/3 - updating it to report this fork's own version would
- * require every already-deployed unit's bootloader to be re-flashed via ISP (no OTA path exists
- * for the bootloader itself, by design - it's what makes app OTA possible in the first place), so
- * this project's own version is tracked here in source rather than on the wire for now.
+ * v3.5, reported as-is in VERSION_STRING below since 2026-09-16 ("SF-TWIBOOT v3.5"). Before that
+ * date VERSION_STRING was deliberately left as upstream's own "TWIBOOT v3.2" to avoid requiring an
+ * ISP reflash of every already-deployed unit just for a version string (no OTA path exists for the
+ * bootloader itself, by design - it's what makes app OTA possible in the first place) - changed
+ * once a full bootloader reflash of every unit was already happening for other reasons anyway, so
+ * updating this cost nothing extra. A unit whose bootloader predates this change still answers
+ * `Show bootloader version` with the old "TWIBOOT v3.2" string - that's expected, not a bug.
  *
  * Everything else in this file is unmodified upstream code. This file
  * remains licensed under GPL-2.0 (see LICENSE in this directory), as
@@ -88,7 +90,12 @@
 #include <avr/boot.h>
 #include <avr/pgmspace.h>
 
-#define VERSION_STRING          "TWIBOOT v3.2"
+//Fork version (see this file's own header comment above for the full v3.2->v3.5 derivation),
+//reported on the wire since 2026-09-16 - previously left as upstream's own "TWIBOOT v3.2" to avoid
+//requiring an ISP reflash of every already-deployed unit, but the user was already reflashing
+//every unit's bootloader for other reasons, so updating it here cost nothing extra. Exactly 15
+//characters + the array's implicit trailing byte = 16, fitting info[16] below without truncation.
+#define VERSION_STRING          "SF-TWIBOOT v3.5"
 #define EEPROM_SUPPORT          1
 #define LED_SUPPORT             1
 
