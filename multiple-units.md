@@ -21,10 +21,44 @@ ist der komplette Phase-1-Pfad (Rollen-Konfiguration, Health-Check, kombinierte 
 Segment-Aufteilung, Netzwerk-Push, lokale Anzeige auf beiden Geräten) real bestätigt, nicht nur
 kompiliert.
 
+**Rotation-Modus im Verbund (2026-09-16): funktioniert bereits ohne Codeänderung.**
+`ServiceRotationFunctions.ino` enthält keine einzige `unitsAmount`-Referenz - Rotation läuft
+komplett über die gemeinsame `showText()`/`startDisplayJob()`-Pipeline, die Phase 1 bereits auf
+`combinedUnitsAmount()` umgestellt hat. Live mit einem 10-Zeichen-Rotationseintrag getestet,
+**vom Nutzer physisch bestätigt: 195 zeigt "ABCDEFGHI", 181 zeigt "J"**, genau wie im
+Text-Modus-Test. Damit ist Phase 2s "Rotation-Modus-Unterstützung im Verbund"-Punkt bereits
+erledigt, nicht mehr offen.
+
+**Phase 2: Animations-Koordination über Geräte hinweg - implementiert UND live verifiziert
+(2026-09-16).** `computeUnitAnimationDelayMs()` bekommt statt des lokalen Unit-Index einen
+globalen Index: `pushSegmentToExtension()` sendet zusätzlich zum Segment `globalOffset` (Summe aus
+eigenem `unitsAmount` und allen vorher konfigurierten Erweiterungsgeräten' `UnitsAmount`) und
+`combinedWidth`; das Erweiterungsgerät berechnet damit den Stagger-Delay jeder seiner eigenen Units
+mit genau derselben Formel wie das Primärgerät lokal, über eine begrenzte blockierende
+Wait-Until-Due-Schleife (`ANIMATION_STAGGER_MS_MAX * kleine Unit-Anzahl` als Obergrenze - bewusste,
+dokumentierte zweite Ausnahme von der Nicht-Blockierend-Regel, siehe `ServiceExtensionFunctions.ino`).
+Live getestet: `animationMode=outside-in`, `animationStaggerMs=300` gesetzt, zwei 10-Zeichen-Texte
+gesendet - **vom Nutzer physisch bestätigt: sieht wie EINE durchgehende Animation über beide Geräte
+hinweg aus** (nicht wie zwei unabhängige lokale Animationen). Heap/Crash-Log auf beiden Geräten
+während und nach dem Test unauffällig.
+
+**Kritischer Fund während der Phase-2-Entwicklung: OTA-Update kollidiert mit aktiver
+Primärgerät-Rolle (2026-09-16), behoben.** Ein Versuch, neue Firmware per OTA auf ein Gerät zu
+spielen, das gerade aktiv als `deviceRole=primary` mit laufendem `deviceMode=rotation` (also
+regelmäßigen blockierenden `HTTPClient`-Aufrufen aus `checkExtensionHealth()`/
+`pushExtensionSegments()`) lief, ließ das Gerät nach dem ersten Chunk-Upload vollständig
+einfrieren (kein Crash-Log-Eintrag - ein echtes Hängenbleiben, kein abgefangener Absturz),
+Wiederherstellung nur per physischem Power-Cycle möglich. **Fix:** beide Funktionen prüfen jetzt
+zu Beginn die bereits vorhandenen OTA-Status-Globals (`otaChunkBuffer != nullptr ||
+otaPendingPhase != OTA_PHASE_NONE`, ursprünglich für die eigene OTA-Empfangslogik in
+`ESPMaster.ino` gedacht) und überspringen den Netzwerk-Aufruf komplett, solange ein OTA-Update
+läuft. Firmware mit diesem Fix wurde erfolgreich auf beide Geräte deployed (sauberer Neustart,
+kein Crash-Log-Eintrag), danach die Rollen erneut konfiguriert und der Animations-Test (siehe oben)
+erfolgreich auf der gefixten Firmware durchgeführt. Details siehe `BUGFIX_LOG.md`.
+
 **Noch nicht getestet** (bewusst außerhalb des heutigen Tests, siehe Phasenplan oben):
 Fail-Soft-Verhalten bei nicht erreichbarem Erweiterungsgerät (Theorie, nicht provoziert), mehrere
-gleichzeitige Erweiterungsgeräte, Rotation-Modus im Verbund, Animations-Koordination über Geräte
-hinweg (Phase 2).
+gleichzeitige Erweiterungsgeräte (Nutzer hat aktuell nur Material für ein Erweiterungsgerät).
 
 ## Kontext
 

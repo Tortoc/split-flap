@@ -447,7 +447,13 @@ void writeDueAnimatedUnits() {
       continue; //already written for this line
     }
 
-    unsigned long delayMs = computeUnitAnimationDelayMs(unitIndex, unitsAmount, displayJob.animationModeValue, displayJob.animationStaggerMsValue);
+    //combinedUnitsAmount() (Phase 2, multiple-units.md) instead of plain unitsAmount - a local
+    //unit's own index already equals its GLOBAL position in the combined line (local units always
+    //come first, offset 0 - see pushExtensionSegments()), so passing the combined total here is
+    //enough to make e.g. "outside-in" measure its edges against the FULL combined display instead
+    //of just this device's own units. A no-op for every role other than primary with reachable
+    //extensions - combinedUnitsAmount() returns plain unitsAmount otherwise.
+    unsigned long delayMs = computeUnitAnimationDelayMs(unitIndex, combinedUnitsAmount(), displayJob.animationModeValue, displayJob.animationStaggerMsValue);
     if (millis() - displayJob.lineWriteStartMillis < delayMs) {
       continue; //not due yet this tick
     }

@@ -55,6 +55,11 @@ void checkExtensionHealth() {
   if (deviceRole != DEVICE_ROLE_PRIMARY || extensionDeviceCount == 0) {
     return;
   }
+  if (otaChunkBuffer != nullptr || otaPendingPhase != OTA_PHASE_NONE) {
+    return; //don't contend with an active OTA update - a blocking HTTPClient call here hung the
+    //device solid (no crash-log entry, needed a power cycle) when it collided with an incoming
+    //firmware-chunk upload - see BUGFIX_LOG.md
+  }
   if (!millisReached(lastExtensionHealthCheckAt + EXTENSION_HEALTH_CHECK_INTERVAL_MS)) {
     return;
   }
@@ -86,13 +91,22 @@ void checkExtensionHealth() {
 }
 
 //Sends one already-sliced, already-aligned segment (raw display characters, no further processing
-//needed on the receiving end) to one configured extension's POST /api/extension-display. Best-
-//effort, no retry - a failed push here is exactly as consequential as a single failed local I2C
-//write (see DisplayJob::hadWriteFailure elsewhere): this one line update on that one device is
+//needed on the receiving end) to one configured extension's POST /api/extension-display, along
+//with enough animation context (Phase 2, multiple-units.md point 5) for the extension to compute
+//its OWN units' per-unit stagger delay using the exact same computeUnitAnimationDelayMs() formula
+//the primary uses locally: globalOffset (this extension's first unit's position within the
+//combined line - local units always come first, so this is simply the sum of unitsAmount and
+//every earlier configured extension's own UnitsAmount) and combinedWidth (the same total
+//computeUnitAnimationDelayMs() needs). Form-urlencoded, like every other endpoint in this project
+//- urlEncodeForFormBody() (HelpersStringHandling.ino) percent-encodes the segment itself, the only
+//field whose character set isn't already known-safe.
+//
+//Best-effort, no retry - a failed push here is exactly as consequential as a single failed local
+//I2C write (see DisplayJob::hadWriteFailure elsewhere): this one line update on that one device is
 //lost, and the next genuinely new showText() call for different content will simply try again.
 //Does NOT re-check reachability itself - callers only invoke this for extensions the last
 //checkExtensionHealth() sweep found reachable (see pushExtensionSegments()).
-bool pushSegmentToExtension(ExtensionDevice &ext, String segment) {
+bool pushSegmentToExtension(ExtensionDevice &ext, String segment, int globalOffset, int combinedWidth) {
   WiFiClient client;
   HTTPClient http;
   http.setTimeout(EXTENSION_HTTP_TIMEOUT_MS);
@@ -100,21 +114,33 @@ bool pushSegmentToExtension(ExtensionDevice &ext, String segment) {
     return false;
   }
   http.addHeader("X-OTA-Password", otaPassword);
-  int httpCode = http.POST(segment);
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  String body = "segment=" + urlEncodeForFormBody(segment) +
+    "&animationMode=" + urlEncodeForFormBody(displayJob.animationModeValue) +
+    "&staggerMs=" + String(displayJob.animationStaggerMsValue) +
+    "&globalOffset=" + String(globalOffset) +
+    "&combinedWidth=" + String(combinedWidth);
+  int httpCode = http.POST(body);
   http.end();
   return httpCode == 200;
 }
 
 //Called once per newly-written display line (ServiceDisplayJobFunctions.ino's DISPLAY_JOB_WRITE_LINE,
 //right alongside the existing local writeDueAnimatedUnits() call - NOT from the animation-stagger
-//re-poll state, since Phase 1 doesn't coordinate animation timing across devices, see
-//multiple-units.md point 5) - slices displayJob.currentAlignedLine (already sized to
-//combinedUnitsAmount() by the caller) into one segment per configured, reachable extension, in
-//configuration order, starting right after this device's own unitsAmount characters.
+//re-poll state, since the actual PUSH itself is still a single one-shot HTTP request per line, not
+//staggered network calls - see pushSegmentToExtension()'s comment for how the receiving extension
+//nonetheless staggers its OWN units' writes using the animation context sent along with it) -
+//slices displayJob.currentAlignedLine (already sized to combinedUnitsAmount() by the caller) into
+//one segment per configured, reachable extension, in configuration order, starting right after
+//this device's own unitsAmount characters.
 void pushExtensionSegments() {
   if (deviceRole != DEVICE_ROLE_PRIMARY) {
     return;
   }
+  if (otaChunkBuffer != nullptr || otaPendingPhase != OTA_PHASE_NONE) {
+    return; //same OTA-collision guard as checkExtensionHealth() above - see BUGFIX_LOG.md
+  }
+  int combinedWidth = combinedUnitsAmount();
   int offset = unitsAmount;
   for (int i = 0; i < extensionDeviceCount; i++) {
     ExtensionDevice &ext = extensionDevices[i];
@@ -122,7 +148,7 @@ void pushExtensionSegments() {
       continue; //fail-soft: skip, don't block/retry inline - see this function's own top comment
     }
     String segment = displayJob.currentAlignedLine.substring(offset, offset + ext.UnitsAmount);
-    pushSegmentToExtension(ext, segment);
+    pushSegmentToExtension(ext, segment, offset, combinedWidth);
     offset += ext.UnitsAmount;
   }
 }
@@ -131,15 +157,31 @@ void pushExtensionSegments() {
 //showText()/DisplayJob entirely (see multiple-units.md point 3 - an extension has no line-
 //wrap/alignment logic of its own, the primary already did that against the combined width). Uses
 //this device's OWN configured flapSpeed - the primary doesn't know or need to know an extension's
-//speed setting, exactly like it doesn't need to know its alignment/animation preferences either.
-void applyExtensionDisplaySegment(String segment) {
+//speed setting, exactly like it doesn't need to know its alignment preferences.
+//
+//Animation coordination (Phase 2, multiple-units.md point 5): globalOffset/combinedWidth let this
+//device compute each of its own units' delay with the exact same computeUnitAnimationDelayMs()
+//formula the primary uses for its own units, so e.g. "outside-in" reads as one continuous
+//animation across both devices instead of two independent local ones. Applied here as a simple
+//blocking wait-until-due loop, NOT the local DisplayJob state machine's non-blocking per-tick
+//sweep - a deliberate, bounded exception to this project's usual non-blocking-write rule (see
+//ServiceExtensionFunctions.ino's own top comment for the same reasoning applied to the HTTP calls
+//themselves): an extension's own unit count is expected to be small, so the worst case (every unit
+//at the maximum stagger apart) is bounded by ANIMATION_STAGGER_MS_MAX times a small number, not an
+//open-ended wait, and it only ever runs on a device an admin explicitly opted into this role.
+void applyExtensionDisplaySegment(String segment, String animationMode, unsigned long staggerMs, int globalOffset, int combinedWidth) {
   int speed = convertSpeed(flapSpeed);
   int segmentLength = (int)segment.length();
+  unsigned long startTime = millis();
   for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
     char letterChar = unitIndex < segmentLength ? segment[unitIndex] : ' ';
     int letterPosition = translateLettertoInt(letterChar);
     if (letterPosition == -1) {
       letterPosition = translateLettertoInt('?');
+    }
+    unsigned long delayMs = computeUnitAnimationDelayMs(globalOffset + unitIndex, combinedWidth, animationMode, staggerMs);
+    while (millis() - startTime < delayMs) {
+      yield(); //bounded - see this function's own top comment
     }
     writeToUnit(unitIndex, letterPosition, speed);
   }

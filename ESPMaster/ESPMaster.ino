@@ -588,11 +588,6 @@ String deviceRole = "standalone"; //standalone|primary|extension - see DEVICE_RO
 #define EXTENSION_DEVICES_MAX 4
 ExtensionDevice extensionDevices[EXTENSION_DEVICES_MAX];
 int extensionDeviceCount = 0;
-//POST /api/extension-display's small, single-shot body-callback state - deliberately not the
-//elaborate multi-fragment ownership pattern /api/firmware-chunk needs (see that endpoint's own
-//registration comment for why a segment this small doesn't need it).
-String pendingExtensionSegment = "";
-bool pendingExtensionSegmentReceived = false;
 String countdownToDateUnix = "";
 String countupSinceDateUnix = "";
 String lastWrittenText = "";
@@ -2808,15 +2803,12 @@ void setup() {
       request->send(200, "text/plain", "OK");
     });
 
-    //Extension-side receiver for a primary's already-sliced, already-aligned display segment - see
-    //multiple-units.md point 3 and ServiceExtensionFunctions.ino's own comments. A segment is at
-    //most UNITS_AMOUNT_MAX (64) characters, always arriving as a single body-callback invocation
-    //in practice (comfortably under any realistic TCP MTU) - deliberately does NOT need
-    ///api/firmware-chunk's multi-fragment/ownership machinery, built for multi-KB uploads that
-    //genuinely can arrive in several pieces and from genuinely concurrent requests. The work
-    //happens in the body callback (which streams in first); the outer request handler below only
-    //sends the final response, once the whole (small) body has already been captured - same
-    //division of labor as every other body-driven endpoint in this file.
+    //Extension-side receiver for a primary's already-sliced, already-aligned display segment plus
+    //animation context - see multiple-units.md point 3/5 and ServiceExtensionFunctions.ino's own
+    //comments (pushSegmentToExtension()/applyExtensionDisplaySegment()). Plain form-urlencoded
+    //POST, same as every other endpoint in this file (Phase 2 switched away from Phase 1's raw-body
+    //handler once more than one field needed sending - no reason to keep a bespoke body callback
+    //once that was true).
     webServer.on("/api/extension-display", HTTP_POST, [](AsyncWebServerRequest * request) {
       if (String(otaPassword) != "") {
         String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
@@ -2829,30 +2821,24 @@ void setup() {
         request->send(400, "text/plain", "This device is not configured as an extension (System -> deviceRole)");
         return;
       }
-      if (!pendingExtensionSegmentReceived) {
-        request->send(400, "text/plain", "Missing, oversized, or fragmented body");
-        pendingExtensionSegment = "";
+      if (!request->hasParam("segment", true)) {
+        request->send(400, "text/plain", "'segment' is required");
         return;
       }
-      String segment = pendingExtensionSegment;
-      pendingExtensionSegment = "";
-      pendingExtensionSegmentReceived = false;
-      applyExtensionDisplaySegment(segment);
+      String segment = request->getParam("segment", true)->value();
+      if ((int)segment.length() > UNITS_AMOUNT_MAX) {
+        request->send(400, "text/plain", "Segment too long");
+        return;
+      }
+      String animationMode = request->hasParam("animationMode", true) ? request->getParam("animationMode", true)->value() : ANIMATION_MODE_SIMULTANEOUS;
+      String staggerMsRaw = request->hasParam("staggerMs", true) ? request->getParam("staggerMs", true)->value() : "0";
+      String globalOffsetRaw = request->hasParam("globalOffset", true) ? request->getParam("globalOffset", true)->value() : "0";
+      String combinedWidthRaw = request->hasParam("combinedWidth", true) ? request->getParam("combinedWidth", true)->value() : String(unitsAmount);
+      unsigned long staggerMs = isNumber(staggerMsRaw) ? (unsigned long)staggerMsRaw.toInt() : 0;
+      int globalOffset = isNumber(globalOffsetRaw) ? globalOffsetRaw.toInt() : 0;
+      int combinedWidth = isNumber(combinedWidthRaw) ? combinedWidthRaw.toInt() : unitsAmount;
+      applyExtensionDisplaySegment(segment, animationMode, staggerMs, globalOffset, combinedWidth);
       request->send(200, "text/plain", "OK");
-    }, nullptr, [](AsyncWebServerRequest * request, uint8_t *data, size_t len, size_t index, size_t total) {
-      if (index == 0) {
-        pendingExtensionSegmentReceived = false;
-        pendingExtensionSegment = "";
-      }
-      if (total > UNITS_AMOUNT_MAX) {
-        return; //oversized - outer handler sees Received==false and rejects
-      }
-      for (size_t i = 0; i < len; i++) {
-        pendingExtensionSegment += (char)data[i];
-      }
-      if (index + len == total) {
-        pendingExtensionSegmentReceived = true;
-      }
     });
 
     //Primary-side extension host list (multiple-units.md point 1) - GET returns the configured

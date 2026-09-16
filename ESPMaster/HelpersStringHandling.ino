@@ -19,6 +19,33 @@ bool constantTimeEquals(const String &a, const String &b) {
   return diff == 0;
 }
 
+//Percent-encodes a value for use as one field of an application/x-www-form-urlencoded body -
+//needed by pushSegmentToExtension() (ServiceExtensionFunctions.ino, multiple-units.md Phase 2),
+//the first place this project builds an outgoing form-encoded request body itself rather than
+//just reading one an incoming request already parsed. A display segment's real character set is
+//narrow (letters[], ESPMaster.ino: A-Z, digits, space, and $&#:.-?!) but this encodes generally
+//correctly regardless - unreserved characters pass through unchanged, everything else becomes
+//%XX. Space becomes %20, not '+' - both are valid form-urlencoded space representations, but %20
+//needs no special-casing on the decoding side (ESPAsyncWebSrv's own param parser).
+String urlEncodeForFormBody(String value) {
+  String encoded;
+  encoded.reserve(value.length());
+  const char* hexDigits = "0123456789ABCDEF";
+  for (int i = 0; i < (int)value.length(); i++) {
+    uint8_t c = (uint8_t)value.charAt(i);
+    bool isUnreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+      c == '-' || c == '_' || c == '.' || c == '~';
+    if (isUnreserved) {
+      encoded += (char)c;
+    } else {
+      encoded += '%';
+      encoded += hexDigits[(c >> 4) & 0xF];
+      encoded += hexDigits[c & 0xF];
+    }
+  }
+  return encoded;
+}
+
 //Converts UTF-8 ä/ö/ü/Ä/Ö/Ü byte sequences to the internal single-byte placeholder codes ($/&/#)
 //that the physical letters[] array (ESPMaster.ino) actually has flaps for - centralizes what was
 //previously only done client-side, and only in the main text form's own onsubmit handler (found
