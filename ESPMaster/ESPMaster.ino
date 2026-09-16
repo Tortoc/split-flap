@@ -1759,14 +1759,11 @@ void setup() {
         static File unitFirmwareFile;
 
         if (index == 0) {
-          //Check the password FIRST, before touching any previous-upload state at all. Found
-          //2026-09-09, CODE_REVIEW_V2.md #3: this used to close the previous upload's (possibly
-          //still-legitimately-in-progress) file handle and delete its temp file BEFORE checking
-          //this new request's own password - an unauthenticated POST here could already interrupt
-          //and corrupt a different, correctly-authenticated upload that was still streaming in,
-          //purely by virtue of also hitting index==0 on the shared static state. On failure, just
-          //return WITHOUT touching any shared state (found 2026-09-10, CODE_REVIEW_V4.md #2) - the
-          //outer handler above re-checks the password itself and never trusts a shared flag for it.
+          //Check the password FIRST, before touching any previous-upload state at all - an
+          //unauthenticated POST hitting index==0 must not be able to interrupt/corrupt a
+          //different, still-legitimately-in-progress upload just by arriving first. On failure,
+          //just return WITHOUT touching any shared state - the outer handler re-checks the
+          //password itself and never trusts a shared flag for it.
           if (String(otaPassword) != "") {
             String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
             if (!constantTimeEquals(providedPassword, String(otaPassword))) {
@@ -1776,11 +1773,9 @@ void setup() {
           }
 
           //Reject a second, DIFFERENT authenticated request trying to start while this channel's
-          //shared static state is already claimed by another still-in-flight upload - found
-          //2026-09-10, CODE_REVIEW_V3.md #2, see unitFirmwareUploadOwner's own declaration comment
-          //for the full mechanism/repro. Must come before any of the cleanup/touching of
-          //unitFirmwareFile below - a losing request must never get anywhere near it. Again, just
-          //return - no shared flag to set (CODE_REVIEW_V4.md #2).
+          //shared static state is already claimed by another still-in-flight upload - must come
+          //before any cleanup/touching of unitFirmwareFile below. Again, just return - no shared
+          //flag to set.
           if (unitFirmwareUploadOwner != nullptr && unitFirmwareUploadOwner != request) {
             SerialPrintln(F("Unit firmware upload rejected: another upload is already in progress"));
             return;
@@ -1802,10 +1797,9 @@ void setup() {
 
           //Only now, with this request's own credentials confirmed AND exclusive ownership
           //claimed, touch the shared static upload state. If a previous upload's connection just
-          //vanished mid-transfer, "final" never fired for it and this handle was never closed -
-          //found live 2026-09-09 while testing the fix below (a dangling handle measurably cost
-          //heap/fragmentation across the next upload). Close it defensively before reusing the
-          //static variable for this attempt.
+          //vanished mid-transfer, "final" never fired for it and this handle was never closed
+          //(a dangling handle measurably costs heap/fragmentation across the next upload) - close
+          //it defensively before reusing the static variable for this attempt.
           if (unitFirmwareFile) {
             unitFirmwareFile.close();
           }
@@ -1819,8 +1813,7 @@ void setup() {
           SerialPrintln(F("DEBUG: Unit firmware upload starting: ") + filename);
           //Write to a temp path, atomically rename() onto the real path only once the whole
           //upload is confirmed complete and error-free - an aborted/failed upload must never
-          //leave the previously-stored (working) firmware truncated or corrupted (found
-          //2026-09-09, CODE_REVIEW.md #5).
+          //leave the previously-stored (working) firmware truncated or corrupted.
           unitFirmwareFile = LittleFS.open(unitFirmwareTmpPath, "w");
           if (!unitFirmwareFile) {
             SerialPrintln(F("Unit firmware upload: failed to open ") + String(unitFirmwareTmpPath) + F(" for writing"));
@@ -1828,12 +1821,9 @@ void setup() {
           }
         }
 
-        //A per-fragment ownership check, not a shared "was rejected" flag (CODE_REVIEW_V4.md #2) -
-        //without this, a LATER fragment (index>0) of a rejected request would fall straight
-        //through to unitFirmwareFile.write() below, writing its bytes into the WINNING request's
-        //file. Comparing live ownership on every fragment, instead of any shared boolean, means a
-        //rejected request's fragments are dropped purely because they're not the current owner -
-        //nothing it does can ever affect a different, legitimate owner's own fragments.
+        //A per-fragment ownership check, not a shared "was rejected" flag - without this, a LATER
+        //fragment (index>0) of a rejected request would fall straight through to
+        //unitFirmwareFile.write() below, writing its bytes into the WINNING request's file.
         if (unitFirmwareUploadOwner != request) {
           return;
         }
@@ -1866,12 +1856,9 @@ void setup() {
     //Pushes the currently stored unit firmware to a single unit over I2C (twiboot), or just probes
     //which I2C address it answers on without writing anything - both deferred to loop(), both take
     //the same 'id' param, so merged into one registration dispatched by 'action' (heap-saving
-    //pattern established for /api/wifi etc.) - unlike the /api/settings merge attempt, both
-    //branches here are short and structurally near-identical, not a large, disjoint pair of
-    //handlers, so the same risk doesn't apply. Deliberately its own path, not
-    //merged into "/api/units/firmware" - that's a multipart upload registration (different
-    //ESPAsyncWebServer callback signature), and that upload route would otherwise intercept a
-    //sub-path anyway.
+    //pattern established for /api/wifi etc.). Deliberately its own path, not merged into
+    //"/api/units/firmware" - that's a multipart upload registration (different ESPAsyncWebServer
+    //callback signature), and that upload route would otherwise intercept a sub-path anyway.
     webServer.on("/api/units/firmware-push", HTTP_POST, [](AsyncWebServerRequest * request) {
       String action = request->hasParam("action", true) ? request->getParam("action", true)->value() : "";
 
@@ -1886,13 +1873,12 @@ void setup() {
         return;
       }
 
-      //Bounds against UNITS_AMOUNT_MAX (the structural 6-bit-DIP address ceiling), not the
-      //cached unitsAmount - unlike every other unit-id check in this file, this endpoint's whole
-      //point is to reach a unit that's already stuck in the bootloader, which by definition
-      //doesn't answer at its app address and therefore drops out of
-      //unitsAmount on the next scan. Checking against unitsAmount here would block exactly the
-      //recovery this endpoint exists for. scanForBootloaderAddress() below is the real safety
-      //net regardless (refuses to proceed unless exactly one unit answers as a bootloader).
+      //Bounds against UNITS_AMOUNT_MAX (the structural 6-bit-DIP address ceiling), not the cached
+      //unitsAmount - unlike every other unit-id check in this file, this endpoint's whole point is
+      //to reach a unit that's already stuck in the bootloader, which by definition doesn't answer
+      //at its app address and drops out of unitsAmount on the next scan. scanForBootloaderAddress()
+      //below is the real safety net regardless (refuses unless exactly one unit answers as a
+      //bootloader).
       int unitId = idValue.toInt();
       if (unitId < 0 || unitId >= UNITS_AMOUNT_MAX) {
         request->send(400, "text/plain", "Unit id out of range. Valid range: 0 to " + String(UNITS_AMOUNT_MAX - 1));
@@ -1928,11 +1914,9 @@ void setup() {
 
       if (action == "probe") {
         //Same always-required password check as "push" above, NOT the toggleable
-        //accessControlUnitsPublic - found via Code_REVIEW_V5.md #03: this branch was completely
-        //unauthenticated even with a password set, despite calling requestUnitEnterBootloader()
-        //below, which genuinely reboots the unit's running app (forced re-homing) exactly like
-        //"push" does before it ever gets this far. A read-only-sounding "probe" name doesn't make
-        //it a safe, unauthenticated diagnostic - it's the same disruptive operation.
+        //accessControlUnitsPublic - this calls requestUnitEnterBootloader(), which genuinely
+        //reboots the unit's running app exactly like "push" does. A read-only-sounding "probe"
+        //name doesn't make it a safe, unauthenticated diagnostic.
         if (String(otaPassword) != "") {
           String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
           if (!constantTimeEquals(providedPassword, String(otaPassword))) {
@@ -2056,7 +2040,7 @@ void setup() {
     webServer.on("/api/web-file", HTTP_POST,
       [](AsyncWebServerRequest * request) {
         //Capture ownership BEFORE releasing it - same request-scoped derivation as
-        ///api/units/firmware above (CODE_REVIEW_V4.md #2).
+        ///api/units/firmware above.
         bool wasOwner = (webFileUploadOwner == request);
         if (wasOwner) {
           webFileUploadOwner = nullptr;
@@ -2072,13 +2056,10 @@ void setup() {
         }
         if (!wasOwner) {
           //Distinguish "this request's OWN filename was invalid" from "genuinely lost the
-          //ownership race to a concurrent upload" - found while implementing CODE_REVIEW_V4.md
-          //#2 (not itself part of that review): the body handler used to send its own 400
-          //directly for an invalid filename AND give up ownership, so the outer handler here
-          //would then ALSO try to send a (wrong, generic) 503 for the same request - a double
-          //response. Re-derive the uploaded filename statelessly from this request's own file
-          //param instead (ESPAsyncWebServer adds one with isFile()==true during multipart
-          //parsing, regardless of the field name used) rather than relying on any shared flag.
+          //ownership race to a concurrent upload" - re-derive the uploaded filename statelessly
+          //from this request's own file param (ESPAsyncWebServer adds one with isFile()==true
+          //during multipart parsing) rather than relying on any shared flag, to avoid a double
+          //response (400 from the body handler AND a generic 503 from here).
           String uploadedFilename = "";
           for (size_t i = 0; i < request->params(); i++) {
             const AsyncWebParameter* p = request->getParam(i);
@@ -2107,11 +2088,10 @@ void setup() {
 
         if (index == 0) {
           //Check the password FIRST, before touching any previous-upload state at all - same
-          //reasoning as /api/units/firmware above (found 2026-09-09, CODE_REVIEW_V2.md #3): an
-          //unauthenticated POST hitting index==0 must not be able to close/delete a different,
-          //still-legitimately-in-progress upload's file just by arriving first. On failure, just
-          //return - no shared flag to set (CODE_REVIEW_V4.md #2), the outer handler re-checks the
-          //password itself.
+          //reasoning as /api/units/firmware above: an unauthenticated POST hitting index==0 must
+          //not be able to close/delete a different, still-legitimately-in-progress upload's file
+          //just by arriving first. On failure, just return - no shared flag to set, the outer
+          //handler re-checks the password itself.
           if (String(otaPassword) != "") {
             String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
             if (!constantTimeEquals(providedPassword, String(otaPassword))) {
@@ -2121,11 +2101,9 @@ void setup() {
           }
 
           //Reject a second, DIFFERENT authenticated request trying to start while this channel's
-          //shared static state is already claimed by another still-in-flight upload - found
-          //2026-09-10, CODE_REVIEW_V3.md #2 (same underlying issue as /api/units/firmware above,
-          //confirmed here by static analysis of the identical shared-static-state pattern). Must
-          //come before any cleanup/touching of webUploadFile below. Again, just return
-          //(CODE_REVIEW_V4.md #2) - no shared flag.
+          //shared static state is already claimed by another still-in-flight upload (same
+          //underlying issue as /api/units/firmware above) - must come before any cleanup/touching
+          //of webUploadFile below. Again, just return - no shared flag.
           if (webFileUploadOwner != nullptr && webFileUploadOwner != request) {
             SerialPrintln(F("Web file upload rejected: another upload is already in progress"));
             return;
