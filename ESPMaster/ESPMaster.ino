@@ -1414,9 +1414,8 @@ void setup() {
           SerialPrintln(F("Flap Speed Updated: ") + flapSpeed);
         }
 
-        //Only if a new animation mode - doesn't bump displayRenderGeneration, same reasoning as
-        //flapSpeed above: this only affects the TIMING of future writes, not what content counts
-        //as already-shown/cached.
+        //Doesn't bump displayRenderGeneration, same reasoning as flapSpeed above: this only
+        //affects the TIMING of future writes, not what content counts as already-shown/cached.
         if (newAnimationModeValue != "" && animationMode != newAnimationModeValue) {
           animationMode = newAnimationModeValue;
 
@@ -1490,17 +1489,14 @@ void setup() {
 
         //Rotation items are always submitted as the complete list (see index.html) - a full
         //replace, not an incremental add. Gated to the rotation tab's own submission, same
-        //tab-gating reasoning as Countdown/Countup above (found 2026-09-09, CODE_REVIEW.md #6):
-        //the hidden field is only ever recomputed by collectRotationItemsForSubmit(), called only
-        //from the rotation tab's onsubmit case - submitting from any other tab resubmits its
-        //stale/default "[]" and would otherwise silently wipe an existing, loaded rotation list.
+        //tab-gating reasoning as Countdown/Countup above: the hidden field is only ever
+        //recomputed by collectRotationItemsForSubmit(), called only from the rotation tab's
+        //onsubmit case - submitting from any other tab resubmits its stale/default "[]" and
+        //would otherwise silently wipe an existing, loaded rotation list.
         if (newDeviceModeValue == DEVICE_MODE_ROTATION && hasNewRotationItems) {
-          //Return value checked now (found 2026-09-09, CODE_REVIEW.md #24) - invalid rotation
-          //JSON no longer wipes the existing list, but the response below should say so too,
-          //rather than unconditionally claiming success while quietly discarding the submission.
-          //The rest of this request (scheduled messages, mode switch, etc.) still gets processed
-          //normally - a broken rotation submission doesn't need to block unrelated fields in the
-          //same request.
+          //Invalid rotation JSON no longer wipes the existing list, but the response below says
+          //so too rather than unconditionally claiming success. The rest of this request
+          //(scheduled messages, mode switch, etc.) still gets processed normally.
           if (replaceRotationItemsFromJson(newRotationItemsJson)) {
             SerialPrintln(F("Rotation Items Updated, count: ") + String(rotationItemCount));
           } else {
@@ -1516,16 +1512,10 @@ void setup() {
             scheduledMessageRejected = true;
             scheduledMessageRejectionReason = "the scheduled message needs more lines than fit and was NOT scheduled - it would never actually show.";
           } else if (!addAndPersistScheduledMessage(newInputTextValue, newMessageScheduleDateTimeUnixValue, newMessageScheduleShowIndefinitely)) {
-            //Found 2026-09-10, CODE_REVIEW_V4.md #12: addAndPersistScheduledMessage()'s return
-            //value used to be ignored entirely - a timestamp that's already due/in the past (the
-            //request only checked it was numeric, never that it was actually in the future) was
-            //silently dropped while this handler still answered 200 "OK" as if it had been
-            //scheduled. Can happen with a maliciously/accidentally crafted request, or legitimately
-            //if a very soon deadline passes in the time between the browser prefilling the field
-            //and this request actually being processed (see CODE_REVIEW_V4.md #9's related fix).
-            //A `false` here can now also mean SCHEDULED_MESSAGES_MAX was already reached
-            //(Code_REVIEW_V5.md #11, addScheduledMessage()'s own comment) - the message below
-            //covers both without needing a richer return type just to distinguish them.
+            //A `false` here means either the timestamp is already due/in the past (can happen
+            //legitimately if a very soon deadline passes between the browser prefilling the field
+            //and this request being processed) or SCHEDULED_MESSAGES_MAX was already reached - the
+            //message below covers both without needing a richer return type to distinguish them.
             SerialPrintln(F("Scheduled Message rejected: date/time is not in the future, or too many are already scheduled"));
             scheduledMessageRejected = true;
             scheduledMessageRejectionReason = "the scheduled date/time has already passed, or the maximum number of scheduled messages is already reached - it was NOT scheduled.";
@@ -1551,13 +1541,10 @@ void setup() {
 
           //Only if we are showing text
           if (hasNewInputTextValue && deviceMode == DEVICE_MODE_TEXT) {
-            //Found via Code_REVIEW_V5.md #06: the scheduled-message branch above already checks
-            //isMessageTooLongToRender() before accepting a submission, but this immediate-text
-            //branch didn't - a message needing more than DisplayJob::MAX_DISPLAY_LINES lines was
-            //accepted with 200 "OK" and applied to inputText/deviceMode, even though
-            //startDisplayJob() (ServiceDisplayJobFunctions.ino) would then refuse to ever actually
-            //render it, every single tick, forever. Reject clearly instead, same as /api/text
-            //already does for this exact case.
+            //A message needing more than DisplayJob::MAX_DISPLAY_LINES lines must be rejected
+            //here too (same check as the scheduled-message branch above) - otherwise it gets
+            //applied to inputText/deviceMode while startDisplayJob() then refuses to ever
+            //actually render it, every single tick, forever.
             if (isMessageTooLongToRender(newInputTextValue)) {
               SerialPrintln(F("Direct text rejected: needs more lines than fit to display"));
               directTextRejected = true;
@@ -1568,15 +1555,14 @@ void setup() {
         }
 
         //Re-sync the boot snapshot right after this request's writes, not just on the periodic
-        //30s check - found via Code_REVIEW_V5.md #01: a snapshot that's only ever caught up by a
-        //background timer leaves a real, if narrow, window where a confirmed-saved change is lost
-        //to a power cut before the next periodic tick. A no-op (no flash access) if nothing this
-        //request touched actually changed, since computeSettingsSignature() would already match.
+        //30s check - a snapshot only caught up by a background timer leaves a real, if narrow,
+        //window where a confirmed-saved change is lost to a power cut before the next tick. A
+        //no-op if nothing this request touched actually changed.
         checkBootSnapshotFreshness();
 
         //scheduledMessageRejected and directTextRejected can never both be true for the same
-        //request (they're set in mutually exclusive if/else branches above, gated on
-        //newMessageScheduleEnabledValue) - safe to fold into one combined reason.
+        //request (they're set in mutually exclusive if/else branches above) - safe to fold into
+        //one combined reason.
         bool anyTextRejected = scheduledMessageRejected || directTextRejected;
         String textRejectionReason = scheduledMessageRejected
           ? scheduledMessageRejectionReason
@@ -1587,8 +1573,6 @@ void setup() {
         } else if (rotationItemsUpdateRejected) {
           request->send(400, "text/plain", "OK, but the submitted rotation items were rejected (invalid JSON, or a text item needs more lines than fit to ever display) and were NOT applied - the existing rotation list is unchanged.");
         } else if (anyTextRejected) {
-          //scheduledMessageRejectionReason (found 2026-09-10, CODE_REVIEW_V4.md #12) now carries
-          //one of two distinct explanations - see where it's set above.
           request->send(400, "text/plain", "OK, but " + textRejectionReason);
         } else {
           request->send(200, "text/plain", "OK");
@@ -1646,22 +1630,15 @@ void setup() {
         char buf[420]; //worst-case length checked by hand incl. the longest wifiDisconnectReason string
         //getFlashChipRealSize() = physical chip's own SPI ID (ground truth); getFlashChipSize() =
         //what the eesz board-menu choice assumes - a mismatch means the compiled layout is wrong.
-        //rtc/rtcOsf (added 2026-09-11, see ServiceRtcFunctions.ino) - the only way to verify the
-        //optional DS3231's detection/trustworthiness without physically observing the display.
-        //resetReason/uptimeSec (added 2026-09-12, while investigating whether the WiFiManager/
-        //AUTH_EXPIRE disconnect issue still occurs): the existing
-        //crash reporter (ServiceCrashLogFunctions.ino) only captures genuine exceptions/panics via
-        //custom_crash_callback() - a CLEAN reset (external/brownout/hardware-watchdog, exactly
-        //what a WiFiManager-driven reconnect gone wrong could cause without ever hitting that
-        //callback) leaves no trace there at all. ESP.getResetInfoPtr()->reason is the SDK's own
-        //boot-time record of the true last reset cause, independent of our crash reporter -
-        //reuses the same crashResetReasonText() decode table. uptimeSec lets repeated external
-        //polls (e.g. the established periodic stability check) notice ANY reboot between two
-        //checks (crashed or clean) even without a matching crash-log entry, by seeing a smaller
-        //uptime than the elapsed real time since the last check would imply.
-        //wifiDisconnects/lastWifiDisconnectReason/lastWifiDisconnectSecAgo (added 2026-09-13,
-        //ServiceWifiFunctions.ino) - makes the AUTH_EXPIRE/ASSOC_EXPIRE disconnect question
-        //observable over HTTP even without a live serial capture; see that file's own comment.
+        //rtc/rtcOsf: the only way to verify the optional DS3231's detection/trustworthiness
+        //without physically observing the display. resetReason comes from
+        //ESP.getResetInfoPtr()->reason, the SDK's own boot-time record of the true last reset
+        //cause, independent of our crash reporter (which only captures genuine exceptions/panics
+        //via custom_crash_callback() - a CLEAN reset such as external/brownout/hardware-watchdog
+        //leaves no trace there). uptimeSec lets repeated external polls notice ANY reboot between
+        //two checks (crashed or clean) by seeing a smaller uptime than expected.
+        //wifiDisconnects/lastWifiDisconnectReason/lastWifiDisconnectSecAgo makes AUTH_EXPIRE/
+        //ASSOC_EXPIRE disconnects observable over HTTP without a live serial capture.
         const char* lastDisconnectReasonForDiag = wifiDisconnectCount > 0 ? lastWifiDisconnectReason.c_str() : "none";
         long lastDisconnectSecAgo = wifiDisconnectCount > 0 ? (long)((millis() - lastWifiDisconnectAt) / 1000) : -1;
         snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s rtc=%s rtcOsf=%u resetReason=%s uptimeSec=%lu wifiDisconnects=%lu lastWifiDisconnectReason=%s lastWifiDisconnectSecAgo=%ld")),
@@ -1721,9 +1698,6 @@ void setup() {
       }
 
       // request->method() == HTTP_DELETE
-      //Found via Code_REVIEW_V5.md #16: unlike every other state-changing endpoint in this file,
-      //this DELETE had no password/access-control check at all, even with a password set and every
-      //category protected - anyone with HTTP access could erase the persisted crash history.
       //Reading (GET, above) deliberately stays open regardless - only clearing needs protecting.
       if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return;
       if (LittleFS.exists(CRASH_LOG_PATH)) {
@@ -1746,11 +1720,8 @@ void setup() {
 #if UNIT_BOOTLOADER_ENABLE == true
     // Must be registered before "/api/units" below: ESPAsyncWebServer's canHandle() treats any
     // request path starting with "<registered uri>/" as a match too, and _attachHandler() picks
-    // the FIRST registered handler that matches - so with "/api/units" registered first, it was
-    // silently swallowing every request to "/api/units/firmware"/"/api/units/firmware-push" (a
-    // real, undetected regression introduced when "/api/units" itself gained a POST handler in the
-    // units-actions consolidation - found while testing this merge, not caused by it). Registering
-    // the more specific paths first fixes it for good.
+    // the FIRST registered handler that matches - registering the more specific paths first
+    // avoids "/api/units" silently swallowing requests to "/api/units/firmware*".
 
     // Admin: upload a compiled Unit.ino firmware image (raw AVR .bin, NOT ESPMaster's own) to be
     // pushed to a unit via /api/units/firmware-push. Requires X-OTA-Password, same as /api/firmware.
@@ -1758,9 +1729,7 @@ void setup() {
       [](AsyncWebServerRequest * request) {
         //Capture ownership BEFORE releasing it - the one reliable, request-scoped (pointer
         //comparison) way to know whether THIS request's body ever won the shared static file
-        //state, independent of whatever any other concurrent request's body did in the meantime
-        //(CODE_REVIEW_V4.md #2 - replaces the old shared unitFirmwareUploadAuthFailed/
-        //unitFirmwareUploadBusyFailed flags, see unitFirmwareUploadOwner's declaration comment).
+        //state, independent of whatever any other concurrent request's body did in the meantime.
         bool wasOwner = (unitFirmwareUploadOwner == request);
         if (wasOwner) {
           unitFirmwareUploadOwner = nullptr;
