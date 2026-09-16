@@ -11,7 +11,12 @@ String buildDayCountText(long days, String prefix, String suffix) {
     daysText = daysText + " " + suffix;
   }
 
-  if ((int)daysText.length() > unitsAmount) {
+  //Compare the NORMALIZED length (umlauts collapse to 1 char each, see
+  //normalizeUmlautsForDisplay()) against the effective COMBINED width, not raw UTF-8 byte length
+  //against local unitsAmount - otherwise a label with umlauts could be dropped as "too long" even
+  //though it fits once normalized, and a primary with reachable extensions would drop a label that
+  //fits the actual combined display (CODE_REVIEW_V6.md #8).
+  if ((int)normalizeUmlautsForDisplay(daysText).length() > combinedUnitsAmount()) {
     SerialPrintln(F("Day count text was too long, cutting down to just the number..."));
     //Must be String(days), not `"" + days` - "" is a const char*, so `+ days` would do pointer
     //arithmetic instead of concatenation (undefined behavior, readily a crash).
