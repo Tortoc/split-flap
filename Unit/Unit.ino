@@ -24,7 +24,7 @@
 //older firmware without these bytes reads back as 255/255/255 ("unknown"), not a crash.
 #define UNIT_FW_VERSION_MAJOR 2
 #define UNIT_FW_VERSION_MINOR 2
-#define UNIT_FW_VERSION_PATCH 2
+#define UNIT_FW_VERSION_PATCH 3
 
 //Address jumper block (J4 "AddressJumpers" on the fae-pcb schematic), 6 bits = 64 addresses. J4
 //has 8 pin pairs; D5/D6 (topmost) stay unused - I2C addresses are 7 bits wide and twiboot adds a
