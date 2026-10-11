@@ -587,6 +587,15 @@ unsigned long lastOfflineReconnectAttempt = 0;
 unsigned long wifiDisconnectCount = 0;
 String lastWifiDisconnectReason = "";
 unsigned long lastWifiDisconnectAt = 0;
+//TEMPORARY DIAGNOSTIC (2026-10-11) - only to test whether WiFi trouble correlates with low heap.
+//Lowest free heap / largest free block seen since boot (sampled once per loop() pass, so short
+//dips inside a single callback can be missed) and the free heap at the moment of the last WiFi
+//disconnect. Shown by GET /api/diag?type=heap. Safe to remove again once that question is settled
+//(these four globals, their two update sites in loop()/ServiceWifiFunctions.ino, the diag fields).
+uint32_t diagMinFreeHeap = UINT32_MAX;
+uint32_t diagMinFreeHeapAtSec = 0;
+uint32_t diagMinMaxBlock = UINT32_MAX;
+uint32_t diagFreeHeapAtLastWifiDisconnect = 0;
 //Optional DS3231 RTC (ServiceRtcFunctions.ino) - declared here, not in that file, since
 //setup()/GET /api/diag below (both in this earlier-concatenated main sketch file) need them; see
 //probeRtc()'s own comment for the full reasoning.
@@ -1711,7 +1720,7 @@ void setup() {
       }
 
       if (type == "heap") {
-        char buf[420]; //worst-case length checked by hand incl. the longest wifiDisconnectReason string
+        char buf[520]; //worst-case length checked by hand incl. the longest wifiDisconnectReason string, +100 for the temporary diag fields
         //getFlashChipRealSize() = physical chip's own SPI ID (ground truth); getFlashChipSize() =
         //what the eesz board-menu choice assumes - a mismatch means the compiled layout is wrong.
         //rtc/rtcOsf: the only way to verify the optional DS3231's detection/trustworthiness
@@ -1725,13 +1734,14 @@ void setup() {
         //ASSOC_EXPIRE disconnects observable over HTTP without a live serial capture.
         const char* lastDisconnectReasonForDiag = wifiDisconnectCount > 0 ? lastWifiDisconnectReason.c_str() : "none";
         long lastDisconnectSecAgo = wifiDisconnectCount > 0 ? (long)((millis() - lastWifiDisconnectAt) / 1000) : -1;
-        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s rtc=%s rtcOsf=%u resetReason=%s uptimeSec=%lu wifiDisconnects=%lu lastWifiDisconnectReason=%s lastWifiDisconnectSecAgo=%ld")),
+        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s rtc=%s rtcOsf=%u resetReason=%s uptimeSec=%lu wifiDisconnects=%lu lastWifiDisconnectReason=%s lastWifiDisconnectSecAgo=%ld minFreeHeap=%u minFreeHeapAtSec=%u minMaxBlock=%u freeHeapAtLastWifiDisconnect=%u")),
           ESP.getFreeHeap(), ESP.getHeapFragmentation(), ESP.getMaxFreeBlockSize(),
           ESP.getFlashChipRealSize(), ESP.getFlashChipSize(), ESP.getFlashChipId(), ESP.getChipId(),
           ESP.getSdkVersion(), ESP.getCoreVersion().c_str(),
           rtcPresent ? "present" : "absent", rtcOscillatorStopFlag ? 1 : 0,
           crashResetReasonText(ESP.getResetInfoPtr()->reason), millis() / 1000,
-          wifiDisconnectCount, lastDisconnectReasonForDiag, lastDisconnectSecAgo);
+          wifiDisconnectCount, lastDisconnectReasonForDiag, lastDisconnectSecAgo,
+          diagMinFreeHeap, diagMinFreeHeapAtSec, diagMinMaxBlock, diagFreeHeapAtLastWifiDisconnect); //temporary diag, see diagMinFreeHeap
         request->send(200, "text/plain", buf);
         return;
       }
@@ -3382,6 +3392,17 @@ void performOneSecondDisplayTick() {
 }
 
 void loop() {
+  //TEMPORARY DIAGNOSTIC - see diagMinFreeHeap's comment.
+  uint32_t diagFreeHeapNow = ESP.getFreeHeap();
+  if (diagFreeHeapNow < diagMinFreeHeap) {
+    diagMinFreeHeap = diagFreeHeapNow;
+    diagMinFreeHeapAtSec = millis() / 1000;
+  }
+  uint32_t diagMaxBlockNow = ESP.getMaxFreeBlockSize();
+  if (diagMaxBlockNow < diagMinMaxBlock) {
+    diagMinMaxBlock = diagMaxBlockNow;
+  }
+
 #if USE_MULTICAST == true
   MDNS.update();
 #endif

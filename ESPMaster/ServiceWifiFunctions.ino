@@ -91,6 +91,7 @@ void initWiFi() {
     wifiDisconnectCount++;
     lastWifiDisconnectReason = wifiDisconnectReasonToString(event.reason);
     lastWifiDisconnectAt = millis();
+    diagFreeHeapAtLastWifiDisconnect = ESP.getFreeHeap(); //TEMPORARY DIAGNOSTIC, see diagMinFreeHeap
   });
 
   //No WiFi.setSleepMode(WIFI_NONE_SLEEP) here deliberately - forcing the radio always-on was a
