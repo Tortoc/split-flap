@@ -18,39 +18,13 @@ void loadValuesFromFileSystem() {
     saveBootSnapshot();
   }
 
-  String scheduledMessagesJson = readFile(LittleFS, scheduledMessagesPath, "");
-  if (scheduledMessagesJson != "") {
-    SerialPrintln(F("Loading Scheduled Messages"));
-    readScheduledMessagesFromJson(scheduledMessagesJson);
-  }
+  SerialPrintln(F("Loading Scheduled Messages"));
+  loadScheduledMessagesFromFile();
 
   //Loaded directly, not via replaceRotationItemsFromJson() - that also resets playback position
   //and re-persists the file, which shouldn't happen on a plain boot load.
-  String rotationItemsJson = readFile(LittleFS, rotationItemsPath, "[]");
-  if (rotationItemsJson != "" && rotationItemsJson != "[]") {
-    SerialPrintln(F("Loading Rotation Items"));
-    JsonDocument rotationJsonDocument;
-    DeserializationError rotationDeserialisationError = deserializeJson(rotationJsonDocument, rotationItemsJson);
-    if (!rotationDeserialisationError && rotationJsonDocument.is<JsonArray>()) {
-      for (JsonVariant value : rotationJsonDocument.as<JsonArray>()) {
-        if (rotationItemCount >= ROTATION_ITEMS_MAX) {
-          break;
-        }
-        RotationItem &item = rotationItems[rotationItemCount];
-        item.Type = stringToRotationItemType(String((const char*)(value["type"] | DEVICE_MODE_TEXT)));
-        item.Value = String((const char*)(value["value"] | ""));
-        item.Format = String((const char*)(value["format"] | ""));
-        item.TargetDateTimeUnix = value["targetDateTimeUnix"] | 0;
-        item.Prefix = String((const char*)(value["prefix"] | ""));
-        item.Suffix = String((const char*)(value["suffix"] | ""));
-        item.DurationSeconds = value["durationSeconds"] | 5;
-        item.Alignment = stringToRotationAlignmentOverride(String((const char*)(value["alignment"] | "")));
-        item.AnimationMode = stringToRotationAnimationModeOverride(String((const char*)(value["animationMode"] | "")));
-        item.AnimationStaggerMs = value["animationStaggerMs"] | -1;
-        rotationItemCount++;
-      }
-    }
-  }
+  SerialPrintln(F("Loading Rotation Items"));
+  loadRotationItemsFromFile();
 
   //Extension device list - own file, not part of the boot snapshot. Loaded regardless of
   //deviceRole, so a role switch doesn't require re-entering the list.
@@ -244,9 +218,10 @@ bool saveBootSnapshot() {
   doc["accessControlTimezonePublic"] = accessControlTimezonePublic;
   doc["accessControlSystemPublic"] = accessControlSystemPublic;
 
-  String snapshotJson;
-  serializeJson(doc, snapshotJson);
-  if (!writeFile(LittleFS, bootSnapshotPath, snapshotJson.c_str())) {
+  //Not atomic: a missing/broken snapshot just makes the next boot take the slow individual-files
+  //path, which rewrites it - but an incomplete one (overflowed) would load with silently missing
+  //settings, so that is refused (CODE_REVIEW_V7.md #1).
+  if (!writeJsonDocumentFile(bootSnapshotPath, doc, false)) {
     SerialPrintln(F("Boot snapshot: write FAILED - will retry on the next freshness check"));
     return false;
   }
@@ -297,6 +272,119 @@ String computeSettingsSignature() {
   sig += accessControlTimezonePublic ? '1' : '0';
   sig += accessControlSystemPublic ? '1' : '0';
   return sig;
+}
+
+//Shared tail of the two JSON writers below: drop the temp file on failure, otherwise move it into
+//place (atomic) - and log how long the whole write took, since this device's flash chip is
+//unusually slow at file opens (see bootSnapshotPath's comment) and rename() timing on it was
+//never measured.
+bool finishJsonFileWrite(const String &writtenPath, const char *path, bool ok, unsigned long startedAt) {
+  if (ok && writtenPath != path && !LittleFS.rename(writtenPath.c_str(), path)) {
+    SerialPrintln(F("- rename() into place failed"));
+    ok = false;
+  }
+  if (!ok && writtenPath != path) {
+    LittleFS.remove(writtenPath);
+  }
+  SerialPrintln(F("JSON file ") + String(path) + (ok ? F(" written") : F(" NOT written - previous file kept")) +
+    F(" (") + String(millis() - startedAt) + F("ms)"));
+  return ok;
+}
+
+//Persists one JSON document. Refuses when ArduinoJson ran out of memory while building it -
+//overflowed() means fields were silently dropped, and the result would still serialize as valid
+//but incomplete JSON (CODE_REVIEW_V7.md #1). Streams straight into the file instead of building
+//the whole JSON text as a String first. atomic: write "<path>.tmp" and rename() it over `path`
+//only once every byte made it, so a failure or power loss mid-write never truncates the existing
+//file - costs one extra rename(). Non-atomic is meant for derived caches that rebuild themselves.
+bool writeJsonDocumentFile(const char *path, JsonDocument &doc, bool atomic) {
+  unsigned long startedAt = millis();
+  if (doc.overflowed()) {
+    SerialPrintln(F("JSON for ") + String(path) + F(" incomplete (out of memory) - not writing it"));
+    return false;
+  }
+  String writtenPath = atomic ? String(path) + F(".tmp") : String(path);
+  File file = LittleFS.open(writtenPath, "w");
+  if (!file) {
+    SerialPrintln(F("- Failed to open ") + writtenPath + F(" for writing"));
+    return false;
+  }
+  BufferedFileWriter out(file);
+  size_t expected = measureJson(doc);
+  serializeJson(doc, out);
+  out.flush();
+  file.close();
+  return finishJsonFileWrite(writtenPath, path, out.accepted() == expected, startedAt);
+}
+
+//Persists a JSON array one element at a time - only one small element document is ever alive,
+//instead of a document holding the whole list plus the whole serialized String (the two together
+//could exceed the free heap with 20 long scheduled messages, CODE_REVIEW_V7.md #1). Always atomic,
+//for the same reason as writeJsonDocumentFile(): these files hold user data that nothing else can
+//rebuild. fillElement() fills one element; an element that overflowed aborts the whole write.
+bool writeJsonArrayFile(const char *path, int count, void (*fillElement)(int index, JsonDocument &element)) {
+  unsigned long startedAt = millis();
+  String writtenPath = String(path) + F(".tmp");
+  File file = LittleFS.open(writtenPath, "w");
+  if (!file) {
+    SerialPrintln(F("- Failed to open ") + writtenPath + F(" for writing"));
+    return false;
+  }
+  BufferedFileWriter out(file);
+  size_t expected = 2; //'[' and ']'
+  bool ok = true;
+  out.write('[');
+  for (int i = 0; i < count; i++) {
+    JsonDocument element;
+    fillElement(i, element);
+    if (element.overflowed()) {
+      SerialPrintln(F("JSON element ") + String(i) + F(" for ") + String(path) + F(" incomplete (out of memory)"));
+      ok = false;
+      break;
+    }
+    if (i > 0) {
+      out.write(',');
+      expected++;
+    }
+    expected += measureJson(element);
+    serializeJson(element, out);
+  }
+  out.write(']');
+  out.flush();
+  file.close();
+  return finishJsonFileWrite(writtenPath, path, ok && out.accepted() == expected, startedAt);
+}
+
+//Reads a JSON array file one element at a time, handing each to handleElement() - the read-side
+//counterpart of writeJsonArrayFile(): neither the whole file as a String nor a document holding
+//every element is ever in memory. Elements already handed over before an error stay handed over.
+//NO_MEMORY is kept apart from INVALID so a caller never throws away a perfectly good file just
+//because this one read attempt ran out of heap.
+int readJsonArrayFile(const char *path, void (*handleElement)(JsonVariant element)) {
+  File file = LittleFS.open(path, "r");
+  if (!file) {
+    return JSON_ARRAY_FILE_MISSING;
+  }
+  //Stream::find()/readBytes() otherwise wait out their 1s default timeout at end of file.
+  file.setTimeout(0);
+  if (!file.find("[")) {
+    return JSON_ARRAY_FILE_INVALID;
+  }
+  if (file.peek() == ']') {
+    return JSON_ARRAY_FILE_OK; //empty array
+  }
+  do {
+    JsonDocument element;
+    DeserializationError error = deserializeJson(element, file);
+    if (error == DeserializationError::NoMemory) {
+      return JSON_ARRAY_FILE_NO_MEMORY;
+    }
+    if (error) {
+      return JSON_ARRAY_FILE_INVALID;
+    }
+    handleElement(element.as<JsonVariant>());
+  } while (file.findUntil(",", "]"));
+  return JSON_ARRAY_FILE_OK;
 }
 
 //Read File from LittleFS

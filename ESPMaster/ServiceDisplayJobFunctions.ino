@@ -174,7 +174,11 @@ bool pollDisplayJobWaitAllExtensionsReady() {
     if (http.begin(client, "http://" + ext.Host + "/api/units")) {
       if (http.GET() == 200) {
         JsonDocument doc;
-        if (!deserializeJson(doc, http.getString())) {
+        //A response without a units array, or one still sending letters (displayBusy), is not
+        //"done" - previously both counted as idle (CODE_REVIEW_V7.md #4). A unit that's offline
+        //over there can't ever become ready, so it doesn't hold the wait up; a write that failed
+        //on it is reported through displayWriteFailed instead.
+        if (!deserializeJson(doc, http.getString()) && doc["units"].is<JsonArray>() && !(doc["displayBusy"] | false)) {
           bool allIdle = true;
           for (JsonVariant unit : doc["units"].as<JsonArray>()) {
             if ((int)(unit["status"] | 1) == 1) {
@@ -183,6 +187,11 @@ bool pollDisplayJobWaitAllExtensionsReady() {
             }
           }
           done = allIdle;
+          if (done && (doc["displayWriteFailed"] | false)) {
+            //Same consequence as a failed local write - finishDisplayJob() forces a full re-send
+            //of this text on the next showText() call instead of caching it as shown.
+            displayJob.hadWriteFailure = true;
+          }
           SerialPrintln(F("Extension \"") + ext.Host + F("\" - ") + (allIdle ? F("ready") : F("still moving")));
         }
       }

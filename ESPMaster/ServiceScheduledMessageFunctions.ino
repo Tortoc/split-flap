@@ -1,11 +1,15 @@
-//Replace/add a scheduled message and persist the result afterwards - returns false (and skips the
-//write) if rejected as already due/in the past.
-bool addAndPersistScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool showIndefinitely) {
-  bool added = addScheduledMessage(scheduledText, scheduledDateTimeUnix, showIndefinitely);
-  if (added) {
-    writeScheduledMessagesToFile();
+//Replace/add a scheduled message and persist the result afterwards. SCHEDULE_SAVE_FAILED: the
+//list couldn't be saved (e.g. out of memory) - it's reloaded from the untouched file, so memory
+//and flash agree again and the message counts as not scheduled (CODE_REVIEW_V7.md #1).
+int addAndPersistScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool showIndefinitely) {
+  if (!addScheduledMessage(scheduledText, scheduledDateTimeUnix, showIndefinitely)) {
+    return SCHEDULE_REJECTED;
   }
-  return added;
+  if (!writeScheduledMessagesToFile()) {
+    reloadScheduledMessagesFromFile();
+    return SCHEDULE_SAVE_FAILED;
+  }
+  return SCHEDULE_ADDED;
 }
 
 //Replace/add a scheduled message. Returns whether it was actually added, so the caller can report
@@ -63,8 +67,9 @@ void restoreScheduledMessage(String scheduledText, long scheduledDateTimeUnix, b
   scheduledMessages.add({scheduledText, scheduledDateTimeUnix, showIndefinitely});
 }
 
-//Remove and delete a existing scheduled message if found
-bool removeScheduledMessage(long scheduledDateTimeUnix) {
+//Remove and delete a existing scheduled message if found. Same SCHEDULE_SAVE_FAILED handling as
+//addAndPersistScheduledMessage() - the message is then still scheduled.
+int removeScheduledMessage(long scheduledDateTimeUnix) {
   //Find the existing scheduled message and delete it
   for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
     ScheduledMessage scheduledMessage = scheduledMessages.get(scheduledMessageIndex);
@@ -72,14 +77,16 @@ bool removeScheduledMessage(long scheduledDateTimeUnix) {
     if (scheduledDateTimeUnix == scheduledMessage.ScheduledDateTimeUnix) {
       SerialPrintln(F("Deleting Scheduled Message due to be shown: ") + scheduledMessage.Message);
       scheduledMessages.remove(scheduledMessageIndex);
-      
-      writeScheduledMessagesToFile();
 
-      return true;
+      if (!writeScheduledMessagesToFile()) {
+        reloadScheduledMessagesFromFile();
+        return SCHEDULE_SAVE_FAILED;
+      }
+      return SCHEDULE_REMOVED;
     }
   }
-  
-  return false;
+
+  return SCHEDULE_NOT_FOUND;
 }
 
 //Show and remove any scheduled message whose time has passed
@@ -131,67 +138,55 @@ void checkScheduledMessages() {
   }
 }
 
-//Parse JSON scheduled messages into the current known scheduled messages - called once at boot
-//(loadValuesFromFileSystem()), restoring whatever was persisted from the last session.
-void readScheduledMessagesFromJson(String scheduledMessagesJson) {
-  if (scheduledMessagesJson != "") {
-    JsonDocument jsonDocument;
-    DeserializationError deserialisationError = deserializeJson(jsonDocument, scheduledMessagesJson);
+//One persisted element -> scheduledMessages, unconditionally (restoreScheduledMessage(), not
+//addScheduledMessage() - a restored entry must never be rejected just because it's already due).
+void restoreScheduledMessageFromJson(JsonVariant value) {
+  //Only reachable if the persisted file itself somehow holds more than the cap -
+  //addScheduledMessage() already enforces it for every new submission.
+  if (scheduledMessages.size() >= SCHEDULED_MESSAGES_MAX) {
+    return;
+  }
+  restoreScheduledMessage(String((const char*)(value["message"] | "")), value["scheduledDateTimeUnix"] | 0L, value["showIndefinitely"] | false);
+}
 
-    if (!deserialisationError) {
-      if (jsonDocument.is<JsonArray>()) {
-        for (JsonVariant value : jsonDocument.as<JsonArray>()) {
-          //Only reachable if the persisted file itself somehow holds more than the cap -
-          //addScheduledMessage() already enforces it for every new submission.
-          if (scheduledMessages.size() >= SCHEDULED_MESSAGES_MAX) {
-            SerialPrintln(F("Scheduled messages file has more than SCHEDULED_MESSAGES_MAX entries - dropping the rest"));
-            break;
-          }
-
-          long scheduledDateTimeUnix = value["scheduledDateTimeUnix"];
-          String message = value["message"];
-          bool showIndefinitely = value["showIndefinitely"];
-
-          //restoreScheduledMessage(), not addScheduledMessage() - a restored entry must never be
-          //rejected just because it's already due; see that function's own comment.
-          restoreScheduledMessage(message, scheduledDateTimeUnix, showIndefinitely);
-        }
-      }
-      else {
-        SerialPrintln(F("Invalid JSON Array found, scrapping and starting again"));
-        writeEmptyScheduledMessagesToFile();
-      }
-    }
-    else {
-      SerialPrintln(F("Invalid JSON found, scrapping and starting again"));
-      writeEmptyScheduledMessagesToFile();
-    }
+//Loads the persisted scheduled messages - at boot, and to roll memory back to the file after a
+//failed save. Read element by element (readJsonArrayFile()), so neither the whole file as a String
+//nor a document holding every message is in memory at once. A missing file is simply an empty
+//list; a corrupt one is replaced by an empty list. Out of memory while reading leaves the file
+//alone - it's still valid, only this attempt to read it failed.
+void loadScheduledMessagesFromFile() {
+  int result = readJsonArrayFile(scheduledMessagesPath, restoreScheduledMessageFromJson);
+  if (result == JSON_ARRAY_FILE_INVALID) {
+    SerialPrintln(F("Invalid scheduled messages file, scrapping and starting again"));
+    scheduledMessages.clear();
+    writeEmptyScheduledMessagesToFile();
+  } else if (result == JSON_ARRAY_FILE_NO_MEMORY) {
+    SerialPrintln(F("Out of memory while loading scheduled messages - keeping the file, list may be incomplete until the next reboot"));
   }
 }
 
-//Convert the scheduled messages to a JSON document and save to file
-void writeScheduledMessagesToFile() {
-  if (scheduledMessages.size()) {
-    JsonDocument scheduledMessagesDocument;
-    for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
-      ScheduledMessage scheduledMessage = scheduledMessages.get(scheduledMessageIndex);
+void reloadScheduledMessagesFromFile() {
+  scheduledMessages.clear();
+  loadScheduledMessagesFromFile();
+}
 
-      scheduledMessagesDocument[scheduledMessageIndex]["scheduledDateTimeUnix"] = scheduledMessage.ScheduledDateTimeUnix;
-      scheduledMessagesDocument[scheduledMessageIndex]["message"] = scheduledMessage.Message;
-      scheduledMessagesDocument[scheduledMessageIndex]["showIndefinitely"] = scheduledMessage.ShowIndefinitely;
-    }
+void fillScheduledMessageJson(int index, JsonDocument &element) {
+  ScheduledMessage scheduledMessage = scheduledMessages.get(index);
+  element["scheduledDateTimeUnix"] = scheduledMessage.ScheduledDateTimeUnix;
+  element["message"] = scheduledMessage.Message;
+  element["showIndefinitely"] = scheduledMessage.ShowIndefinitely;
+}
 
-    String scheduledMessagesJson;
-    serializeJson(scheduledMessagesDocument, scheduledMessagesJson);
-    writeFile(LittleFS, scheduledMessagesPath, scheduledMessagesJson.c_str());
-  }
-  else {
+//Save the scheduled messages to file - see writeJsonArrayFile() for why element by element and
+//via a temp file. Returns false if they couldn't be saved; the previous file is then unchanged.
+bool writeScheduledMessagesToFile() {
+  if (scheduledMessages.size() == 0) {
     SerialPrintln(F("No Scheduled Messages Left - Writing Empty to File"));
-    writeEmptyScheduledMessagesToFile();
   }
+  return writeJsonArrayFile(scheduledMessagesPath, scheduledMessages.size(), fillScheduledMessageJson);
 }
 
 //Write an empty array to the schedule messages file, used in case something goes terribly wrong
 void writeEmptyScheduledMessagesToFile() {
-  writeFile(LittleFS, scheduledMessagesPath, "[]");
+  writeJsonArrayFile(scheduledMessagesPath, 0, fillScheduledMessageJson);
 }

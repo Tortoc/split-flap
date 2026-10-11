@@ -1530,6 +1530,10 @@
 
 				<div id="systemTabQuietHours" class="hidden">
 					<div style="text-align: left;">
+						<p id="quietHoursExtensionNote" class="note hidden">
+							Dieses Gerät ist ein Erweiterungsgerät: Im Mehrgeräte-Verbund bestimmt das Primärgerät
+							die Ruhezeiten für alle Geräte. Die Einstellung hier wirkt nicht.
+						</p>
 						<p>
 							<label for="quietHoursEnabled" class="ls-checkbox-label">
 								<input type="checkbox" id="quietHoursEnabled" />
@@ -1548,7 +1552,7 @@
 							<input type="time" id="quietHoursEnd" style="width: 120px;" />
 						</p>
 						<p>
-							<button class="btn-primary" onclick="saveQuietHours()">Speichern</button>
+							<button id="quietHoursSaveButton" class="btn-primary" onclick="saveQuietHours()">Speichern</button>
 						</p>
 						<p id="quietHoursStatus"></p>
 					</div>
@@ -3624,6 +3628,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						document.getElementById("deviceRoleSelect").value = responseObject.deviceRole || "standalone";
 						document.getElementById("extensionLinkModeSelect").value = responseObject.extensionLinkMode || "extend";
 						showDeviceRoleSections(responseObject.deviceRole);
+						setQuietHoursApplicable(responseObject.deviceRole !== "extension");
 						//mqttEnabled (and every other mqtt* field) is only present in this response at
 						//all when MQTT_ENABLE was compiled in (ESPMaster.ino) - hide the tab entirely
 						//rather than leave a dead, non-functional panel (found 2026-09-12, RAM-savings
@@ -4322,6 +4327,15 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			xhrRequest.send(body);
 		}
 
+		//An extension's units only ever show what its primary pushes - the primary's quiet hours
+		//apply to the whole group, so this device's own setting has no effect (CODE_REVIEW_V7.md #5).
+		function setQuietHoursApplicable(applicable) {
+			document.getElementById("quietHoursExtensionNote").classList.toggle("hidden", applicable);
+			["quietHoursEnabled", "quietHoursStart", "quietHoursEnd", "quietHoursSaveButton"].forEach(function (id) {
+				document.getElementById(id).disabled = !applicable;
+			});
+		}
+
 		//Link mode and extension host list only mean anything on a primary.
 		function showDeviceRoleSections(role) {
 			document.getElementById("extensionLinkModeSection").classList.toggle("hidden", role !== "primary");
@@ -4348,6 +4362,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				if (this.readyState == 4) {
 					if (this.status == 200) {
 						statusEl.innerHTML = '<span class="status-online-ready">Rolle gespeichert.</span>';
+						setQuietHoursApplicable(role !== "extension");
 					} else if (this.status == 401) {
 						clearAdminPassword();
 						statusEl.innerHTML = '<span class="status-offline">Falsches Administrator-Passwort.</span>';

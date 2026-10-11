@@ -32,7 +32,7 @@ void checkExtensionHealth() {
   if (deviceRole != DEVICE_ROLE_PRIMARY || extensionDeviceCount == 0) {
     return;
   }
-  if (otaChunkBuffer != nullptr || otaPendingPhase != OTA_PHASE_NONE) {
+  if (webFirmwareUpdateInProgress()) {
     return; //don't contend with an active OTA update - a blocking HTTPClient call here hung the
     //device solid (no crash-log entry, needed a power cycle) when it collided with an incoming
     //firmware-chunk upload
@@ -115,7 +115,7 @@ void pushExtensionSegments() {
   if (deviceRole != DEVICE_ROLE_PRIMARY) {
     return;
   }
-  if (otaChunkBuffer != nullptr || otaPendingPhase != OTA_PHASE_NONE) {
+  if (webFirmwareUpdateInProgress()) {
     //Same OTA-collision guard as checkExtensionHealth() above - any reachable extension is left
     //undelivered this tick. Flag it the same as a failed push below so finishDisplayJob() forces a
     //retry once OTA is done, instead of silently caching this render as complete
@@ -150,31 +150,91 @@ void pushExtensionSegments() {
   }
 }
 
-//Extension-side receiver: writes a pushed segment directly to this device's own units, bypassing
+//Extension-side receiver state: a pushed segment is written to this device's own units, bypassing
 //showText()/DisplayJob entirely - an extension has no line-wrap/alignment logic of its own, the
 //primary already did that against the combined width. Uses this device's OWN flapSpeed.
 //
 //globalOffset/combinedWidth let this device compute each unit's delay with the same
 //computeUnitAnimationDelayMs() formula the primary uses, so e.g. "outside-in" reads as one
-//continuous animation across devices. Applied as a simple blocking wait-until-due loop - a
-//deliberate, bounded exception to the non-blocking rule (small unit count, bounded by
-//ANIMATION_STAGGER_MS_MAX times a small number, opt-in only).
-void applyExtensionDisplaySegment(String segment, String animationMode, unsigned long staggerMs, int globalOffset, int combinedWidth) {
-  int speed = convertSpeed(flapSpeed);
-  int segmentLength = (int)segment.length();
-  unsigned long startTime = millis();
+//continuous animation across devices. Run as a non-blocking per-tick state machine, exactly like
+//the primary's own writeDueAnimatedUnits(): every pass writes whichever units are due, in any
+//order - a plain "wait for unit 0, then unit 1, ..." loop wrote right-to-left/outside-in/inside-out
+//in the wrong order and blocked loop() for the whole animation (CODE_REVIEW_V7.md #2/#3).
+struct ExtensionDisplayState {
+  bool active = false;
+  String segment;
+  String animationMode;
+  unsigned long staggerMs = 0;
+  int globalOffset = 0;
+  int combinedWidth = 0;
+  int speed = 0;
+  unsigned long startedAt = 0;
+  uint64_t writtenMask = 0;
+  //Same semantics as the primary's displayJob.hadWriteFailure: one attempt per unit, a failed
+  //write is reported (GET /api/units' displayWriteFailed) so the primary re-sends the whole line
+  //instead of counting it as shown (CODE_REVIEW_V7.md #4).
+  bool writeFailed = false;
+};
+ExtensionDisplayState extensionDisplay;
+
+//Ticked from loop() on every pass. Picks up a newly queued push (POST /api/extension-display),
+//replacing whatever was still animating - only the latest content matters.
+void tickExtensionDisplay() {
+  if (pendingExtensionDisplayQueued) {
+    pendingExtensionDisplayQueued = false;
+    extensionDisplay.active = true;
+    extensionDisplay.segment = pendingExtensionDisplaySegment;
+    extensionDisplay.animationMode = pendingExtensionDisplayAnimationMode;
+    extensionDisplay.staggerMs = pendingExtensionDisplayStaggerMs;
+    extensionDisplay.globalOffset = pendingExtensionDisplayGlobalOffset;
+    extensionDisplay.combinedWidth = pendingExtensionDisplayCombinedWidth;
+    extensionDisplay.speed = convertSpeed(flapSpeed);
+    extensionDisplay.startedAt = millis();
+    extensionDisplay.writtenMask = 0;
+    extensionDisplay.writeFailed = false;
+  }
+  if (!extensionDisplay.active) {
+    return;
+  }
+
+  int segmentLength = (int)extensionDisplay.segment.length();
+  bool allWritten = true;
   for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
-    char letterChar = unitIndex < segmentLength ? segment[unitIndex] : ' ';
+    uint64_t unitBit = 1ULL << unitIndex;
+    if (extensionDisplay.writtenMask & unitBit) {
+      continue;
+    }
+    unsigned long delayMs = computeUnitAnimationDelayMs(extensionDisplay.globalOffset + unitIndex, extensionDisplay.combinedWidth,
+      extensionDisplay.animationMode, extensionDisplay.staggerMs);
+    if (millis() - extensionDisplay.startedAt < delayMs) {
+      allWritten = false;
+      continue; //not due yet this pass
+    }
+    char letterChar = unitIndex < segmentLength ? extensionDisplay.segment[unitIndex] : ' ';
     int letterPosition = translateLettertoInt(letterChar);
     if (letterPosition == -1) {
       letterPosition = translateLettertoInt('?');
     }
-    unsigned long delayMs = computeUnitAnimationDelayMs(globalOffset + unitIndex, combinedWidth, animationMode, staggerMs);
-    while (millis() - startTime < delayMs) {
-      yield(); //bounded - see this function's own top comment
+    if (!writeToUnit(unitIndex, letterPosition, extensionDisplay.speed)) {
+      extensionDisplay.writeFailed = true;
     }
-    writeToUnit(unitIndex, letterPosition, speed);
+    extensionDisplay.writtenMask |= unitBit;
   }
+  if (allWritten) {
+    extensionDisplay.active = false;
+    extensionDisplay.segment = String(); //release the buffer until the next push
+  }
+}
+
+//Still has letters to send (or a push waiting to start) - GET /api/units reports this as
+//displayBusy, so the primary's readiness poll doesn't take idle motors for "done" between a push
+//and the moment the last staggered unit actually got its letter.
+bool extensionDisplayBusy() {
+  return pendingExtensionDisplayQueued || extensionDisplay.active;
+}
+
+bool extensionDisplayWriteFailed() {
+  return extensionDisplay.writeFailed;
 }
 
 //Persists a new extension host list - full replace, same convention as

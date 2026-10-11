@@ -147,7 +147,7 @@ void checkRotation() {
 //the complete list. Extra entries beyond ROTATION_ITEMS_MAX are dropped as a server-side backstop.
 //Returns whether the submitted JSON was actually valid and applied, so the caller can report
 //failure instead of always answering 200 OK.
-bool replaceRotationItemsFromJson(String rotationItemsJson) {
+bool replaceRotationItemsFromJson(const String &rotationItemsJson) {
   //Every individual item field below already uses ArduinoJson's `| default` fallback operator,
   //which never fails, so the only real validation concern is at the TOP level (malformed JSON, or
   //valid JSON that isn't an array) - only touch rotationItemCount/rotationItems/the persisted
@@ -156,6 +156,7 @@ bool replaceRotationItemsFromJson(String rotationItemsJson) {
     return true; //nothing submitted - leave the existing list exactly as it is, don't wipe it either
   }
 
+  { //scope: the parsed document is released before the items get saved below
   JsonDocument jsonDocument;
   DeserializationError deserialisationError = deserializeJson(jsonDocument, rotationItemsJson);
 
@@ -201,58 +202,78 @@ bool replaceRotationItemsFromJson(String rotationItemsJson) {
       SerialPrintln(F("Rotation items JSON has more than ROTATION_ITEMS_MAX entries - dropping the rest"));
       break;
     }
-
-    RotationItem &item = rotationItems[rotationItemCount];
-    item.Type = stringToRotationItemType(String((const char*)(value["type"] | DEVICE_MODE_TEXT)));
-    item.Value = String((const char*)(value["value"] | ""));
-    item.Format = String((const char*)(value["format"] | ""));
-    item.TargetDateTimeUnix = value["targetDateTimeUnix"] | 0;
-    item.Prefix = String((const char*)(value["prefix"] | ""));
-    item.Suffix = String((const char*)(value["suffix"] | ""));
-    item.DurationSeconds = value["durationSeconds"] | 5;
-    item.Alignment = stringToRotationAlignmentOverride(String((const char*)(value["alignment"] | "")));
-    item.AnimationMode = stringToRotationAnimationModeOverride(String((const char*)(value["animationMode"] | "")));
-    item.AnimationStaggerMs = value["animationStaggerMs"] | -1;
-    rotationItemCount++;
+    appendRotationItemFromJson(value);
   }
+  } //jsonDocument is gone here - only the items themselves stay in memory while saving below
 
-  //Release any String heap buffers left over in now-unused slots - plain "=" assignment reuses
-  //existing capacity rather than freeing it; a fresh temporary's move-assignment does free it.
-  for (int i = rotationItemCount; i < ROTATION_ITEMS_MAX; i++) {
-    rotationItems[i] = RotationItem();
-  }
+  releaseUnusedRotationItems();
 
   //Always start a freshly-submitted sequence from the beginning.
   rotationCurrentIndex = 0;
   rotationItemAcceptedSeconds = 0;
   rotationItemElapsedRealSeconds = 0;
 
-  writeRotationItemsToFile();
+  //Couldn't be saved (e.g. out of memory): roll back to the untouched file instead of running a
+  //list that would be gone after the next reboot (CODE_REVIEW_V7.md #1).
+  if (!writeRotationItemsToFile()) {
+    rotationItemCount = 0;
+    loadRotationItemsFromFile();
+    releaseUnusedRotationItems();
+    return false;
+  }
   return true;
 }
 
-//Convert the rotation items to a JSON document and save to file
-void writeRotationItemsToFile() {
-  JsonDocument rotationItemsDocument;
-  JsonArray rotationItemsArray = rotationItemsDocument.to<JsonArray>();
-
-  for (int rotationItemIndex = 0; rotationItemIndex < rotationItemCount; rotationItemIndex++) {
-    RotationItem &item = rotationItems[rotationItemIndex];
-
-    JsonObject itemObject = rotationItemsArray.add<JsonObject>();
-    itemObject["type"] = rotationItemTypeToString(item.Type);
-    itemObject["value"] = item.Value;
-    itemObject["format"] = item.Format;
-    itemObject["targetDateTimeUnix"] = item.TargetDateTimeUnix;
-    itemObject["prefix"] = item.Prefix;
-    itemObject["suffix"] = item.Suffix;
-    itemObject["durationSeconds"] = item.DurationSeconds;
-    itemObject["alignment"] = rotationAlignmentOverrideToString(item.Alignment);
-    itemObject["animationMode"] = rotationAnimationModeOverrideToString(item.AnimationMode);
-    itemObject["animationStaggerMs"] = item.AnimationStaggerMs;
+//Appends one JSON element as the next rotation item - shared by a submitted list and the boot load.
+void appendRotationItemFromJson(JsonVariant value) {
+  if (rotationItemCount >= ROTATION_ITEMS_MAX) {
+    return;
   }
+  RotationItem &item = rotationItems[rotationItemCount];
+  item.Type = stringToRotationItemType(String((const char*)(value["type"] | DEVICE_MODE_TEXT)));
+  item.Value = String((const char*)(value["value"] | ""));
+  item.Format = String((const char*)(value["format"] | ""));
+  item.TargetDateTimeUnix = value["targetDateTimeUnix"] | 0;
+  item.Prefix = String((const char*)(value["prefix"] | ""));
+  item.Suffix = String((const char*)(value["suffix"] | ""));
+  item.DurationSeconds = value["durationSeconds"] | 5;
+  item.Alignment = stringToRotationAlignmentOverride(String((const char*)(value["alignment"] | "")));
+  item.AnimationMode = stringToRotationAnimationModeOverride(String((const char*)(value["animationMode"] | "")));
+  item.AnimationStaggerMs = value["animationStaggerMs"] | -1;
+  rotationItemCount++;
+}
 
-  String rotationItemsJson;
-  serializeJson(rotationItemsDocument, rotationItemsJson);
-  writeFile(LittleFS, rotationItemsPath, rotationItemsJson.c_str());
+//Release any String heap buffers left over in now-unused slots - plain "=" assignment reuses
+//existing capacity rather than freeing it; a fresh temporary's move-assignment does free it.
+void releaseUnusedRotationItems() {
+  for (int i = rotationItemCount; i < ROTATION_ITEMS_MAX; i++) {
+    rotationItems[i] = RotationItem();
+  }
+}
+
+//Appends the persisted rotation items (element by element, see readJsonArrayFile()) - at boot,
+//and to roll back after a failed save. Callers reset rotationItemCount first. A missing or broken
+//file just leaves the list empty, as before.
+void loadRotationItemsFromFile() {
+  readJsonArrayFile(rotationItemsPath, appendRotationItemFromJson);
+}
+
+void fillRotationItemJson(int index, JsonDocument &element) {
+  RotationItem &item = rotationItems[index];
+  element["type"] = rotationItemTypeToString(item.Type);
+  element["value"] = item.Value;
+  element["format"] = item.Format;
+  element["targetDateTimeUnix"] = item.TargetDateTimeUnix;
+  element["prefix"] = item.Prefix;
+  element["suffix"] = item.Suffix;
+  element["durationSeconds"] = item.DurationSeconds;
+  element["alignment"] = rotationAlignmentOverrideToString(item.Alignment);
+  element["animationMode"] = rotationAnimationModeOverrideToString(item.AnimationMode);
+  element["animationStaggerMs"] = item.AnimationStaggerMs;
+}
+
+//Save the rotation items to file - see writeJsonArrayFile() for why element by element and via a
+//temp file. Returns false if they couldn't be saved; the previous file is then unchanged.
+bool writeRotationItemsToFile() {
+  return writeJsonArrayFile(rotationItemsPath, rotationItemCount, fillRotationItemJson);
 }

@@ -392,14 +392,13 @@ int pendingBootloaderProbeUnitIndex = -1;
 #define EXTENSION_HEALTH_CHECK_INTERVAL_MS (15UL * 1000UL)
 #define EXTENSION_HTTP_TIMEOUT_MS 1500
 
-//POST /api/extension-display is applied from loop(), not its AsyncWebServer callback
-//(CODE_REVIEW_V6.md #1): applyExtensionDisplaySegment() blocks with its own yield()-based wait loop,
-//which the ESP8266 core panics on outside loop()'s context. The handler acknowledges right away
-//instead of holding the request until the animation is done - a staggered animation can easily
-//outlast the primary's EXTENSION_HTTP_TIMEOUT_MS, and a timed-out push counts as failed
-//(CODE_REVIEW_V6.md #4), so the primary would re-render the same text over and over. The
-//primary's readiness poll (GET /api/units) still sees the real motor state: loop() holds that
-//request back while a segment is queued (see pendingExtensionDisplayQueued's use there).
+//POST /api/extension-display only validates and queues the segment; tickExtensionDisplay()
+//(ServiceExtensionFunctions.ino) writes it from loop() - I2C writes don't belong in an
+//AsyncWebServer callback (CODE_REVIEW_V6.md #1). The handler acknowledges right away instead of
+//holding the request until the animation is done - a staggered animation can easily outlast the
+//primary's EXTENSION_HTTP_TIMEOUT_MS, and a timed-out push counts as failed (CODE_REVIEW_V6.md #4),
+//so the primary would re-render the same text over and over. The primary's readiness poll
+//(GET /api/units) still sees the real state via displayBusy/displayWriteFailed.
 //A newer push replaces a still-queued older one - only the latest content matters.
 volatile bool pendingExtensionDisplayQueued = false;
 String pendingExtensionDisplaySegment;
@@ -600,6 +599,18 @@ int rotationItemCount = 0;
 //generous for the device's actual use case (a handful of upcoming scheduled messages), while
 //keeping the worst-case JSON blob a small, bounded size.
 #define SCHEDULED_MESSAGES_MAX 20
+//Results of addAndPersistScheduledMessage()/removeScheduledMessage()
+//(ServiceScheduledMessageFunctions.ino) - declared here since this file is compiled first.
+#define SCHEDULE_ADDED 0
+#define SCHEDULE_REJECTED 1 //already due/in the past, or SCHEDULED_MESSAGES_MAX reached
+#define SCHEDULE_SAVE_FAILED 2
+#define SCHEDULE_REMOVED 0
+#define SCHEDULE_NOT_FOUND 1
+//Results of readJsonArrayFile() (ServiceFileSystemFunctions.ino) - see its own comment.
+#define JSON_ARRAY_FILE_OK 0
+#define JSON_ARRAY_FILE_MISSING 1
+#define JSON_ARRAY_FILE_INVALID 2
+#define JSON_ARRAY_FILE_NO_MEMORY 3
 int rotationCurrentIndex = 0;
 //Counts seconds the CURRENT rotation item was actually accepted by showText() (loop()'s
 //mode-dispatch block increments this after a successful call), not wall-clock seconds since its
@@ -706,6 +717,17 @@ volatile unsigned long otaLastActivityAt = 0; //watchdog for an abandoned upload
 #define OTA_ABANDONED_TIMEOUT_MS 90000
 PendingRequestSlot pendingFirmwareUploadSlot; //reused in turn by all three /api/firmware-* steps
 #endif
+
+//Whether a browser firmware upload is in progress - the multi-device health check/push must not
+//contend with it (see their own comments). Always false when web OTA is compiled out
+//(CODE_REVIEW_V7.md #6: those callers used to reference the OTA globals unconditionally).
+bool webFirmwareUpdateInProgress() {
+#if WEB_FIRMWARE_UPDATE_ENABLE == true
+  return otaChunkBuffer != nullptr || otaPendingPhase != OTA_PHASE_NONE;
+#else
+  return false;
+#endif
+}
 #if UNIT_BOOTLOADER_ENABLE == true
 //Set when the upload couldn't be written/moved into place (open() or write() failure, or the
 //final rename() failing) - see the temp-file+atomic-rename pattern on that handler. Safe to keep
@@ -956,111 +978,111 @@ void setup() {
         // Generate debug HTML page with live log
         IPAddress ip = WiFi.localIP();
         String html = "<!DOCTYPE html><html><head>";
-        html += "<title>Split Flap - Debug Mode</title>";
-        html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-        html += "<style>";
-        html += "body { font-family: Arial, sans-serif; margin: 20px; background: #1e1e1e; color: #d4d4d4; }";
-        html += "h1 { color: #4ec9b0; }";
-        html += ".log-container { background: #252526; border: 1px solid #3e3e42; padding: 15px; font-family: 'Courier New', monospace; font-size: 0.9em; white-space: pre-wrap; }";
-        html += ".log-entry { margin: 2px 0; }";
-        html += ".timestamp { color: #808080; margin-right: 10px; }";
-        html += ".debug { color: #4ec9b0; }";
-        html += ".error { color: #f48771; }";
-        html += ".warning { color: #dcdcaa; }";
-        html += "button { background: #0e639c; color: white; border: none; padding: 10px 20px; font-size: 16px; cursor: pointer; border-radius: 4px; margin-bottom: 20px; }";
-        html += "button:hover { background: #1177bb; }";
-        html += ".status { color: #4ec9b0; font-weight: bold; margin: 10px 0; }";
-        html += "</style>";
-        html += "</head><body>";
-        html += "<h1>Split Flap - Debug Mode</h1>";
-        html += "<button onclick='continueToNormal()'>Continue to Normal Mode</button>";
-        html += "<button onclick='loadDiag()'>Refresh Diagnostics</button>";
+        html += F("<title>Split Flap - Debug Mode</title>");
+        html += F("<meta name='viewport' content='width=device-width, initial-scale=1'>");
+        html += F("<style>");
+        html += F("body { font-family: Arial, sans-serif; margin: 20px; background: #1e1e1e; color: #d4d4d4; }");
+        html += F("h1 { color: #4ec9b0; }");
+        html += F(".log-container { background: #252526; border: 1px solid #3e3e42; padding: 15px; font-family: 'Courier New', monospace; font-size: 0.9em; white-space: pre-wrap; }");
+        html += F(".log-entry { margin: 2px 0; }");
+        html += F(".timestamp { color: #808080; margin-right: 10px; }");
+        html += F(".debug { color: #4ec9b0; }");
+        html += F(".error { color: #f48771; }");
+        html += F(".warning { color: #dcdcaa; }");
+        html += F("button { background: #0e639c; color: white; border: none; padding: 10px 20px; font-size: 16px; cursor: pointer; border-radius: 4px; margin-bottom: 20px; }");
+        html += F("button:hover { background: #1177bb; }");
+        html += F(".status { color: #4ec9b0; font-weight: bold; margin: 10px 0; }");
+        html += F("</style>");
+        html += F("</head><body>");
+        html += F("<h1>Split Flap - Debug Mode</h1>");
+        html += F("<button onclick='continueToNormal()'>Continue to Normal Mode</button>");
+        html += F("<button onclick='loadDiag()'>Refresh Diagnostics</button>");
         html += "<div class='status'>Current Status: " + debugStatus + "</div>";
-        html += "<p>Debug mode is enabled. This page shows current crash log and heap diagnostics. When you continue to normal mode, you'll also see error status panel and page load debug log features.</p>";
-        html += "<div class='log-container' id='logContainer'>";
-        html += "<div style='color: #888;'>Loading diagnostics...</div>";
-        html += "</div>";
-        html += "<script>";
+        html += F("<p>Debug mode is enabled. This page shows current crash log and heap diagnostics. When you continue to normal mode, you'll also see error status panel and page load debug log features.</p>");
+        html += F("<div class='log-container' id='logContainer'>");
+        html += F("<div style='color: #888;'>Loading diagnostics...</div>");
+        html += F("</div>");
+        html += F("<script>");
         //One-shot fetch of the diagnostic sources that exist (/api/crash-log, /api/diag?type=heap)
         //plus a manual refresh button - deliberately not an interval poll, to avoid steady-state cost.
-        html += "function loadDiag() {";
-        html += "  var container = document.getElementById('logContainer');";
-        html += "  container.innerHTML = '<div style=\"color: #888;\">Loading diagnostics...</div>';";
-        html += "  var xhrCrash = new XMLHttpRequest();";
-        html += "  xhrCrash.onreadystatechange = function() {";
-        html += "    if (this.readyState != 4) return;";
-        html += "    var crashHtml;";
-        html += "    if (this.status == 200) {";
-        html += "      var lines = this.responseText.split('\\n').filter(function(l) { return l.trim() != ''; });";
-        html += "      if (lines.length == 0) {";
-        html += "        crashHtml = '<div class=\"debug\">Crash log: empty</div>';";
-        html += "      } else {";
-        html += "        crashHtml = '<div class=\"error\">Crash log (' + lines.length + ' entr' + (lines.length == 1 ? 'y' : 'ies') + '):</div>';";
-        html += "        for (var i = 0; i < lines.length; i++) {";
-        html += "          crashHtml += '<div class=\"log-entry\">' + escapeHtml(lines[i]) + '</div>';";
-        html += "        }";
-        html += "      }";
-        html += "    } else {";
-        html += "      crashHtml = '<div class=\"error\">Error loading crash log: Status ' + this.status + '</div>';";
-        html += "    }";
-        html += "    document.getElementById('crashLogSection').innerHTML = crashHtml;";
-        html += "  };";
-        html += "  xhrCrash.onerror = function() {";
-        html += "    document.getElementById('crashLogSection').innerHTML = '<div class=\"error\">Network error loading crash log</div>';";
-        html += "  };";
-        html += "  xhrCrash.open('GET', '/api/crash-log', true);";
-        html += "  var xhrHeap = new XMLHttpRequest();";
-        html += "  xhrHeap.onreadystatechange = function() {";
-        html += "    if (this.readyState != 4) return;";
-        html += "    var heapHtml = this.status == 200";
-        html += "      ? '<div class=\"debug\">Heap: ' + escapeHtml(this.responseText) + '</div>'";
-        html += "      : '<div class=\"error\">Error loading heap diagnostics: Status ' + this.status + '</div>';";
-        html += "    document.getElementById('heapSection').innerHTML = heapHtml;";
-        html += "  };";
-        html += "  xhrHeap.onerror = function() {";
-        html += "    document.getElementById('heapSection').innerHTML = '<div class=\"error\">Network error loading heap diagnostics</div>';";
-        html += "  };";
-        html += "  xhrHeap.open('GET', '/api/diag?type=heap', true);";
-        html += "  container.innerHTML = '<div id=\"heapSection\">Loading...</div><div id=\"crashLogSection\"></div>';";
-        html += "  xhrCrash.send();";
-        html += "  xhrHeap.send();";
-        html += "}";
-        html += "function escapeHtml(text) {";
-        html += "  var map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#039;' };";
-        html += "  return text.replace(/[&<>\"']/g, function(m) { return map[m]; });";
-        html += "}";
-        html += "function continueToNormal() {";
+        html += F("function loadDiag() {");
+        html += F("  var container = document.getElementById('logContainer');");
+        html += F("  container.innerHTML = '<div style=\"color: #888;\">Loading diagnostics...</div>';");
+        html += F("  var xhrCrash = new XMLHttpRequest();");
+        html += F("  xhrCrash.onreadystatechange = function() {");
+        html += F("    if (this.readyState != 4) return;");
+        html += F("    var crashHtml;");
+        html += F("    if (this.status == 200) {");
+        html += F("      var lines = this.responseText.split('\\n').filter(function(l) { return l.trim() != ''; });");
+        html += F("      if (lines.length == 0) {");
+        html += F("        crashHtml = '<div class=\"debug\">Crash log: empty</div>';");
+        html += F("      } else {");
+        html += F("        crashHtml = '<div class=\"error\">Crash log (' + lines.length + ' entr' + (lines.length == 1 ? 'y' : 'ies') + '):</div>';");
+        html += F("        for (var i = 0; i < lines.length; i++) {");
+        html += F("          crashHtml += '<div class=\"log-entry\">' + escapeHtml(lines[i]) + '</div>';");
+        html += F("        }");
+        html += F("      }");
+        html += F("    } else {");
+        html += F("      crashHtml = '<div class=\"error\">Error loading crash log: Status ' + this.status + '</div>';");
+        html += F("    }");
+        html += F("    document.getElementById('crashLogSection').innerHTML = crashHtml;");
+        html += F("  };");
+        html += F("  xhrCrash.onerror = function() {");
+        html += F("    document.getElementById('crashLogSection').innerHTML = '<div class=\"error\">Network error loading crash log</div>';");
+        html += F("  };");
+        html += F("  xhrCrash.open('GET', '/api/crash-log', true);");
+        html += F("  var xhrHeap = new XMLHttpRequest();");
+        html += F("  xhrHeap.onreadystatechange = function() {");
+        html += F("    if (this.readyState != 4) return;");
+        html += F("    var heapHtml = this.status == 200");
+        html += F("      ? '<div class=\"debug\">Heap: ' + escapeHtml(this.responseText) + '</div>'");
+        html += F("      : '<div class=\"error\">Error loading heap diagnostics: Status ' + this.status + '</div>';");
+        html += F("    document.getElementById('heapSection').innerHTML = heapHtml;");
+        html += F("  };");
+        html += F("  xhrHeap.onerror = function() {");
+        html += F("    document.getElementById('heapSection').innerHTML = '<div class=\"error\">Network error loading heap diagnostics</div>';");
+        html += F("  };");
+        html += F("  xhrHeap.open('GET', '/api/diag?type=heap', true);");
+        html += F("  container.innerHTML = '<div id=\"heapSection\">Loading...</div><div id=\"crashLogSection\"></div>';");
+        html += F("  xhrCrash.send();");
+        html += F("  xhrHeap.send();");
+        html += F("}");
+        html += F("function escapeHtml(text) {");
+        html += F("  var map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#039;' };");
+        html += F("  return text.replace(/[&<>\"']/g, function(m) { return map[m]; });");
+        html += F("}");
+        html += F("function continueToNormal() {");
         //Same sessionStorage keys as index.html's getAdminPassword() - same origin, so a password
         //already entered on the main page is reused here without asking again, and vice versa.
-        html += "  var password = '';";
-        html += "  if (sessionStorage.getItem('splitflapAdminPasswordKnown') === '1') {";
-        html += "    password = sessionStorage.getItem('splitflapAdminPassword') || '';";
-        html += "  } else {";
-        html += "    var entered = prompt('Administrator-Passwort (leer lassen, falls keines gesetzt ist):', '');";
-        html += "    if (entered !== null) {";
-        html += "      password = entered;";
-        html += "      sessionStorage.setItem('splitflapAdminPassword', entered);";
-        html += "      sessionStorage.setItem('splitflapAdminPasswordKnown', '1');";
-        html += "    }";
-        html += "  }";
-        html += "  var xhr = new XMLHttpRequest();";
-        html += "  xhr.onreadystatechange = function() {";
-        html += "    if (this.readyState == 4 && this.status == 200) {";
-        html += "      window.location.href = '/';";
-        html += "    } else if (this.readyState == 4 && this.status == 401) {";
-        html += "      sessionStorage.removeItem('splitflapAdminPassword');";
-        html += "      sessionStorage.removeItem('splitflapAdminPasswordKnown');";
-        html += "      alert('Falsches Administrator-Passwort.');";
-        html += "    }";
-        html += "  };";
-        html += "  xhr.open('POST', '/api/debug-mode', true);";
-        html += "  xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');";
-        html += "  xhr.setRequestHeader('X-OTA-Password', password);";
-        html += "  xhr.send('enabled=false');";
-        html += "}";
-        html += "loadDiag();";
-        html += "</script>";
-        html += "</body></html>";
+        html += F("  var password = '';");
+        html += F("  if (sessionStorage.getItem('splitflapAdminPasswordKnown') === '1') {");
+        html += F("    password = sessionStorage.getItem('splitflapAdminPassword') || '';");
+        html += F("  } else {");
+        html += F("    var entered = prompt('Administrator-Passwort (leer lassen, falls keines gesetzt ist):', '');");
+        html += F("    if (entered !== null) {");
+        html += F("      password = entered;");
+        html += F("      sessionStorage.setItem('splitflapAdminPassword', entered);");
+        html += F("      sessionStorage.setItem('splitflapAdminPasswordKnown', '1');");
+        html += F("    }");
+        html += F("  }");
+        html += F("  var xhr = new XMLHttpRequest();");
+        html += F("  xhr.onreadystatechange = function() {");
+        html += F("    if (this.readyState == 4 && this.status == 200) {");
+        html += F("      window.location.href = '/';");
+        html += F("    } else if (this.readyState == 4 && this.status == 401) {");
+        html += F("      sessionStorage.removeItem('splitflapAdminPassword');");
+        html += F("      sessionStorage.removeItem('splitflapAdminPasswordKnown');");
+        html += F("      alert('Falsches Administrator-Passwort.');");
+        html += F("    }");
+        html += F("  };");
+        html += F("  xhr.open('POST', '/api/debug-mode', true);");
+        html += F("  xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');");
+        html += F("  xhr.setRequestHeader('X-OTA-Password', password);");
+        html += F("  xhr.send('enabled=false');");
+        html += F("}");
+        html += F("loadDiag();");
+        html += F("</script>");
+        html += F("</body></html>");
         
         request->send(200, "text/html", html);
         return;
@@ -1547,16 +1569,22 @@ void setup() {
             SerialPrintln(F("Scheduled Message rejected: needs more lines than fit, would never actually show"));
             scheduledMessageRejected = true;
             scheduledMessageRejectionReason = "the scheduled message needs more lines than fit and was NOT scheduled - it would never actually show.";
-          } else if (!addAndPersistScheduledMessage(newInputTextValue, newMessageScheduleDateTimeUnixValue, newMessageScheduleShowIndefinitely)) {
-            //A `false` here means either the timestamp is already due/in the past (can happen
-            //legitimately if a very soon deadline passes between the browser prefilling the field
-            //and this request being processed) or SCHEDULED_MESSAGES_MAX was already reached - the
-            //message below covers both without needing a richer return type to distinguish them.
-            SerialPrintln(F("Scheduled Message rejected: date/time is not in the future, or too many are already scheduled"));
-            scheduledMessageRejected = true;
-            scheduledMessageRejectionReason = "the scheduled date/time has already passed, or the maximum number of scheduled messages is already reached - it was NOT scheduled.";
           } else {
-            SerialPrintln(F("New Scheduled Message added"));
+            int scheduleResult = addAndPersistScheduledMessage(newInputTextValue, newMessageScheduleDateTimeUnixValue, newMessageScheduleShowIndefinitely);
+            if (scheduleResult == SCHEDULE_REJECTED) {
+              //Either the timestamp is already due/in the past (can happen legitimately if a very
+              //soon deadline passes between the browser prefilling the field and this request
+              //being processed) or SCHEDULED_MESSAGES_MAX was already reached.
+              SerialPrintln(F("Scheduled Message rejected: date/time is not in the future, or too many are already scheduled"));
+              scheduledMessageRejected = true;
+              scheduledMessageRejectionReason = "the scheduled date/time has already passed, or the maximum number of scheduled messages is already reached - it was NOT scheduled.";
+            } else if (scheduleResult == SCHEDULE_SAVE_FAILED) {
+              SerialPrintln(F("Scheduled Message rejected: could not be saved"));
+              scheduledMessageRejected = true;
+              scheduledMessageRejectionReason = "the scheduled messages could not be saved (not enough memory - try fewer or shorter messages) - it was NOT scheduled.";
+            } else {
+              SerialPrintln(F("New Scheduled Message added"));
+            }
           }
         }
         else {
@@ -1613,9 +1641,9 @@ void setup() {
           : "the text needs more lines than fit to display and was NOT applied - the previous mode/text is unchanged.";
 
         if (rotationItemsUpdateRejected && anyTextRejected) {
-          request->send(400, "text/plain", "OK, but the submitted rotation items were rejected (invalid JSON, or a text item needs more lines than fit) AND " + textRejectionReason);
+          request->send(400, "text/plain", "OK, but the submitted rotation items were rejected (invalid JSON, a text item needs more lines than fit, or not enough memory to save them) AND " + textRejectionReason);
         } else if (rotationItemsUpdateRejected) {
-          request->send(400, "text/plain", "OK, but the submitted rotation items were rejected (invalid JSON, or a text item needs more lines than fit to ever display) and were NOT applied - the existing rotation list is unchanged.");
+          request->send(400, "text/plain", "OK, but the submitted rotation items were rejected (invalid JSON, a text item needs more lines than fit to ever display, or not enough memory to save them) and were NOT applied - the existing rotation list is unchanged.");
         } else if (anyTextRejected) {
           request->send(400, "text/plain", "OK, but " + textRejectionReason);
         } else {
@@ -2442,13 +2470,13 @@ void setup() {
       IPAddress ip = WiFi.localIP();
       
       String html = "<div style='text-align:center'>";
-      html += "<font face='arial'><h1>Split Flap - Rebooting</h1>";
-      html += "<p>Reboot is pending now...<p>";
-      html += "<p>This can take anywhere between 10-20 seconds<p>";
-      html += "<p>You can go to the main home page after this time by clicking the button below or going to '/'.</p>";
+      html += F("<font face='arial'><h1>Split Flap - Rebooting</h1>");
+      html += F("<p>Reboot is pending now...<p>");
+      html += F("<p>This can take anywhere between 10-20 seconds<p>");
+      html += F("<p>You can go to the main home page after this time by clicking the button below or going to '/'.</p>");
       html += "<p><a href=\"http://" + ip.toString() + "\">Home</a></p>";
-      html += "</font>";
-      html += "</div>";
+      html += F("</font>");
+      html += F("</div>");
       
       request->send(200, "text/html", html);
       checkBootSnapshotFreshness(); //see its own comment further down - keep the snapshot fresh before every intentional reboot
@@ -2488,10 +2516,13 @@ void setup() {
 
         if (isNumber(idValue)) {
           long parsedIdValue = atol(idValue.c_str());
-          bool removed = removeScheduledMessage(parsedIdValue);
-          
-          if (removed) {
+          int removeResult = removeScheduledMessage(parsedIdValue);
+
+          if (removeResult == SCHEDULE_REMOVED) {
             request->send(202, "text/plain", "Removed");
+          }
+          else if (removeResult == SCHEDULE_SAVE_FAILED) {
+            request->send(500, "text/plain", "Could not save the change (not enough memory) - the message is still scheduled.");
           }
           else {
             request->send(400, "text/plain", "Unable to find message with ID specified. Id: " + idValue);
@@ -2612,9 +2643,21 @@ void setup() {
       String staggerMsRaw = request->hasParam("staggerMs", true) ? request->getParam("staggerMs", true)->value() : "0";
       String globalOffsetRaw = request->hasParam("globalOffset", true) ? request->getParam("globalOffset", true)->value() : "0";
       String combinedWidthRaw = request->hasParam("combinedWidth", true) ? request->getParam("combinedWidth", true)->value() : String(unitsAmount);
-      unsigned long staggerMs = isNumber(staggerMsRaw) ? (unsigned long)staggerMsRaw.toInt() : 0;
-      int globalOffset = isNumber(globalOffsetRaw) ? globalOffsetRaw.toInt() : 0;
-      int combinedWidth = isNumber(combinedWidthRaw) ? combinedWidthRaw.toInt() : unitsAmount;
+      //Same bounds the primary itself is held to (CODE_REVIEW_V7.md #3) - an unchecked staggerMs or
+      //width could otherwise schedule a unit's start hours into the future.
+      if (!isValidAnimationMode(animationMode) || !isNumber(staggerMsRaw) || !isNumber(globalOffsetRaw) || !isNumber(combinedWidthRaw)) {
+        request->send(400, "text/plain", "Invalid animationMode/staggerMs/globalOffset/combinedWidth");
+        return;
+      }
+      long staggerMs = staggerMsRaw.toInt();
+      long globalOffset = globalOffsetRaw.toInt();
+      long combinedWidth = combinedWidthRaw.toInt();
+      if (staggerMs < 0 || staggerMs > ANIMATION_STAGGER_MS_MAX ||
+          combinedWidth < 1 || combinedWidth > UNITS_AMOUNT_MAX * (EXTENSION_DEVICES_MAX + 1) ||
+          globalOffset < 0 || globalOffset >= combinedWidth) {
+        request->send(400, "text/plain", "staggerMs/globalOffset/combinedWidth out of range");
+        return;
+      }
 
       //Queued for loop() and acknowledged right away - see pendingExtensionDisplayQueued's comment.
       pendingExtensionDisplaySegment = segment;
@@ -2810,13 +2853,13 @@ void setup() {
         IPAddress ip = WiFi.localIP();
 
         String html = "<div style='text-align:center'>";
-        html += "<font face='arial'><h1>Split Flap - Resetting WiFi</h1>";
-        html += "<p>WiFi Settings have been erased. Device will now reboot...<p>";
-        html += "<p>You will now be able to connect to this device in AP mode to configure the WiFi once more<p>";
-        html += "<p>You can go to the main home page after this time by clicking the button below or going to '/'.</p>";
+        html += F("<font face='arial'><h1>Split Flap - Resetting WiFi</h1>");
+        html += F("<p>WiFi Settings have been erased. Device will now reboot...<p>");
+        html += F("<p>You will now be able to connect to this device in AP mode to configure the WiFi once more<p>");
+        html += F("<p>You can go to the main home page after this time by clicking the button below or going to '/'.</p>");
         html += "<p><a href=\"http://" + ip.toString() + "\">Home</a></p>";
-        html += "</font>";
-        html += "</div>";
+        html += F("</font>");
+        html += F("</div>");
 
         request->send(200, "text/html", html);
         isPendingWifiReset = true;
@@ -3332,16 +3375,9 @@ void loop() {
     }
   }
 
-  //Extension-side display push, queued here by POST /api/extension-display (see
-  //pendingExtensionDisplayQueued's comment) - applyExtensionDisplaySegment() still blocks for its
-  //own bounded animation-stagger duration, but from loop()'s own context yield() inside that wait
-  //is safe. Its String parameters are copies, so a newer push arriving during one of those
-  //yield()s only queues the next segment instead of changing this one mid-write.
-  if (pendingExtensionDisplayQueued) {
-    pendingExtensionDisplayQueued = false;
-    applyExtensionDisplaySegment(pendingExtensionDisplaySegment, pendingExtensionDisplayAnimationMode,
-      pendingExtensionDisplayStaggerMs, pendingExtensionDisplayGlobalOffset, pendingExtensionDisplayCombinedWidth);
-  }
+  //Extension-side display push (see pendingExtensionDisplayQueued's comment) - writes whichever
+  //units are due this pass, never blocks.
+  tickExtensionDisplay();
 
   //A direct timezone.setLocation() call (blocking DNS+UDP) could trip the software watchdog under
   //real network stress, so this uses a genuinely non-blocking implementation
@@ -3411,15 +3447,17 @@ void loop() {
     bootTimezoneLookupPending = true;
   }
 
-  //Held back while a display push is still queued (applied further up in loop(), next pass) -
-  //answering now would report the units as idle before they ever got their new letters, and the
-  //primary would treat this extension as already settled.
-  if (pendingUnitsInfoSlot.request != nullptr && !pendingExtensionDisplayQueued) {
+  if (pendingUnitsInfoSlot.request != nullptr) {
     std::shared_ptr<std::atomic<bool>> disconnected;
     AsyncWebServerRequest* deferredRequest = pendingUnitsInfoSlot.take(disconnected);
 
     JsonDocument doc;
     doc["unitsAmount"] = unitsAmount;
+    if (deviceRole == DEVICE_ROLE_EXTENSION) {
+      //Read by the primary's readiness poll - see extensionDisplayBusy()'s comment.
+      doc["displayBusy"] = extensionDisplayBusy();
+      doc["displayWriteFailed"] = extensionDisplayWriteFailed();
+    }
     for (int unitIndex = 0; unitIndex < unitsAmount; unitIndex++) {
       int status = -2;
       int offset = -1;

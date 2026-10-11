@@ -1,3 +1,39 @@
+#include <FS.h>
+
+//Small write buffer in front of a LittleFS File, so serializeJson() streaming straight into a file
+//doesn't turn into one File::write() call per JSON punctuation character (CODE_REVIEW_V7.md #1).
+//LittleFS caches/programs whole pages either way - this only saves call overhead, not flash wear.
+//Counts the bytes the File actually accepted, so a short write (flash full) is detectable.
+class BufferedFileWriter : public Print {
+public:
+  explicit BufferedFileWriter(File &file) : _file(file) {}
+  size_t write(uint8_t c) override {
+    _buffer[_length++] = c;
+    if (_length == sizeof(_buffer)) {
+      flush();
+    }
+    return 1;
+  }
+  size_t write(const uint8_t *data, size_t size) override {
+    for (size_t i = 0; i < size; i++) {
+      write(data[i]);
+    }
+    return size;
+  }
+  void flush() override {
+    if (_length > 0) {
+      _accepted += _file.write(_buffer, _length);
+      _length = 0;
+    }
+  }
+  size_t accepted() const { return _accepted; }
+private:
+  File &_file;
+  uint8_t _buffer[64];
+  size_t _length = 0;
+  size_t _accepted = 0;
+};
+
 //A message to show at a scheduled future time
 struct ScheduledMessage {
   String Message;
