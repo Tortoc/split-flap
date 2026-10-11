@@ -38,6 +38,23 @@ route, which also exposed every other config file directly). Both are fixed now:
 is never sent back by the device** - only whether one is currently set (`otaPasswordSet` on
 `GET /api/settings`), and the static route now serves only the actual web UI file, nothing else.
 
+**Two ways to authenticate** (since ESPMaster 4.10.0): the `X-OTA-Password` header on every
+request (scripts, automations - unchanged), or a **login session** as used by the web UI:
+`POST /api/login` with the password once, the device answers with a random session token in an
+`HttpOnly; SameSite=Strict` cookie (`sfsession`). Every endpoint below that accepts the password
+also accepts that cookie - but only together with the header `X-Requested-With: splitflap`
+(CSRF protection: another site can't add that header without a CORS preflight the device never
+approves). A session stays valid for 90 days after its last use (renewed at most once a day), up
+to 8 sessions per device, persisted across reboots. Changing the password ends all sessions.
+`POST /api/extension-display` (primary -> extension) and `POST /api/ota-password` (needs the
+current password itself) don't take sessions.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/session` | Public. `{"loginRequired": bool, "loggedIn": bool}` - `loginRequired` is true while a password is set and at least one category is still protected. |
+| `POST /api/login` | Form param `password`, header `X-Requested-With: splitflap`. 200 + `Set-Cookie` on success, 401 wrong password, 429 for 2 s after a wrong attempt. |
+| `POST /api/logout` | Ends the request's own session and clears the cookie. |
+
 **Global on/off switch**: an empty password (the default before you set one) means every endpoint
 below is unauthenticated, no exceptions - including firmware/flash. Set one via
 [`POST /api/ota-password`](#post-apiota-password) to turn protection on.

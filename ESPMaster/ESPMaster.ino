@@ -127,6 +127,17 @@ const char* wifiDirectPassword = "";
 //flash ones) is then unauthenticated, no exceptions, regardless of the toggles below.
 String otaPassword = "";
 const char* otaPasswordPath = "/otapassword.txt";
+//Web UI login sessions - see ServiceAccessControlFunctions.ino's own comment.
+#define LOGIN_SESSIONS_MAX 8
+#define LOGIN_SESSION_DAYS 90
+#define LOGIN_SESSION_SECONDS (LOGIN_SESSION_DAYS * 86400UL)
+#define LOGIN_SESSION_COOKIE "sfsession"
+//Cookie lifetime in the browser - deliberately longer than any session; whether a session is
+//still valid is decided on the device, so a renewed session never needs a fresh Set-Cookie.
+#define LOGIN_SESSION_COOKIE_MAX_AGE 34560000UL //400 days, the most browsers accept
+const char* loginSessionsPath = "/loginsessions.json";
+
+unsigned long lastFailedLoginAt = 0; //throttles POST /api/login after a wrong password
 const char* mdnsHostnamePath = "/mdnsname.txt";
 
 //Unit 63's bootloader address is UNIT_BOOTLOADER_BASE_ADDRESS(0x29) + 63 = 0x68 - EXACTLY
@@ -1811,8 +1822,7 @@ void setup() {
         //the ESPMaster OTA endpoints above - never gated behind a shared flag another request's
         //callback could set or clear.
         if (String(otaPassword) != "") {
-          String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-          if (!constantTimeEquals(providedPassword, String(otaPassword))) {
+          if (!requestIsAuthenticated(request)) { //password header or web UI login session
             request->send(401, "text/plain", "Invalid password");
             return;
           }
@@ -1838,8 +1848,7 @@ void setup() {
           //just return WITHOUT touching any shared state - the outer handler re-checks the
           //password itself and never trusts a shared flag for it.
           if (String(otaPassword) != "") {
-            String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-            if (!constantTimeEquals(providedPassword, String(otaPassword))) {
+            if (!requestIsAuthenticated(request)) { //password header or web UI login session
               SerialPrintln(F("Unit firmware upload rejected: invalid password"));
               return;
             }
@@ -1960,8 +1969,7 @@ void setup() {
 
       if (action == "push") {
         if (String(otaPassword) != "") {
-          String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-          if (!constantTimeEquals(providedPassword, String(otaPassword))) {
+          if (!requestIsAuthenticated(request)) { //password header or web UI login session
             SerialPrintln(F("Unit firmware push rejected: invalid password"));
             request->send(401, "text/plain", "Invalid password");
             return;
@@ -1991,8 +1999,7 @@ void setup() {
         //reboots the unit's running app exactly like "push" does. A read-only-sounding "probe"
         //name doesn't make it a safe, unauthenticated diagnostic.
         if (String(otaPassword) != "") {
-          String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-          if (!constantTimeEquals(providedPassword, String(otaPassword))) {
+          if (!requestIsAuthenticated(request)) { //password header or web UI login session
             SerialPrintln(F("Unit bootloader probe rejected: invalid password"));
             request->send(401, "text/plain", "Invalid password");
             return;
@@ -2121,8 +2128,7 @@ void setup() {
         //Password is stateless and independently re-checked here - never gated behind a shared
         //flag another request's callback could set or clear.
         if (String(otaPassword) != "") {
-          String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-          if (!constantTimeEquals(providedPassword, String(otaPassword))) {
+          if (!requestIsAuthenticated(request)) { //password header or web UI login session
             request->send(401, "text/plain", "Invalid password");
             return;
           }
@@ -2166,8 +2172,7 @@ void setup() {
           //just by arriving first. On failure, just return - no shared flag to set, the outer
           //handler re-checks the password itself.
           if (String(otaPassword) != "") {
-            String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-            if (!constantTimeEquals(providedPassword, String(otaPassword))) {
+            if (!requestIsAuthenticated(request)) { //password header or web UI login session
               SerialPrintln(F("Web file upload rejected: invalid password"));
               return;
             }
@@ -2280,8 +2285,7 @@ void setup() {
       if (String(otaPassword) == "") {
         return true; //no password configured, nothing to check
       }
-      String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-      return constantTimeEquals(providedPassword, String(otaPassword));
+      return requestIsAuthenticated(request); //password header or web UI login session
     };
 
     // Step 1: tell the ESP how big the firmware is and let it erase/prepare the flash region.
@@ -2963,6 +2967,49 @@ void setup() {
     //that is never itself toggleable-public (see accessControlTextPublic's comment in
     //ESPMaster.ino), otherwise a category opened via "settings public" could reopen every other
     //category including firmware/flash through this same endpoint.
+    //Web UI login (see ServiceAccessControlFunctions.ino's session comment). GET /api/session is
+    //public: it only says whether the page should show its login dialog.
+    webServer.on("/api/session", HTTP_GET, [](AsyncWebServerRequest * request) {
+      String json = String(F("{\"loginRequired\":")) + (isLoginRequired() ? F("true") : F("false")) +
+        F(",\"loggedIn\":") + (String(otaPassword) != "" && requestIsAuthenticated(request) ? F("true") : F("false")) + F("}");
+      request->send(200, "application/json", json);
+    });
+
+    webServer.on("/api/login", HTTP_POST, [](AsyncWebServerRequest * request) {
+      //Same CSRF reasoning as requestIsAuthenticated(): only the web UI itself logs in this way.
+      if (!request->hasHeader("X-Requested-With") || request->getHeader("X-Requested-With")->value() != "splitflap") {
+        request->send(403, "text/plain", "Missing X-Requested-With header");
+        return;
+      }
+      if (String(otaPassword) == "") {
+        request->send(200, "text/plain", "No password set");
+        return;
+      }
+      //Slows down guessing - one wrong attempt blocks further attempts for 2 seconds.
+      if (lastFailedLoginAt != 0 && millis() - lastFailedLoginAt < 2000) {
+        request->send(429, "text/plain", "Too many attempts, wait a moment");
+        return;
+      }
+      String password = request->hasParam("password", true) ? request->getParam("password", true)->value() : "";
+      if (!constantTimeEquals(password, String(otaPassword))) {
+        lastFailedLoginAt = millis();
+        SerialPrintln(F("Login rejected: wrong password"));
+        request->send(401, "text/plain", "Wrong password");
+        return;
+      }
+      String token = createLoginSession();
+      AsyncWebServerResponse *response = request->beginResponse(200, "text/plain", "OK");
+      response->addHeader("Set-Cookie", String(F(LOGIN_SESSION_COOKIE "=")) + token + F("; Max-Age=") + String(LOGIN_SESSION_COOKIE_MAX_AGE) + F("; Path=/; HttpOnly; SameSite=Strict"));
+      request->send(response);
+    });
+
+    webServer.on("/api/logout", HTTP_POST, [](AsyncWebServerRequest * request) {
+      endLoginSession(request);
+      AsyncWebServerResponse *response = request->beginResponse(200, "text/plain", "OK");
+      response->addHeader("Set-Cookie", F(LOGIN_SESSION_COOKIE "=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict"));
+      request->send(response);
+    });
+
     webServer.on("/api/ota-password", HTTP_POST, [](AsyncWebServerRequest * request) {
       if (!request->hasParam("currentPassword", true)) {
         request->send(400, "text/plain", "'currentPassword' is required");
@@ -2983,6 +3030,7 @@ void setup() {
       if (request->hasParam("newPassword", true)) {
         otaPassword = request->getParam("newPassword", true)->value();
         writeFile(LittleFS, otaPasswordPath, otaPassword.c_str());
+        endAllLoginSessions(); //no session may outlive the password it was created with
         SerialPrintln(otaPassword == "" ? F("OTA password cleared - protection now globally OFF") : F("OTA password changed"));
       }
 
@@ -3387,6 +3435,9 @@ void loop() {
   //Extension-side display push (see pendingExtensionDisplayQueued's comment) - writes whichever
   //units are due this pass, never blocks.
   tickExtensionDisplay();
+
+  //Login sessions created/renewed/ended by web requests - persisted here, not in the callbacks.
+  saveLoginSessionsIfDirty();
 
   //A direct timezone.setLocation() call (blocking DNS+UDP) could trip the software watchdog under
   //real network stress, so this uses a genuinely non-blocking implementation

@@ -1223,6 +1223,7 @@
 						<a href="#" onclick="openAdminModal('units'); return false;">Units</a>
 						<a href="#" onclick="openAdminModal('firmware'); return false;">Firmware Update</a>
 						<button type="button" class="kebab-form" onclick="triggerReboot()">Reboot</button>
+						<button type="button" id="menuLogout" class="kebab-form hidden" onclick="logout()">Abmelden</button>
 					</div>
 				</div>
 			</div>
@@ -2017,6 +2018,30 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 		</div>
 	</div>
 
+	<!-- Login: no close button/backdrop click - shown when this device needs a password and there's
+	     no valid session (see checkLoginState()). -->
+	<div id="modalLogin" class="modal-backdrop hidden">
+		<div class="modal-panel" style="max-width: 360px;">
+			<div class="modal-header">
+				<h2 class="modal-title">Anmelden</h2>
+			</div>
+			<div class="modal-body">
+				<form onsubmit="submitLogin(); return false;" style="text-align: left;">
+					<p class="note">Dieses Gerät ist mit einem Passwort geschützt. Die Anmeldung bleibt in diesem Browser 90 Tage nach der letzten Nutzung erhalten.</p>
+					<p>
+						<label for="loginPassword">Passwort</label>
+						<br>
+						<input type="password" id="loginPassword" autocomplete="current-password" style="width: 100%;" />
+					</p>
+					<p>
+						<input type="submit" value="Anmelden" />
+					</p>
+					<p id="loginStatus"></p>
+				</form>
+			</div>
+		</div>
+	</div>
+
 	<div id="modalUnits" class="modal-backdrop hidden" onclick="closeAdminModalOnBackdrop(event, 'units')">
 		<div class="modal-panel modal-panel-wide" onclick="event.stopPropagation()">
 			<div class="modal-header">
@@ -2058,8 +2083,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				<div style="text-align: left;">
 					<!-- Passwort-Verwaltung selbst lebt jetzt in System > Zugriffskontrolle - eine
 					     Kategorie unter vielen, die dasselbe Passwort schützt, nicht mehr Firmware-
-					     spezifisch. Beide Tabs unten fragen bei Bedarf per getAdminPassword() danach
-					     (Prompt + sessionStorage-Cache). -->
+					     spezifisch. Beide Tabs unten laufen über die Anmeldung (Sitzungs-Cookie). -->
 					<div class="modal-tab-bar">
 						<button type="button" id="firmwareTabBtnEsp" class="modal-tab-btn active" onclick="setFirmwareModalTab('esp')">ESPMaster</button>
 						<button type="button" id="firmwareTabBtnUnits" class="modal-tab-btn" onclick="setFirmwareModalTab('units')">Units</button>
@@ -2361,6 +2385,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 		function loadPage() {
 			prefillDateTimeLocalDefaults();
+			checkLoginState();
 
 			if (localDevelopment) {
 				setSpeed("80");
@@ -3959,29 +3984,97 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			el.className = passwordSet ? "status-online-ready" : "status-offline";
 		}
 
-		//Single source of truth for the admin password used on every protected request below
-		//(firmware upload/push, and whichever categories aren't opted into the public allowlist).
-		//Cached in sessionStorage (not localStorage - gone once the tab closes, doesn't linger on
-		//a shared/public browser) so the admin isn't re-prompted for every single action in one
-		//sitting. Prompts on first use per tab/session; a wrong/stale cached value is cleared by
-		//clearAdminPassword() (called from every protected request's 401 handler) so the very next
-		//attempt re-prompts instead of silently failing forever.
+		//Protected requests are authenticated by the login session cookie (see showLoginDialog()),
+		//not by a password kept in the page - the existing call sites still pass this as their
+		//X-OTA-Password header, and an empty header just means "use the session".
 		function getAdminPassword() {
-			if (sessionStorage.getItem("splitflapAdminPasswordKnown") === "1") {
-				return sessionStorage.getItem("splitflapAdminPassword") || "";
-			}
-			var entered = prompt("Administrator-Passwort (leer lassen, falls keines gesetzt ist):", "");
-			if (entered === null) {
-				return ""; //user cancelled - try unauthenticated, most likely to just fail with 401 again
-			}
-			sessionStorage.setItem("splitflapAdminPassword", entered);
-			sessionStorage.setItem("splitflapAdminPasswordKnown", "1");
-			return entered;
+			return "";
 		}
 
+		//Called from every protected request's 401 handler: the session is gone (expired, logged
+		//out elsewhere, password changed) - ask to log in again.
 		function clearAdminPassword() {
-			sessionStorage.removeItem("splitflapAdminPassword");
-			sessionStorage.removeItem("splitflapAdminPasswordKnown");
+			showLoginDialog();
+		}
+
+		//Every request from this page carries X-Requested-With - the device only accepts the session
+		//cookie together with it (CSRF protection, see ServiceAccessControlFunctions.ino).
+		(function () {
+			var originalSend = XMLHttpRequest.prototype.send;
+			XMLHttpRequest.prototype.send = function (body) {
+				try {
+					this.setRequestHeader("X-Requested-With", "splitflap");
+				} catch (e) {
+					//not opened yet - nothing to add
+				}
+				return originalSend.call(this, body);
+			};
+		})();
+
+		function showLoginDialog() {
+			document.getElementById("loginStatus").innerHTML = "";
+			document.getElementById("modalLogin").classList.remove("hidden");
+			document.getElementById("loginPassword").focus();
+		}
+
+		//On page load: ask for the password right away if this device needs one and there's no
+		//valid session yet (one login per device, remembered for 90 days after the last use).
+		function checkLoginState() {
+			if (localDevelopment) {
+				return;
+			}
+			var xhr = new XMLHttpRequest();
+			xhr.onreadystatechange = function () {
+				if (this.readyState == 4 && this.status == 200) {
+					try {
+						var state = JSON.parse(this.responseText);
+						document.getElementById("menuLogout").classList.toggle("hidden", !state.loggedIn);
+						if (state.loginRequired && !state.loggedIn) {
+							showLoginDialog();
+						}
+					} catch (e) {
+						//older firmware without /api/session - protected actions still answer 401
+					}
+				}
+			};
+			xhr.open("GET", "/api/session", true);
+			xhr.send();
+		}
+
+		function submitLogin() {
+			var statusEl = document.getElementById("loginStatus");
+			var xhr = new XMLHttpRequest();
+			xhr.onreadystatechange = function () {
+				if (this.readyState != 4) {
+					return;
+				}
+				if (this.status == 200) {
+					location.reload();
+				} else if (this.status == 401) {
+					statusEl.innerHTML = '<span class="status-offline">Falsches Passwort.</span>';
+				} else if (this.status == 429) {
+					statusEl.innerHTML = '<span class="status-offline">Zu viele Versuche - kurz warten.</span>';
+				} else {
+					statusEl.innerHTML = '<span class="status-offline">Anmeldung fehlgeschlagen (Status ' + this.status + ').</span>';
+				}
+			};
+			xhr.onerror = function () {
+				statusEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
+			};
+			xhr.open("POST", "/api/login", true);
+			xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhr.send("password=" + encodeURIComponent(document.getElementById("loginPassword").value));
+		}
+
+		function logout() {
+			var xhr = new XMLHttpRequest();
+			xhr.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					location.reload();
+				}
+			};
+			xhr.open("POST", "/api/logout", true);
+			xhr.send();
 		}
 
 		//Changes the OTA password and/or updates the access-control toggles together - both require
@@ -4016,11 +4109,10 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						statusEl.innerHTML = '<span class="status-online-ready">Passwort geändert.</span>';
 						newPasswordInput.value = "";
 						currentPasswordInput.value = "";
-						//The just-entered new password becomes the cached one, so subsequent protected
-						//actions in this same session keep working without an extra prompt.
-						sessionStorage.setItem("splitflapAdminPassword", newPassword);
-						sessionStorage.setItem("splitflapAdminPasswordKnown", "1");
 						setAccessControlStatusDisplay(true);
+						//A password change ends every login session, this one included - log in again
+						//with the new password.
+						showLoginDialog();
 					} else if (this.status == 401) {
 						statusEl.innerHTML = '<span class="status-offline">Falsches aktuelles Passwort.</span>';
 					} else {
@@ -4076,7 +4168,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					if (this.status == 200) {
 						statusEl.innerHTML = '<span class="status-online-ready">Passwortschutz deaktiviert.</span>';
 						currentPasswordInput.value = "";
-						clearAdminPassword(); //nothing to remember anymore, every request is unauthenticated now
+						document.getElementById("menuLogout").classList.add("hidden"); //no password, nothing to log out of
 						setAccessControlStatusDisplay(false);
 					} else if (this.status == 401) {
 						statusEl.innerHTML = '<span class="status-offline">Falsches aktuelles Passwort.</span>';
