@@ -8,101 +8,148 @@
 	     to load (this ESP8266's lwIP allows only 5 concurrent connections). -->
 	<link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAABdElEQVQ4T82TsYrCUBBFb8BKUVMIKUIQbOxtLUUImqBiKst8gYU/INgI9mltLFQUMWJnJzYSS0UMNtpZCUqMIi5vZAO7W7jsNk73huHM3PtmuFgs9sA/gnsfQCAQQC6XgyRJ2Gw2GI1GuF6vJE6WZQiC8EXofr/HZDIBSQgGg+j3+1iv15jP50ilUvD7/SiVSgRptVpwXRer1cqDbLdb9Hq9J0DTNOi6jkwmQwU+n4/ojUYDpmkSYDgcot1u/7CbAOl0GrVaDYqi4HA4UFEkEsHlcsHpdHoN4DgO1WoVqqqS9sFgAMuyvG5sAgZeLBZertvtwnGcp4TPbDweR7FYRKFQwHQ6RaVSwf1+9zxYLpcewDAMnM/nJ4DnedxuN0qwYG82Sb1e/50HbPxwOIxyuex16HQ6GI/HaDabrz0QRZEcns1mpDORSCCZTCKfz5P2l7/A2oZCIVqkaDSK3W5HRh6PR5oom83Ctm3ak+/xRrfw14v+AL86ymEKl1vEAAAAAElFTkSuQmCC" />
 	<style>
-		/* Design tokens - everything below derives colors/spacing/radius from these.
-		   No Google Fonts/external requests deliberately - every extra TCP connection is costly
-		   on this hardware. System font stacks only. */
+		/* Tokens from a shadcn/ui-based design system ("neutral" theme), as
+		   plain hex instead of oklch for older browsers. Only CSS is taken over - no React/Tailwind
+		   build, no web fonts: every extra byte/TCP connection is costly on the ESP8266.
+		   --success/--warning are project-local (the design system has no status colors yet). */
 		:root {
-			--color-primary: #6FB7C9;
-			--color-primary-hover: #93CBD8;
-			--color-on-primary: #0B0E13;
-			--color-bg: #0B0E13;
-			--color-bg-raised: #171C24;
-			--color-card-bg: #11151C;
-			--color-input-bg: #0B0E13;
-			--color-text: #E6E8EB;
-			--color-text-muted: #9AA3AE;
-			--color-text-subtle: #77808C;
-			--color-border: #1B2029;
-			--color-success: #6FBE8C;
-			--color-warning: #D8A657;
-			--color-danger: #D97A6C;
-			--color-note-bg: #171C24;
+			--background: #fff;
+			--foreground: #0a0a0a;
+			--card: #fff;
+			--popover: #fff;
+			--primary: #171717;
+			--primary-foreground: #fafafa;
+			--secondary: #f5f5f5;
+			--muted: #f5f5f5;
+			--muted-foreground: #737373;
+			--accent: #f5f5f5;
+			--destructive: #e7000b;
+			--border: #e5e5e5;
+			--input: #e5e5e5;
+			--input-bg: transparent;
+			--ring: #a1a1a1;
+			--success: #16a34a;
+			--warning: #d97706;
+			--radius: .5rem;
+			--radius-md: calc(var(--radius) * .8);
+			--radius-xl: calc(var(--radius) * 1.4);
+			--font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Noto Sans", Arial, sans-serif;
+			--font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+			--space-xs: .25rem;
+			--space-sm: .5rem;
+			--space-md: 1rem;
+			--space-xl: 2rem;
+			--text-xs: .75rem;
+			--text-sm: .875rem;
+			--ring-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 50%, transparent);
+			--frame: 0 0 0 1px color-mix(in srgb, var(--foreground) 10%, transparent);
+			color-scheme: light dark;
+		}
 
-			--font-ui: -apple-system, "Segoe UI", Roboto, system-ui, sans-serif;
-			--font-mono: "SF Mono", "Cascadia Code", Consolas, "Liberation Mono", Menlo, monospace;
-
-			--space-xs: 4px;
-			--space-sm: 8px;
-			--space-md: 15px;
-			--space-xl: 32px;
-
-			--radius-sm: 4px;
-
-			--font-size-sm: 0.85rem;
-			--font-size-note: 0.9rem;
-
-			--transition-fast: 0.4s;
+		@media (prefers-color-scheme: dark) {
+			:root {
+				--background: #0a0a0a;
+				--foreground: #fafafa;
+				--card: #171717;
+				--popover: #171717;
+				--primary: #e5e5e5;
+				--primary-foreground: #171717;
+				--secondary: #262626;
+				--muted: #262626;
+				--muted-foreground: #a1a1a1;
+				--accent: #262626;
+				--destructive: #ff6467;
+				--border: #ffffff1a;
+				--input: #ffffff26;
+				--input-bg: #ffffff0b;
+				--ring: #737373;
+				--success: #4ade80;
+				--warning: #fbbf24;
+			}
 		}
 
 		html {
-			font-family: var(--font-ui);
+			font-family: var(--font-sans);
 			display: inline-block;
 			text-align: center;
-			color-scheme: dark;
 		}
 
 		body {
-			background-color: var(--color-bg);
-			color: var(--color-text);
+			background-color: var(--background);
+			color: var(--foreground);
 			margin: 0;
+			font-size: var(--text-sm);
+			-webkit-font-smoothing: antialiased;
 		}
 
 		h1 {
-			font-size: 1.9rem;
-			color: var(--color-text);
+			font-size: 1.5rem;
+			font-weight: 600;
+			letter-spacing: -.025em;
 		}
 
 		p {
-			font-size: 1.4rem;
+			font-size: 1rem;
+			line-height: 1.5;
+		}
+
+		hr {
+			border: 0;
+			border-top: 1px solid var(--border);
 		}
 
 		label {
-			font-size: 1.2rem;
+			font-size: var(--text-sm);
+			font-weight: 500;
 		}
 
+		/* Button (variant primary, size default) */
 		input[type=submit],
 		a,
-		.action-link {
-			border: none;
-			color: var(--color-on-primary);
-			background-color: var(--color-primary);
-			padding: 15px 15px;
-			text-align: center;
-			text-decoration: none;
-			display: inline-block;
-			font-size: 16px;
-			width: 120px;
+		.action-link,
+		.unit-row button,
+		.btn-primary,
+		.btn-small {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			box-sizing: border-box;
+			height: 2rem;
+			padding: 0 .625rem;
 			margin-right: 10px;
-			border-radius: var(--radius-sm);
-			transition-duration: var(--transition-fast);
-			font-family: inherit;
-		}
-
-		a,
-		.action-link {
-			padding: 5px;
+			border: 1px solid transparent;
+			border-radius: var(--radius);
+			background-color: var(--primary);
+			color: var(--primary-foreground);
+			font: 500 var(--text-sm) var(--font-sans);
+			text-decoration: none;
+			white-space: nowrap;
+			cursor: pointer;
+			transition: background-color .15s, opacity .15s;
 		}
 
 		input[type=submit]:hover,
 		a:hover,
-		.action-link:hover {
-			background-color: var(--color-primary-hover);
-			cursor: pointer;
+		.action-link:hover,
+		.unit-row button:hover,
+		.btn-primary:hover {
+			background-color: color-mix(in srgb, var(--primary) 80%, transparent);
 		}
 
 		input[type=submit]:last-child,
 		a:last-child {
 			margin-right: 0;
+		}
+
+		.unit-row button,
+		.btn-primary {
+			margin-right: 0;
+		}
+
+		.unit-row button:disabled,
+		.btn-primary:disabled {
+			opacity: .5;
+			cursor: not-allowed;
 		}
 
 		/* `display: contents` makes the wrapping <form> (POST buttons, not GET links - CSRF hardening)
@@ -111,23 +158,7 @@
 			display: contents;
 		}
 
-		input[type=text],
-		input[type=date],
-		select {
-			width: 50%;
-			padding: 12px 20px;
-			margin: 10px;
-			display: inline-block;
-			border: 1px solid var(--color-border);
-			border-radius: var(--radius-sm);
-			box-sizing: border-box;
-		}
-
-		input[type=radio],
-		input[type=checkbox] {
-			accent-color: var(--color-primary);
-		}
-
+		/* Input / Select / Textarea */
 		input[type=text],
 		input[type=password],
 		input[type=date],
@@ -136,22 +167,64 @@
 		input[type=file],
 		select,
 		textarea {
-			background-color: var(--color-input-bg);
-			color: var(--color-text);
-			border: 1px solid var(--color-border);
-			border-radius: var(--radius-sm);
-			font-family: inherit;
+			box-sizing: border-box;
+			min-height: 2rem;
+			padding: .25rem .625rem;
+			background-color: var(--input-bg);
+			color: var(--foreground);
+			border: 1px solid var(--input);
+			border-radius: var(--radius);
+			font: var(--text-sm) var(--font-sans);
+			outline: none;
+			transition: border-color .15s, box-shadow .15s;
 		}
 
-		input[type=text]:focus,
-		input[type=password]:focus,
-		input[type=date]:focus,
-		input[type=datetime-local]:focus,
-		input[type=number]:focus,
-		select:focus,
-		textarea:focus {
-			outline: 1px solid var(--color-primary);
-			outline-offset: -1px;
+		input[type=file]::file-selector-button {
+			margin-right: var(--space-sm);
+			border: 0;
+			background: transparent;
+			color: var(--foreground);
+			font: 500 var(--text-sm) var(--font-sans);
+		}
+
+		select option {
+			background-color: var(--popover);
+		}
+
+		input[type=text],
+		input[type=date],
+		select {
+			width: 50%;
+			margin: 10px;
+		}
+
+		input::placeholder,
+		textarea::placeholder {
+			color: var(--muted-foreground);
+		}
+
+		input:focus-visible,
+		select:focus-visible,
+		textarea:focus-visible,
+		button:focus-visible,
+		a:focus-visible,
+		.ls-rail-item:has(input:focus-visible),
+		.ls-align-btn:has(input:focus-visible) {
+			border-color: var(--ring);
+			box-shadow: var(--ring-shadow);
+			outline: none;
+		}
+
+		input:disabled,
+		select:disabled,
+		textarea:disabled {
+			opacity: .5;
+			cursor: not-allowed;
+		}
+
+		input[type=radio],
+		input[type=checkbox] {
+			accent-color: var(--primary);
 		}
 
 		input[type=datetime-local] {
@@ -162,27 +235,25 @@
 			display: none !important;
 		}
 
-		/* Hamburger menu - Administration/Reboot live here. */
+		/* Menu button (Button ghost) + DropdownMenu - Administration/Reboot live here. */
 		.kebab-menu {
 			position: relative;
 			display: inline-block;
 		}
 
 		.kebab-button {
-			width: auto;
-			margin: 0 0 var(--space-sm) 0;
+			margin: 0 0 var(--space-sm);
 			padding: var(--space-xs) 10px;
-			font-size: 1.3rem;
-			line-height: 1;
+			font: 500 1.3rem/1 var(--font-sans);
 			background-color: transparent;
-			color: var(--color-text);
-			border: none;
-			border-radius: var(--radius-sm);
+			color: var(--foreground);
+			border: 1px solid transparent;
+			border-radius: var(--radius);
 			cursor: pointer;
 		}
 
 		.kebab-button:hover {
-			background-color: rgba(0, 0, 0, 0.1);
+			background-color: var(--muted);
 		}
 
 		.kebab-dropdown {
@@ -191,37 +262,36 @@
 			left: 0;
 			z-index: 10;
 			min-width: 180px;
-			background-color: var(--color-card-bg);
-			border: 1px solid var(--color-border);
-			border-radius: var(--radius-sm);
-			box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
-			overflow: hidden;
+			padding: var(--space-xs);
+			background-color: var(--popover);
+			border-radius: var(--radius);
+			box-shadow: var(--frame), 0 4px 6px -1px #0000001a, 0 2px 4px -2px #0000001a;
 			text-align: left;
 		}
 
 		.kebab-dropdown a,
 		.kebab-dropdown button {
-			display: block;
+			display: flex;
 			width: 100%;
+			height: auto;
 			margin: 0;
-			padding: 12px 16px;
-			background-color: var(--color-card-bg);
-			color: var(--color-text);
+			padding: .375rem .5rem;
+			background-color: transparent;
+			color: var(--foreground);
 			border: none;
-			border-radius: 0;
-			text-align: left;
-			font-size: 1rem;
-			box-sizing: border-box;
+			border-radius: var(--radius-md);
+			justify-content: flex-start;
+			font: var(--text-sm) var(--font-sans);
 			cursor: pointer;
 		}
 
 		.kebab-dropdown a:hover,
 		.kebab-dropdown button:hover {
-			background-color: var(--color-note-bg);
+			background-color: var(--accent);
 		}
 
 		.content {
-			padding: var(--space-md) 25px 25px 25px;
+			padding: var(--space-md) 25px 25px;
 		}
 
 		/* Rail-status shell for #mainView: a single left-hand rail carries mode navigation
@@ -238,11 +308,11 @@
 			width: 200px;
 			flex-shrink: 0;
 			box-sizing: border-box;
-			border-right: 1px solid var(--color-border);
+			border-right: 1px solid var(--border);
 			padding: 22px 12px;
 			display: flex;
 			flex-direction: column;
-			gap: 3px;
+			gap: 2px;
 		}
 
 		.ls-rail-brand {
@@ -256,27 +326,28 @@
 			width: 8px;
 			height: 8px;
 			border-radius: 2px;
-			background: var(--color-primary);
+			background: var(--primary);
 			flex-shrink: 0;
 		}
 
 		.ls-rail-brand span:last-child {
-			font-size: 13px;
-			letter-spacing: 0.08em;
-			color: var(--color-text-muted);
+			font-size: var(--text-sm);
 			font-weight: 600;
 		}
 
 		.ls-rail-item {
 			position: relative;
-			font-size: 13px;
-			color: var(--color-text-subtle);
+			font-size: var(--text-sm);
+			font-weight: 500;
+			color: var(--muted-foreground);
 			display: flex;
 			align-items: center;
-			gap: 11px;
-			padding: 10px 14px;
-			border-radius: 5px;
+			gap: var(--space-sm);
+			padding: .375rem .625rem;
+			border: 1px solid transparent;
+			border-radius: var(--radius);
 			cursor: pointer;
+			transition: background-color .15s, color .15s;
 		}
 
 		.ls-rail-item input[type=radio] {
@@ -286,32 +357,28 @@
 		}
 
 		.ls-rail-item:hover {
-			color: var(--color-text);
+			color: var(--foreground);
+			background: var(--muted);
 		}
 
 		.ls-rail-item:has(input:checked) {
-			color: var(--color-text);
-			background: var(--color-bg-raised);
-		}
-
-		.ls-rail-item:has(input:checked) svg {
-			stroke: var(--color-primary);
+			color: var(--foreground);
+			background: var(--muted);
 		}
 
 		.ls-rail-status {
 			margin-top: auto;
 			padding: 16px 10px 0;
-			border-top: 1px solid var(--color-border);
+			border-top: 1px solid var(--border);
 			display: flex;
 			flex-direction: column;
 			gap: 9px;
 		}
 
 		.ls-rail-status-label {
-			font-size: 10px;
-			letter-spacing: 0.14em;
-			text-transform: uppercase;
-			color: var(--color-text-subtle);
+			font-size: var(--text-xs);
+			font-weight: 500;
+			color: var(--muted-foreground);
 			margin-bottom: 2px;
 		}
 
@@ -320,36 +387,29 @@
 			flex-direction: column;
 			align-items: flex-start;
 			gap: 2px;
-			font-family: var(--font-mono);
-			font-size: 11.5px;
-			color: var(--color-text-muted);
+			font-size: var(--text-xs);
 		}
 
 		.ls-rail-status-row > span {
-			font-size: 10px;
-			letter-spacing: 0.08em;
-			text-transform: uppercase;
-			color: var(--color-text-subtle);
+			color: var(--muted-foreground);
 		}
 
 		.ls-rail-status-row label {
-			font-size: 11.5px;
-			font-family: var(--font-mono);
-			line-height: 1.4;
+			font: var(--text-xs)/1.4 var(--font-mono);
 			word-break: break-word;
 		}
 
 		.ls-rail-menu {
 			margin-top: 14px;
 			padding-top: 14px;
-			border-top: 1px solid var(--color-border);
+			border-top: 1px solid var(--border);
 		}
 
 		.ls-rail-menu .kebab-button {
 			width: 100%;
 			text-align: left;
-			font-size: 13px;
-			padding: 10px 14px;
+			font-size: var(--text-sm);
+			padding: .375rem .625rem;
 		}
 
 		/* This menu button now sits at the bottom of the rail - opening downward (the base
@@ -366,16 +426,20 @@
 			padding: 24px 40px 40px;
 		}
 
+		/* Toast (Sonner look) */
 		.banner-message {
 			max-width: 800px;
-			margin: 0 auto 15px auto;
-			background-color: var(--color-primary);
-			padding: 10px 10px;
+			margin: 0 auto 15px;
+			padding: var(--space-md);
+			background-color: var(--popover);
+			color: var(--foreground);
+			border-radius: var(--radius);
+			box-shadow: var(--frame), 0 4px 12px #0000001a;
+			font-size: var(--text-sm);
 		}
 
 		/* #adminBannerMessage sits above the admin modals (no single admin page left to show it
-		   inline in), so it floats as a fixed toast instead - stacks on .banner-message's own
-		   background/padding, just repositions it. */
+		   inline in), so it floats as a fixed toast instead. */
 		.admin-toast {
 			position: fixed;
 			top: 20px;
@@ -383,26 +447,28 @@
 			transform: translateX(-50%);
 			z-index: 300;
 			width: calc(100% - 40px);
+			box-sizing: border-box;
 		}
 
-		/* Administration sections each open as their own modal, reached from the rail's kebab menu. */
+		/* Dialog - administration sections each open as their own modal from the rail menu. */
 		.modal-backdrop {
 			position: fixed;
 			inset: 0;
-			background: rgba(0, 0, 0, .6);
+			background: #0000001a;
+			-webkit-backdrop-filter: blur(4px);
+			backdrop-filter: blur(4px);
 			display: flex;
 			align-items: flex-start;
 			justify-content: center;
-			padding: 60px 20px;
+			padding: 60px 1rem;
 			overflow-y: auto;
 			z-index: 200;
 		}
 
 		.modal-panel {
-			background-color: var(--color-card-bg);
-			border: 1px solid var(--color-border);
-			border-radius: 8px;
-			box-shadow: 0 20px 60px rgba(0, 0, 0, .5);
+			background-color: var(--popover);
+			border-radius: var(--radius-xl);
+			box-shadow: var(--frame), 0 10px 15px -3px #0000001a;
 			width: 100%;
 			max-width: 620px;
 			text-align: left;
@@ -416,33 +482,30 @@
 			display: flex;
 			align-items: center;
 			justify-content: space-between;
-			padding: var(--space-md);
-			border-bottom: 1px solid var(--color-border);
+			padding: var(--space-md) var(--space-md) 0;
 		}
 
 		.modal-title {
-			font-size: 11px;
-			font-weight: 600;
-			letter-spacing: .14em;
-			text-transform: uppercase;
-			color: var(--color-text-subtle);
+			font-size: 1rem;
+			font-weight: 500;
+			line-height: 1;
 			margin: 0;
 		}
 
 		.modal-close-btn {
 			background: transparent;
-			border: none;
-			color: var(--color-text-muted);
-			font-size: 1.4rem;
+			border: 1px solid transparent;
+			color: var(--muted-foreground);
+			font-size: 1.25rem;
 			line-height: 1;
 			padding: 2px 8px;
-			border-radius: var(--radius-sm);
+			border-radius: var(--radius);
 			cursor: pointer;
 		}
 
 		.modal-close-btn:hover {
-			background-color: var(--color-note-bg);
-			color: var(--color-text);
+			background-color: var(--muted);
+			color: var(--foreground);
 		}
 
 		.modal-body {
@@ -451,37 +514,42 @@
 			overflow-y: auto;
 		}
 
-		/* Firmware Update modal: ESPMaster/Units tabs, sharing one OTA-password section above them. */
+		/* Tabs - Firmware Update modal: ESPMaster/Units tabs. */
 		.modal-tab-bar {
-			display: flex;
-			gap: 6px;
+			display: inline-flex;
+			gap: 0;
 			margin: var(--space-md) 0;
-			border-bottom: 1px solid var(--color-border);
-			padding-bottom: var(--space-md);
+			padding: 3px;
+			border-radius: var(--radius);
+			background: var(--muted);
 		}
 
 		.modal-tab-btn {
-			padding: 8px 16px;
-			border: 1px solid var(--color-border);
-			border-radius: var(--radius-sm);
+			padding: .125rem .75rem;
+			height: 1.625rem;
+			border: 1px solid transparent;
+			border-radius: var(--radius-md);
 			background: transparent;
-			color: var(--color-text-muted);
+			color: var(--muted-foreground);
 			cursor: pointer;
-			font-family: inherit;
-			font-size: 0.95rem;
+			font: 500 var(--text-sm) var(--font-sans);
+		}
+
+		.modal-tab-btn:hover {
+			color: var(--foreground);
 		}
 
 		.modal-tab-btn.active {
-			border-color: var(--color-primary);
-			background: color-mix(in srgb, var(--color-primary) 10%, transparent);
-			color: var(--color-primary);
+			background: var(--background);
+			color: var(--foreground);
+			box-shadow: 0 1px 3px #0000001a;
 		}
 
 		/* Hilfe-Reiter (API-Referenz mit curl-Beispielen) - siehe systemTabHelp weiter unten. */
 		.api-group-title {
-			font-size: 1.1rem;
-			color: var(--color-text);
-			margin: var(--space-xl) 0 var(--space-sm) 0;
+			font-size: 1rem;
+			font-weight: 600;
+			margin: var(--space-xl) 0 var(--space-sm);
 			text-align: left;
 		}
 
@@ -490,20 +558,21 @@
 		}
 
 		.api-endpoint {
-			border: 1px solid var(--color-border);
-			border-radius: var(--radius-sm);
+			border: 1px solid var(--border);
+			border-radius: var(--radius);
 			margin-bottom: var(--space-sm);
-			background: var(--color-card-bg);
 		}
 
 		.api-endpoint summary {
 			cursor: pointer;
 			padding: var(--space-sm) var(--space-md);
-			font-family: var(--font-mono);
-			font-size: 0.95rem;
-			color: var(--color-primary);
+			font: var(--text-sm) var(--font-mono);
 			list-style: none;
 			text-align: left;
+		}
+
+		.api-endpoint summary:hover {
+			background: var(--muted);
 		}
 
 		.api-endpoint summary::-webkit-details-marker {
@@ -512,6 +581,7 @@
 
 		.api-endpoint summary::before {
 			content: "▸ ";
+			color: var(--muted-foreground);
 		}
 
 		.api-endpoint[open] summary::before {
@@ -519,25 +589,20 @@
 		}
 
 		.api-endpoint-body {
-			padding: 0 var(--space-md) var(--space-md) var(--space-md);
+			padding: 0 var(--space-md) var(--space-md);
 			text-align: left;
 		}
 
 		.api-endpoint-desc {
-			font-size: var(--font-size-note);
-			color: var(--color-text-muted);
-			margin: 0 0 var(--space-sm) 0;
+			color: var(--muted-foreground);
+			margin: 0 0 var(--space-sm);
 		}
 
 		.api-code {
-			background: var(--color-input-bg);
-			border: 1px solid var(--color-border);
-			border-radius: var(--radius-sm);
+			background: var(--muted);
+			border-radius: var(--radius);
 			padding: var(--space-sm);
-			font-family: var(--font-mono);
-			font-size: 0.8rem;
-			line-height: 1.5;
-			color: var(--color-text);
+			font: var(--text-xs)/1.5 var(--font-mono);
 			overflow-x: auto;
 			white-space: pre;
 			margin: 0;
@@ -545,7 +610,7 @@
 
 		.card-grid {
 			max-width: 1040px;
-			margin: 0 0 var(--space-xl) 0;
+			margin: 0 0 var(--space-xl);
 			display: grid;
 			grid-gap: 1.5rem;
 			grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -561,10 +626,11 @@
 			margin-top: var(--space-xl);
 		}
 
+		/* Card */
 		.card {
-			background-color: var(--color-card-bg);
-			border: 1px solid var(--color-border);
-			border-radius: 6px;
+			background-color: var(--card);
+			border-radius: var(--radius-xl);
+			box-shadow: var(--frame);
 			padding: var(--space-md);
 		}
 
@@ -573,23 +639,18 @@
 		}
 
 		.card-title {
-			font-size: 11px;
-			font-weight: 600;
-			letter-spacing: 0.14em;
-			text-transform: uppercase;
-			color: var(--color-text-subtle);
-			margin: 0 0 18px;
+			font-size: 1rem;
+			font-weight: 500;
+			line-height: 1.375;
+			margin: 0 0 var(--space-md);
 		}
 
-		/* Uppercase micro-label above a field, matching .card-title's system. */
+		/* Label above a field */
 		.ls-microlabel {
 			display: block;
-			font-size: 10.5px;
-			font-weight: 600;
-			letter-spacing: 0.14em;
-			text-transform: uppercase;
-			color: var(--color-text-subtle);
-			margin-bottom: 10px;
+			font-size: var(--text-sm);
+			font-weight: 500;
+			margin-bottom: var(--space-sm);
 		}
 
 		.ls-microlabel-split {
@@ -600,31 +661,31 @@
 
 		.ls-accent-text {
 			font-family: var(--font-mono);
-			letter-spacing: normal;
-			text-transform: none;
-			color: var(--color-primary);
+			font-weight: 400;
+			color: var(--muted-foreground);
 		}
 
-		/* Editable Geschwindigkeit percentage (added 2026-09-10 on user request - was a plain
-		   text label before). Kept visually as unobtrusive as the label it replaces (no border,
-		   inherits the accent color/mono font) with a subtle underline only on hover/focus so it
-		   still reads as interactive. */
-		.ls-speed-input {
+		/* Editable Geschwindigkeit percentage - looks like the label it replaced, underline only
+		   on hover/focus so it still reads as interactive. */
+		input.ls-speed-input {
 			width: 34px;
 			text-align: right;
 			font: inherit;
 			font-family: var(--font-mono);
-			color: var(--color-primary);
+			color: var(--muted-foreground);
 			background: transparent;
 			border: none;
 			border-bottom: 1px solid transparent;
 			padding: 0;
+			min-height: 0;
+			border-radius: 0;
+			box-shadow: none;
 			-moz-appearance: textfield;
 		}
 
-		.ls-speed-input:hover,
-		.ls-speed-input:focus {
-			border-bottom-color: var(--color-border);
+		input.ls-speed-input:hover,
+		input.ls-speed-input:focus {
+			border-bottom-color: var(--border);
 			outline: none;
 		}
 
@@ -634,18 +695,12 @@
 			flex-wrap: wrap;
 		}
 
-		/* Visual separators between Ausrichtung/Geschwindigkeit/Animation, added 2026-09-10 on user
-		   request - scoped to this one field-grid (a modifier class, not a plain .ls-field-grid
-		   rule) so the Countdown/Countup prefix/date/suffix rows elsewhere, which reuse the same
-		   base classes, stay unaffected. A left border on the gap itself (half-gap padding+margin
-		   trick) rather than on .ls-field directly, so the line doesn't move if the fields'
-		   flex-basis ever changes independently, and so it collapses away cleanly when the row
-		   wraps onto multiple lines on narrow screens instead of leaving an orphaned rule mid-air. */
+		/* Separators between Ausrichtung/Geschwindigkeit/Animation only (modifier class), drawn in
+		   the middle of the existing gap so they vanish cleanly when the row wraps. */
 		.ls-field-grid-divided > .ls-field:not(:first-child) {
-			border-left: 1px solid var(--color-border);
+			border-left: 1px solid var(--border);
 			padding-left: 14px;
-			margin-left: -14px; /* half the 28px gap each side, so the border sits centered in the
-			                       existing gap instead of widening the row */
+			margin-left: -14px;
 		}
 
 		.ls-field {
@@ -653,8 +708,7 @@
 			min-width: 180px;
 		}
 
-		/* Alignment: 3-way pill group, hidden native radios (same :has() pattern as .ls-rail-item),
-		   left-aligned under the "Ausrichtung" label. */
+		/* ToggleGroup (outline) built from hidden native radios. */
 		.ls-align-group {
 			display: flex;
 			justify-content: flex-start;
@@ -662,10 +716,6 @@
 			flex-wrap: wrap;
 		}
 
-		/* Animation ("Animationen" field): 5 icon-only buttons in a 3-column grid instead of a
-		   single flex row (added 2026-09-10 on user request, so Ausrichtung/Geschwindigkeit/
-		   Animation can all share the same .ls-field width instead of Animation needing extra
-		   room). The stagger-ms input sits in its own full-width row below the grid. */
 		.ls-animation-icon-grid {
 			display: grid;
 			grid-template-columns: repeat(3, 1fr);
@@ -673,9 +723,7 @@
 		}
 
 		.ls-animation-icon-grid .ls-align-btn {
-			/* width: 100%; */
 			min-width: 0;
-			padding: 9px;
 		}
 
 		.ls-animation-stagger-row {
@@ -684,24 +732,28 @@
 
 		.ls-animation-stagger-row input[type=number] {
 			width: 100%;
-			box-sizing: border-box;
-			padding: 9px 10px;
-			border: 1px solid var(--color-border);
-			border-radius: 4px;
 		}
 
-		.ls-align-btn {
+		.ls-align-btn,
+		.ls-rotation-align-btn {
 			position: relative;
-			flex: 0 0 auto;
 			display: flex;
 			align-items: center;
 			justify-content: center;
-			padding: 9px 10px;
-			min-width: 78px;
-			border: 1px solid var(--color-border);
-			border-radius: 4px;
+			box-sizing: border-box;
+			height: 2rem;
+			border: 1px solid var(--input);
+			border-radius: var(--radius);
+			background: transparent;
+			color: var(--foreground);
 			cursor: pointer;
-			color: var(--color-text-muted);
+			transition: background-color .15s;
+		}
+
+		.ls-align-btn {
+			flex: 0 0 auto;
+			padding: 0 .625rem;
+			min-width: 78px;
 		}
 
 		.ls-align-btn input[type=radio] {
@@ -710,19 +762,25 @@
 			pointer-events: none;
 		}
 
-		.ls-align-btn:has(input:checked) {
-			border-color: var(--color-primary);
-			background: color-mix(in srgb, var(--color-primary) 10%, transparent);
-			color: var(--color-primary);
+		.ls-align-btn:hover,
+		.ls-rotation-align-btn:hover,
+		.ls-align-btn:has(input:checked),
+		.ls-rotation-align-btn.active {
+			background: var(--muted);
 		}
 
-		/* Prominent mono display box for the actual flap text - the one thing on the page that
-		   should look like it's really going out to the physical letters. */
-		.ls-display-input {
+		.ls-align-btn:has(input:checked),
+		.ls-rotation-align-btn.active {
+			border-color: var(--ring);
+		}
+
+		/* The actual flap text - the one thing on the page that should look like it's really
+		   going out to the physical letters. */
+		input.ls-display-input {
 			width: 100%;
 			font-family: var(--font-mono);
 			font-size: 1.15rem;
-			letter-spacing: 0.03em;
+			letter-spacing: .03em;
 			padding: 14px 16px;
 			margin: 0;
 		}
@@ -732,21 +790,20 @@
 			align-items: center;
 			gap: 18px;
 			margin-top: 10px;
-			font-size: 12px;
-			color: var(--color-text-subtle);
+			font-size: var(--text-xs);
+			color: var(--muted-foreground);
 		}
 
 		.ls-schedule-row {
 			margin-top: 22px;
 			padding-top: 18px;
-			border-top: 1px solid var(--color-border);
+			border-top: 1px solid var(--border);
 		}
 
 		.ls-checkbox-label {
 			display: flex;
 			align-items: center;
-			gap: 10px;
-			font-size: 0.95rem;
+			gap: var(--space-sm);
 			cursor: pointer;
 		}
 
@@ -754,56 +811,48 @@
 			margin-top: 22px;
 		}
 
-		/* Scheduled-message row: mono timestamp badge, message text, remove button - all in one
-		   hairline-bordered row instead of the old three-column strip. */
-		.ls-message-row {
+		/* Scheduled-message row and Rotation step: one bordered row each. */
+		.ls-message-row,
+		.ls-rotation-item {
 			display: flex;
 			align-items: center;
-			gap: 14px;
-			padding: 12px 14px;
-			border: 1px solid var(--color-border);
-			border-radius: 4px;
-			background: var(--color-bg-raised);
+			padding: 10px 12px;
+			border: 1px solid var(--border);
+			border-radius: var(--radius);
 		}
 
-		.ls-message-row + .ls-message-row {
+		.ls-message-row {
+			gap: 14px;
+		}
+
+		.ls-message-row + .ls-message-row,
+		.ls-rotation-item + .ls-rotation-item {
 			margin-top: 8px;
 		}
 
 		.ls-message-row .ls-message-text {
 			flex: 1;
 			font-family: var(--font-mono);
-			font-size: 0.95rem;
 			text-align: left;
 		}
 
 		.ls-message-row .ls-message-time {
-			font-family: var(--font-mono);
-			font-size: 11.5px;
-			color: var(--color-text-muted);
+			font: var(--text-xs) var(--font-mono);
+			color: var(--muted-foreground);
 			white-space: nowrap;
 		}
 
-		/* One step of a Rotation sequence - same visual language as .ls-message-row. */
 		.ls-rotation-item {
-			display: flex;
-			align-items: center;
 			flex-wrap: wrap;
 			gap: 10px;
-			padding: 12px 14px;
-			border: 1px solid var(--color-border);
-			border-radius: 4px;
-			background: var(--color-bg-raised);
 		}
 
-		.ls-rotation-item + .ls-rotation-item {
-			margin-top: 8px;
-		}
-
+		/* Every element in a rotation row is 2rem tall for a consistent look. */
 		.ls-rotation-item select {
 			flex-shrink: 0;
 			width: auto;
-			height: 40px;
+			height: 2rem;
+			margin: 0;
 		}
 
 		.ls-rotation-item-content {
@@ -811,150 +860,112 @@
 			min-width: 140px;
 		}
 
-		/* Every element in a row is 40px tall for a consistent look - matches .ls-rotation-align-btn. */
 		.ls-rotation-item-content input {
-			height: 40px;
-			box-sizing: border-box;
+			height: 2rem;
 		}
 
-		/* Countdown/countup items: prefix + date + suffix side by side within .ls-rotation-item-content. */
+		/* Countdown/countup items: prefix + date + suffix side by side. */
 		.ls-rotation-item-countfields {
 			display: flex;
 			flex-wrap: wrap;
 			gap: 6px;
 			flex: 1;
 		}
+
 		.ls-rotation-item-countfields input[type="text"] {
 			flex: 1;
 			min-width: 70px;
 		}
 
-		.ls-rotation-item-duration {
+		.ls-rotation-item-duration,
+		.ls-rotation-item-align,
+		.ls-rotation-item-animation {
 			display: flex;
 			align-items: center;
-			gap: 6px;
+			gap: 4px;
 			flex-shrink: 0;
-			font-size: 12px;
-			color: var(--color-text-muted);
+		}
+
+		.ls-rotation-item-duration {
+			gap: 6px;
+			font-size: var(--text-xs);
+			color: var(--muted-foreground);
 		}
 
 		.ls-rotation-item-duration input {
 			width: 46px;
-			height: 40px;
-			box-sizing: border-box;
+			height: 2rem;
 		}
 
-		/* Per-item alignment override, smaller versions of the top-level .ls-align-btn pills - plain
-		   buttons with a JS-toggled "active" class rather than radios, since "none active" (inherit
-		   the default alignment) is a valid, common state a radio group can't represent cleanly. */
-		.ls-rotation-item-align {
-			display: flex;
-			gap: 4px;
-			flex-shrink: 0;
-		}
-
+		/* Per-item overrides: plain buttons with a JS-toggled "active" class rather than radios,
+		   since "none active" (inherit the default) is a valid state. */
 		.ls-rotation-align-btn {
-			display: flex;
-			align-items: center;
-			justify-content: center;
-			width: 40px;
-			height: 40px;
+			width: 2rem;
 			padding: 0;
-			border: 1px solid var(--color-border);
-			border-radius: 4px;
-			background: transparent;
-			color: var(--color-text-muted);
-			cursor: pointer;
-		}
-
-		/* Scoped override, not a global .ls-message-remove change - that class is shared with the
-		   scheduled-messages list elsewhere, which isn't part of this "every row element is 40px
-		   tall" request. */
-		.ls-rotation-item .ls-message-remove {
-			display: flex;
-			align-items: center;
-			justify-content: center;
-			height: 40px;
-			box-sizing: border-box;
-		}
-
-		.ls-rotation-align-btn.active {
-			border-color: var(--color-primary);
-			background: color-mix(in srgb, var(--color-primary) 10%, transparent);
-			color: var(--color-primary);
-		}
-
-		/* Per-item animation override (found 2026-09-10, "Animation pro Rotation-Item") - same
-		   wrapper layout as .ls-rotation-item-align, reuses .ls-rotation-align-btn for the icons
-		   themselves (identical toggle-button look/behavior, just a different icon set). */
-		.ls-rotation-item-animation {
-			display: flex;
-			gap: 4px;
-			align-items: center;
-			flex-shrink: 0;
 		}
 
 		.ls-rotation-item-animation input[type=number] {
 			width: 56px;
-			height: 40px;
-			box-sizing: border-box;
+			height: 2rem;
 			padding: 0 6px;
-			border: 1px solid var(--color-border);
-			border-radius: 4px;
 		}
 
-		.ls-rotation-item-animation input[type=number]:disabled {
-			opacity: 0.4;
+		.ls-rotation-item .ls-message-remove {
+			height: 2rem;
 		}
 
+		/* Button size sm */
 		.btn-small,
 		.btn-small.action-link {
-			width: auto;
+			height: 1.75rem;
 			margin: 0;
-			padding: 5px 10px;
-			font-size: 0.9em;
-			font-weight: normal;
+			padding: 0 .625rem;
+			font-size: .8rem;
+			background-color: var(--secondary);
+			color: var(--foreground);
+		}
+
+		.btn-small:hover,
+		.btn-small.action-link:hover {
+			background-color: color-mix(in srgb, var(--secondary) 95%, var(--foreground));
 		}
 
 		.card .count {
 			display: block;
-			font-size: 14px;
-		}
-		.card .count label {
-			font-size: 14px;
 		}
 
 		.value {
-			font-size: 1.2rem;
-			color: var(--color-primary);
+			font-size: 1.125rem;
+			font-weight: 600;
 		}
 
 		.slider {
 			-webkit-appearance: none;
 			margin: 0 auto;
 			width: 90%;
-			height: 4px;
-			border-radius: 10px;
-			background: var(--color-border);
+			height: 6px;
+			border-radius: 9999px;
+			background: var(--muted);
 			outline: none;
 		}
 
 		.slider::-webkit-slider-thumb {
 			-webkit-appearance: none;
 			appearance: none;
-			width: 18px;
-			height: 18px;
+			width: 16px;
+			height: 16px;
 			border-radius: 50%;
-			background: var(--color-primary);
+			background: var(--background);
+			border: 1px solid var(--ring);
 			cursor: pointer;
 		}
 
 		.slider::-moz-range-thumb {
-			width: 18px;
-			height: 18px;
-			border: none;
+			width: 16px;
+			height: 16px;
 			border-radius: 50%;
-			background: var(--color-primary);
+			background: var(--background);
+			border: 1px solid var(--ring);
 			cursor: pointer;
 		}
 
@@ -968,33 +979,31 @@
 			padding-bottom: 5px;
 		}
 
+		/* Button destructive, size sm */
 		.ls-message-remove {
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			box-sizing: border-box;
 			flex-shrink: 0;
-			padding: 6px 12px;
-			border: 1px solid var(--color-border);
-			border-radius: var(--radius-sm);
-			font-size: 12px;
-			color: var(--color-text-muted);
+			height: 1.75rem;
+			padding: 0 .625rem;
+			border: 1px solid transparent;
+			border-radius: var(--radius);
+			background: color-mix(in srgb, var(--destructive) 10%, transparent);
+			color: var(--destructive);
+			font: 500 .8rem var(--font-sans);
 			cursor: pointer;
 		}
 
 		.ls-message-remove:hover {
-			border-color: var(--color-danger);
-			color: var(--color-danger);
+			background: color-mix(in srgb, var(--destructive) 20%, transparent);
 		}
 
 		.actions {
 			display: flex;
 			justify-content: center;
-			padding: 0 10px 10px 10px;
-		}
-
-		.actions a,
-		.actions .action-link {
-			display: flex;
-			justify-content: center;
-			align-items: center;
-			height: 35px;
+			padding: 0 10px 10px;
 		}
 
 		@media (max-width: 700px) {
@@ -1016,23 +1025,24 @@
 			position: absolute;
 			left: 8px;
 			width: 12px;
-			background: var(--color-primary);
-			animation: lds-facebook 1.2s cubic-bezier(0, 0.5, 0.5, 1) infinite;
+			border-radius: 2px;
+			background: var(--muted-foreground);
+			animation: lds-facebook 1.2s cubic-bezier(0, .5, .5, 1) infinite;
 		}
 
 		.lds-facebook div:nth-child(1) {
 			left: 15px;
-			animation-delay: -0.24s;
+			animation-delay: -.24s;
 		}
 
 		.lds-facebook div:nth-child(2) {
 			left: 34px;
-			animation-delay: -0.12s;
+			animation-delay: -.12s;
 		}
 
 		.lds-facebook div:nth-child(3) {
 			left: 53px;
-			animation-delay: 0;
+			animation-delay: 0s;
 		}
 
 		@keyframes lds-facebook {
@@ -1046,14 +1056,17 @@
 			}
 		}
 
+		/* Table-like unit rows */
 		.unit-row {
-			padding: 5px;
-			margin: 5px;
+			padding: var(--space-sm);
 			display: flex;
 			flex-wrap: wrap;
-			align-content: center;
 			align-items: center;
-			border-bottom: 1px solid var(--color-border);
+			border-bottom: 1px solid var(--border);
+		}
+
+		.unit-row:hover {
+			background: color-mix(in srgb, var(--muted) 50%, transparent);
 		}
 
 		.unit-row:last-child {
@@ -1063,7 +1076,7 @@
 		.unit-row .unit-label {
 			text-align: left;
 			width: 160px;
-			font-weight: bold;
+			font-weight: 500;
 		}
 
 		.unit-row .unit-status {
@@ -1079,9 +1092,8 @@
 		.unit-row .unit-fwversion {
 			width: 110px;
 			text-align: left;
-			color: var(--color-text-muted);
-			font-family: var(--font-mono);
-			font-size: 0.85rem;
+			color: var(--muted-foreground);
+			font: var(--text-xs) var(--font-mono);
 		}
 
 		.unit-row .unit-input {
@@ -1092,94 +1104,64 @@
 
 		.unit-row input[type=number] {
 			width: 90px;
-			padding: var(--space-sm) 10px;
-			border: 1px solid var(--color-border);
-			border-radius: var(--radius-sm);
-			box-sizing: border-box;
 		}
 
-		.unit-row button,
-		.btn-primary {
-			border: none;
-			color: var(--color-on-primary);
-			background-color: var(--color-primary);
-			padding: var(--space-sm) 15px;
-			text-align: center;
-			border-radius: var(--radius-sm);
-			cursor: pointer;
-			font-size: 14px;
-			transition-duration: var(--transition-fast);
-		}
-
-		.unit-row button:hover,
-		.btn-primary:hover {
-			background-color: var(--color-primary-hover);
-		}
-
-		.unit-row button:disabled,
-		.btn-primary:disabled {
-			background-color: var(--color-border);
-			cursor: not-allowed;
+		.status-online-ready,
+		.status-online-busy,
+		.status-offline {
+			font-weight: 500;
 		}
 
 		.status-online-ready {
-			color: var(--color-success);
-			font-weight: bold;
+			color: var(--success);
 		}
 
 		.status-online-busy {
-			color: var(--color-warning);
-			font-weight: bold;
+			color: var(--warning);
 		}
 
 		.status-offline {
-			color: var(--color-danger);
-			font-weight: bold;
+			color: var(--destructive);
 		}
 
+		/* Alert */
 		.info-box {
 			text-align: left;
-			font-size: 1rem;
-			background-color: var(--color-note-bg);
-			border: 1px solid var(--color-primary);
-			border-radius: var(--radius-sm);
-			padding: 10px var(--space-md);
-			margin: var(--space-md) auto 0 auto;
+			background-color: var(--card);
+			border: 1px solid var(--border);
+			border-radius: var(--radius);
+			padding: .625rem var(--space-md);
+			margin: var(--space-md) auto 0;
 			max-width: 770px;
 		}
 
-		.note {
-			font-size: var(--font-size-note);
-			color: var(--color-text-subtle);
-		}
-
+		.note,
 		.note-muted {
-			font-size: var(--font-size-note);
-			color: var(--color-text-muted);
+			font-size: var(--text-sm);
+			color: var(--muted-foreground);
 		}
 
 		.note-danger {
-			font-size: 1rem;
-			color: var(--color-danger);
+			font-size: var(--text-sm);
+			color: var(--destructive);
 		}
 
-		/* Overrides the site-wide a{width:120px} button-look (near the top of this file) for a
-		   plain inline link inside a .note paragraph - that fixed width wrapped "Liste der
-		   TZ-Datenbank-Zeitzonen" across multiple lines instead of fitting on one. Placed last so
-		   it wins the tie against the general a:hover rule's equal specificity too. */
+		/* Plain inline link inside a .note paragraph (Button link variant), overriding the
+		   site-wide a{} button look. Placed last so it wins against a:hover too. */
 		.note a {
-			width: auto;
 			display: inline;
+			height: auto;
 			padding: 0;
 			margin-right: 0;
 			background: none;
-			color: var(--color-primary);
+			color: var(--foreground);
+			font: inherit;
 			text-decoration: underline;
+			text-underline-offset: 4px;
 		}
 
 		.note a:hover {
 			background: none;
-			color: var(--color-primary-hover);
 		}
 	</style>
 </head>
@@ -1501,7 +1483,7 @@
 
 					<!-- mDNS-Hostname - eigener Abschnitt, nicht Teil des Verbinden-Formulars oben, da
 					     unabhängig vom aktuellen WLAN gültig (überlebt einen Netzwerkwechsel). -->
-					<div style="text-align: left; margin-top: 1.5em; border-top: 1px solid var(--color-border); padding-top: 1.5em;">
+					<div style="text-align: left; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1.5em;">
 						<p style="font-size: 1rem;">
 							Das Gerät ist zusätzlich zur IP-Adresse über einen Namen im lokalen Netzwerk
 							erreichbar (sofern Router/Client mDNS unterstützen - nicht garantiert in jedem
@@ -2090,8 +2072,8 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						</p>
 
 						<div id="firmwareProgressContainer" class="hidden" style="margin-top: 10px;">
-							<div style="background: var(--color-border); border-radius: 4px; overflow: hidden; height: 24px; max-width: 400px; margin: 0 auto;">
-								<div id="firmwareProgressBar" style="background: var(--color-primary); height: 100%; width: 0%; color: var(--color-on-primary); font-size: 0.85em; line-height: 24px; transition: width 0.2s;"></div>
+							<div style="background: var(--border); border-radius: 4px; overflow: hidden; height: 24px; max-width: 400px; margin: 0 auto;">
+								<div id="firmwareProgressBar" style="background: var(--primary); height: 100%; width: 0%; color: var(--primary-foreground); font-size: 0.85em; line-height: 24px; transition: width 0.2s;"></div>
 							</div>
 						</div>
 
@@ -3300,7 +3282,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 		function setWiFiStatus(status, rssi, ip) {
 			var labelWiFiStatus = document.getElementById("labelWiFiStatus");
 			var statusText = "";
-			var statusColor = "#888";
+			var statusColor = "var(--muted-foreground)";
 
 			if (status === "Connected" && rssi !== undefined && rssi !== null) {
 				// Determine qualitative assessment based on RSSI
@@ -3309,32 +3291,32 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 				if (rssi >= -50) {
 					quality = "Excellent";
-					qualityColor = "#4caf50"; // Green
+					qualityColor = "var(--success)";
 				} else if (rssi >= -60) {
 					quality = "Very Good";
-					qualityColor = "#8bc34a"; // Light green
+					qualityColor = "var(--success)";
 				} else if (rssi >= -70) {
 					quality = "Good";
-					qualityColor = "#cddc39"; // Lime
+					qualityColor = "var(--success)";
 				} else if (rssi >= -80) {
 					quality = "Fair";
-					qualityColor = "#ffc107"; // Amber
+					qualityColor = "var(--warning)";
 				} else if (rssi >= -90) {
 					quality = "Weak";
-					qualityColor = "#ff9800"; // Orange
+					qualityColor = "var(--warning)";
 				} else {
 					quality = "Very Weak";
-					qualityColor = "#f44336"; // Red
+					qualityColor = "var(--destructive)";
 				}
 
-				statusText = status + " (" + rssi + " dBm) - <span style='color: " + qualityColor + "; font-weight: bold;'>" + quality + "</span>";
-				statusColor = "#4caf50"; // Green for connected
+				statusText = status + " (" + rssi + " dBm) - <span style='color: " + qualityColor + "; font-weight: 500;'>" + quality + "</span>";
+				statusColor = "var(--success)";
 			} else if (status === "Disconnected") {
 				statusText = "Disconnected";
-				statusColor = "#f44336"; // Red
+				statusColor = "var(--destructive)";
 			} else {
 				statusText = "Unknown";
-				statusColor = "#888"; // Gray
+				statusColor = "var(--muted-foreground)";
 			}
 
 			labelWiFiStatus.innerHTML = statusText;
