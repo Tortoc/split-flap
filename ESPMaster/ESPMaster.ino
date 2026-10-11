@@ -248,7 +248,7 @@ IPAddress wifiPrimaryDns(8, 8, 8, 8);
 //rules (feature commit = minor, bugfix commit = patch, breaking/protocol change = major). This is
 //now this project's own independent version line, no longer tracking JonnyBooker's upstream
 //releases (hence dropping the inherited "-Scott" codename).
-const char* espVersion = "4.9.1";
+const char* espVersion = "4.9.2";
 
 //All the letters on the units that we have to be displayed. You can change these if it so pleases at your own risk
 const char letters[] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '$', '&', '#', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', '-', '?', '!'};
