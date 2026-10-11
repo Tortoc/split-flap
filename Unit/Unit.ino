@@ -117,7 +117,10 @@ volatile int displayedLetter = 0; //currently shown letter
 //Set by calibrate() itself (true on success, false on failure) so every call site is covered.
 volatile bool positionKnown = false; //starts false: no calibration has run yet
 int desiredLetter = 0; //letter to be shown
-const char letters[] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'Ä', 'Ö', 'Ü', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', '-', '?', '!'};
+//'$', '&', '#' stand for the Ä/Ö/Ü flaps - same placeholders as ESPMaster's own letters[]. Only
+//the serial test path reads characters here; I2C always transfers positions. Plain 'Ä' etc. were
+//multi-character literals (UTF-8), silently truncated to a single implementation-defined byte.
+const char letters[] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '$', '&', '#', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', '-', '?', '!'};
 Stepper stepper(STEPS, STEPPERPIN1, STEPPERPIN3, STEPPERPIN2, STEPPERPIN4); //stepper setup
 bool lastInd1 = false; //store last status of phase
 bool lastInd2 = false; //store last status of phase
