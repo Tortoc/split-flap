@@ -392,11 +392,16 @@ int pendingBootloaderProbeUnitIndex = -1;
 #define EXTENSION_HEALTH_CHECK_INTERVAL_MS (15UL * 1000UL)
 #define EXTENSION_HTTP_TIMEOUT_MS 1500
 
-//Same deferred-request pattern, for POST /api/extension-display (CODE_REVIEW_V6.md #1):
-//applyExtensionDisplaySegment() blocks with its own yield()-based wait loop, which the ESP8266
-//core panics on when called directly from an AsyncWebServer callback - deferring it to loop()
-//keeps that same bounded blocking wait but runs it from a context where yield() is actually safe.
-PendingRequestSlot pendingExtensionDisplaySlot;
+//POST /api/extension-display is applied from loop(), not its AsyncWebServer callback
+//(CODE_REVIEW_V6.md #1): applyExtensionDisplaySegment() blocks with its own yield()-based wait loop,
+//which the ESP8266 core panics on outside loop()'s context. The handler acknowledges right away
+//instead of holding the request until the animation is done - a staggered animation can easily
+//outlast the primary's EXTENSION_HTTP_TIMEOUT_MS, and a timed-out push counts as failed
+//(CODE_REVIEW_V6.md #4), so the primary would re-render the same text over and over. The
+//primary's readiness poll (GET /api/units) still sees the real motor state: loop() holds that
+//request back while a segment is queued (see pendingExtensionDisplayQueued's use there).
+//A newer push replaces a still-queued older one - only the latest content matters.
+volatile bool pendingExtensionDisplayQueued = false;
 String pendingExtensionDisplaySegment;
 String pendingExtensionDisplayAnimationMode;
 unsigned long pendingExtensionDisplayStaggerMs = 0;
@@ -2611,18 +2616,14 @@ void setup() {
       int globalOffset = isNumber(globalOffsetRaw) ? globalOffsetRaw.toInt() : 0;
       int combinedWidth = isNumber(combinedWidthRaw) ? combinedWidthRaw.toInt() : unitsAmount;
 
-      //Deferred to loop() (see pendingExtensionDisplaySlot's comment) - applyExtensionDisplaySegment()
-      //itself must never run directly from this AsyncWebServer callback.
-      if (pendingExtensionDisplaySlot.request != nullptr) {
-        request->send(503, "text/plain", "Another display push is still being applied, try again shortly");
-        return;
-      }
+      //Queued for loop() and acknowledged right away - see pendingExtensionDisplayQueued's comment.
       pendingExtensionDisplaySegment = segment;
       pendingExtensionDisplayAnimationMode = animationMode;
       pendingExtensionDisplayStaggerMs = staggerMs;
       pendingExtensionDisplayGlobalOffset = globalOffset;
       pendingExtensionDisplayCombinedWidth = combinedWidth;
-      pendingExtensionDisplaySlot.accept(request);
+      pendingExtensionDisplayQueued = true;
+      request->send(200, "text/plain", "OK");
     });
 
     //Primary-side extension host list (multiple-units.md) - GET returns the configured hosts plus
@@ -3331,19 +3332,15 @@ void loop() {
     }
   }
 
-  //Extension-side display push, deferred here from POST /api/extension-display (see
-  //pendingExtensionDisplaySlot's comment) - applyExtensionDisplaySegment() still blocks for its own
-  //bounded animation-stagger duration, but from loop()'s own context yield() inside that wait is safe.
-  if (pendingExtensionDisplaySlot.request != nullptr) {
-    std::shared_ptr<std::atomic<bool>> disconnected;
-    AsyncWebServerRequest* deferredRequest = pendingExtensionDisplaySlot.take(disconnected);
-
+  //Extension-side display push, queued here by POST /api/extension-display (see
+  //pendingExtensionDisplayQueued's comment) - applyExtensionDisplaySegment() still blocks for its
+  //own bounded animation-stagger duration, but from loop()'s own context yield() inside that wait
+  //is safe. Its String parameters are copies, so a newer push arriving during one of those
+  //yield()s only queues the next segment instead of changing this one mid-write.
+  if (pendingExtensionDisplayQueued) {
+    pendingExtensionDisplayQueued = false;
     applyExtensionDisplaySegment(pendingExtensionDisplaySegment, pendingExtensionDisplayAnimationMode,
       pendingExtensionDisplayStaggerMs, pendingExtensionDisplayGlobalOffset, pendingExtensionDisplayCombinedWidth);
-
-    if (PendingRequestSlot::stillConnected(disconnected)) {
-      deferredRequest->send(200, "text/plain", "OK");
-    }
   }
 
   //A direct timezone.setLocation() call (blocking DNS+UDP) could trip the software watchdog under
@@ -3414,7 +3411,10 @@ void loop() {
     bootTimezoneLookupPending = true;
   }
 
-  if (pendingUnitsInfoSlot.request != nullptr) {
+  //Held back while a display push is still queued (applied further up in loop(), next pass) -
+  //answering now would report the units as idle before they ever got their new letters, and the
+  //primary would treat this extension as already settled.
+  if (pendingUnitsInfoSlot.request != nullptr && !pendingExtensionDisplayQueued) {
     std::shared_ptr<std::atomic<bool>> disconnected;
     AsyncWebServerRequest* deferredRequest = pendingUnitsInfoSlot.take(disconnected);
 
