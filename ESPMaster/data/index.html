@@ -1669,21 +1669,38 @@
 						<p class="note">
 							Verbindet dieses Gerät mit einem oder mehreren anderen Split-Flap-Geräten im selben
 							WLAN, sodass ein <strong>Primärgerät</strong> seinen Anzeigetext über die eigenen
-							Units hinaus auf zusätzliche <strong>Erweiterungsgeräte</strong> ausdehnt. Standalone
+							Units hinaus auf zusätzliche <strong>Erweiterungsgeräte</strong> ausdehnt oder sie
+							denselben Text anzeigen lässt (Spiegeln). Standalone
 							(Standard) entspricht dem bisherigen Verhalten unverändert. Details: <code>multiple-units.md</code>
 							im Projekt-Repository.
 						</p>
 						<p>
 							<label for="deviceRoleSelect">Rolle dieses Geräts</label>
 							<br>
-							<select id="deviceRoleSelect" style="width: 250px;" onchange="document.getElementById('extensionDevicesSection').classList.toggle('hidden', this.value !== 'primary')">
+							<select id="deviceRoleSelect" style="width: 250px;" onchange="showDeviceRoleSections(this.value)">
 								<option value="standalone">Eigenständig (Standard)</option>
 								<option value="primary">Primärgerät</option>
 								<option value="extension">Erweiterungsgerät</option>
 							</select>
 						</p>
+						<div id="extensionLinkModeSection" class="hidden">
+							<p>
+								<label for="extensionLinkModeSelect">Art des Verbunds</label>
+								<br>
+								<select id="extensionLinkModeSelect" style="width: 250px;">
+									<option value="extend">Erweitern</option>
+									<option value="mirror">Spiegeln</option>
+								</select>
+							</p>
+							<p class="note">
+								Erweitern: der Text läuft über alle Geräte hinweg.
+								Spiegeln: jedes Erweiterungsgerät zeigt dieselben Zeichen wie dieses Gerät, mit
+								derselben Animation. Hat es weniger Units, wird rechts abgeschnitten, hat es mehr,
+								bleiben die übrigen leer. Gilt für alle eingetragenen Geräte.
+							</p>
+						</div>
 						<p>
-							<button class="btn-primary" onclick="saveDeviceRole()">Rolle speichern</button>
+							<button class="btn-primary" onclick="saveDeviceRole()">Speichern</button>
 						</p>
 						<p id="deviceRoleChangeStatus"></p>
 
@@ -3605,7 +3622,8 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						}
 						document.getElementById("currentMdnsHostnameDisplay").innerText = responseObject.mdnsHostname || "split-flap";
 						document.getElementById("deviceRoleSelect").value = responseObject.deviceRole || "standalone";
-						document.getElementById("extensionDevicesSection").classList.toggle("hidden", responseObject.deviceRole !== "primary");
+						document.getElementById("extensionLinkModeSelect").value = responseObject.extensionLinkMode || "extend";
+						showDeviceRoleSections(responseObject.deviceRole);
 						//mqttEnabled (and every other mqtt* field) is only present in this response at
 						//all when MQTT_ENABLE was compiled in (ESPMaster.ino) - hide the tab entirely
 						//rather than leave a dead, non-functional panel (found 2026-09-12, RAM-savings
@@ -4304,10 +4322,19 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			xhrRequest.send(body);
 		}
 
+		//Link mode and extension host list only mean anything on a primary.
+		function showDeviceRoleSections(role) {
+			document.getElementById("extensionLinkModeSection").classList.toggle("hidden", role !== "primary");
+			document.getElementById("extensionDevicesSection").classList.toggle("hidden", role !== "primary");
+		}
+
 		//Multi-device role (multiple-units.md) - own small endpoint, see POST /api/device-role.
+		//The link mode (extend/mirror) is sent along with it; the firmware keeps it as-is for
+		//non-primary roles.
 		function saveDeviceRole() {
 			var statusEl = document.getElementById("deviceRoleChangeStatus");
 			var role = document.getElementById("deviceRoleSelect").value;
+			var linkMode = document.getElementById("extensionLinkModeSelect").value;
 
 			if (localDevelopment) {
 				statusEl.innerHTML = '<span class="status-online-ready">Rolle gespeichert (simuliert).</span>';
@@ -4335,7 +4362,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			xhrRequest.open("POST", "/api/device-role", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
-			xhrRequest.send("role=" + encodeURIComponent(role));
+			xhrRequest.send("role=" + encodeURIComponent(role) + "&linkMode=" + encodeURIComponent(linkMode));
 		}
 
 		//Full-replace, same convention as saving Rotation Items - collects the up-to-4 fixed host

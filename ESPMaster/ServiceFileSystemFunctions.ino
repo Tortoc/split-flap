@@ -116,6 +116,7 @@ bool loadValuesFromBootSnapshot() {
   animationStaggerMs = doc["animationStaggerMs"] | 150;
   deviceMode = String((const char*)(doc["deviceMode"] | DEVICE_MODE_TEXT));
   deviceRole = String((const char*)(doc["deviceRole"] | DEVICE_ROLE_STANDALONE));
+  extensionLinkMode = String((const char*)(doc["extensionLinkMode"] | EXTENSION_LINK_MODE_EXTEND));
   otaPassword = String((const char*)(doc["otaPassword"] | "splitflap"));
   mdnsHostname = String((const char*)(doc["mdnsHostname"] | "split-flap"));
 #if MQTT_ENABLE == true
@@ -162,6 +163,7 @@ void loadValuesFromIndividualFiles() {
   animationStaggerMs = isNumber(animationStaggerMsRaw) ? (unsigned long)animationStaggerMsRaw.toInt() : 150;
   deviceMode = readFile(LittleFS, deviceModePath, DEVICE_MODE_TEXT);
   deviceRole = readFile(LittleFS, deviceRolePath, DEVICE_ROLE_STANDALONE);
+  extensionLinkMode = readFile(LittleFS, extensionLinkModePath, EXTENSION_LINK_MODE_EXTEND);
   otaPassword = readFile(LittleFS, otaPasswordPath, "splitflap"); //persisted, not a compile-time constant
   mdnsHostname = readFile(LittleFS, mdnsHostnamePath, "split-flap"); //persisted, not a compile-time constant
 #if MQTT_ENABLE == true
@@ -214,6 +216,7 @@ bool saveBootSnapshot() {
   doc["animationStaggerMs"] = animationStaggerMs;
   doc["deviceMode"] = deviceMode;
   doc["deviceRole"] = deviceRole;
+  doc["extensionLinkMode"] = extensionLinkMode;
   doc["otaPassword"] = otaPassword;
   doc["mdnsHostname"] = mdnsHostname;
 #if MQTT_ENABLE == true
@@ -266,6 +269,7 @@ String computeSettingsSignature() {
   sig += animationStaggerMs; sig += '|';
   sig += deviceMode; sig += '|';
   sig += deviceRole; sig += '|';
+  sig += extensionLinkMode; sig += '|';
   sig += otaPassword; sig += '|';
   sig += mdnsHostname; sig += '|';
 #if MQTT_ENABLE == true

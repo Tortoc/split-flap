@@ -12,10 +12,10 @@ unsigned long lastExtensionHealthCheckAt = 0;
 
 //The effective display width for the Primary's own text-composition pipeline - own units plus
 //every currently-reachable configured extension's own unitsAmount. Returns plain unitsAmount
-//unchanged for every other role.
+//unchanged for every other role, and in mirror link mode (mirrors don't widen the display).
 int combinedUnitsAmount() {
   int total = unitsAmount;
-  if (deviceRole != DEVICE_ROLE_PRIMARY) {
+  if (deviceRole != DEVICE_ROLE_PRIMARY || extensionLinkMode == EXTENSION_LINK_MODE_MIRROR) {
     return total;
   }
   for (int i = 0; i < extensionDeviceCount; i++) {
@@ -105,8 +105,12 @@ bool pushSegmentToExtension(ExtensionDevice &ext, String segment, int globalOffs
 
 //Called once per newly-written display line - slices displayJob.currentAlignedLine into one
 //segment per configured, reachable extension, in configuration order, starting right after this
-//device's own unitsAmount characters. The push itself is a one-shot request; the receiving
-//extension staggers its own writes using the animation context sent along with it.
+//device's own unitsAmount characters. In mirror link mode every extension instead gets this
+//device's own characters (offset 0, own width as the animation width, so each mirror unit starts
+//exactly when the primary's unit at the same index does) - applyExtensionDisplaySegment() on the
+//receiving side already cuts off or blank-pads a segment that doesn't match its unit count. The
+//push itself is a one-shot request; the receiving extension staggers its own writes using the
+//animation context sent along with it.
 void pushExtensionSegments() {
   if (deviceRole != DEVICE_ROLE_PRIMARY) {
     return;
@@ -124,6 +128,7 @@ void pushExtensionSegments() {
     }
     return;
   }
+  bool mirror = extensionLinkMode == EXTENSION_LINK_MODE_MIRROR;
   int combinedWidth = combinedUnitsAmount();
   int offset = unitsAmount;
   for (int i = 0; i < extensionDeviceCount; i++) {
@@ -131,8 +136,10 @@ void pushExtensionSegments() {
     if (ext.Host == "" || !ext.Reachable) {
       continue; //fail-soft: skip, don't block/retry inline - see this function's own top comment
     }
-    String segment = displayJob.currentAlignedLine.substring(offset, offset + ext.UnitsAmount);
-    if (!pushSegmentToExtension(ext, segment, offset, combinedWidth)) {
+    String segment = mirror
+      ? displayJob.currentAlignedLine.substring(0, min(unitsAmount, ext.UnitsAmount))
+      : displayJob.currentAlignedLine.substring(offset, offset + ext.UnitsAmount);
+    if (!pushSegmentToExtension(ext, segment, mirror ? 0 : offset, combinedWidth)) {
       //Leaves this extension showing stale content - mark the same write-failure flag
       //writeDueAnimatedUnits() uses for a failed local I2C write, so finishDisplayJob() forces a
       //retry on the next showText() call for the same text instead of caching this as delivered

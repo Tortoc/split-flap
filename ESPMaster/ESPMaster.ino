@@ -445,6 +445,14 @@ const char* DEVICE_ROLE_STANDALONE = "standalone";
 const char* DEVICE_ROLE_PRIMARY = "primary";
 const char* DEVICE_ROLE_EXTENSION = "extension";
 
+//How a primary uses ALL its configured extensionDevices[] (one setting for the whole group -
+//mixing both kinds in one group is deliberately not supported yet). extend (default) appends each
+//extension's units after the primary's own, widening the display. mirror sends every extension
+//the primary's own characters instead (same text, same animation timing) - cut off or padded with
+//blanks if its unit count differs - and leaves the primary's display width unchanged.
+const char* EXTENSION_LINK_MODE_EXTEND = "extend";
+const char* EXTENSION_LINK_MODE_MIRROR = "mirror";
+
 //Alignment options
 const char* ALIGNMENT_MODE_LEFT = "left";
 const char* ALIGNMENT_MODE_CENTER = "center";
@@ -486,6 +494,7 @@ const char* animationModePath = "/animationmode.txt";
 const char* animationStaggerMsPath = "/animationstagger.txt";
 const char* deviceModePath = "/devicemode.txt";
 const char* deviceRolePath = "/devicerole.txt";
+const char* extensionLinkModePath = "/extensionlinkmode.txt";
 //Own file, like rotationItemsPath/scheduledMessagesPath - a short JSON array of hostnames, not a
 //scalar, so it doesn't belong in the boot-snapshot blob (see that constant's own comment).
 const char* extensionDevicesPath = "/extensiondevices.json";
@@ -524,6 +533,7 @@ unsigned long animationStaggerMs = 150; //ms between consecutive units' start, s
 String inputText = "";
 String deviceMode = "";
 String deviceRole = "standalone"; //standalone|primary|extension - see DEVICE_ROLE_* constants' own comment
+String extensionLinkMode = "extend"; //extend|mirror - see EXTENSION_LINK_MODE_* constants' own comment
 //A fixed, small array like rotationItems - no per-entry heap allocation, no LinkedList
 //operator[] risk. ExtensionDevice itself is declared in Classes.h, not here - see that header's
 //own comment on TwibootChipInfo for why a struct used as a function parameter type must be
@@ -1099,6 +1109,7 @@ void setup() {
       minimalDoc["wifiSettingsResettable"] = true;
       minimalDoc["mdnsHostname"] = mdnsHostname; //user-editable, see POST /api/wifi's "set-hostname" action
       minimalDoc["deviceRole"] = deviceRole; //user-editable, see POST /api/device-role (multiple-units.md)
+      minimalDoc["extensionLinkMode"] = extensionLinkMode; //same endpoint, optional 'linkMode' param
 #if MQTT_ENABLE == true
       //Folded in here too, same "one fetch covers the whole System modal" reasoning as
       //mdnsHostname above - the password itself is never included, see POST /api/mqtt's own GET.
@@ -2662,12 +2673,28 @@ void setup() {
         request->send(400, "text/plain", "'role' must be standalone, primary, or extension");
         return;
       }
+      //Optional - omitting it keeps the current link mode (older clients only ever send 'role').
+      String newLinkMode = request->hasParam("linkMode", true) ? request->getParam("linkMode", true)->value() : extensionLinkMode;
+      if (newLinkMode != EXTENSION_LINK_MODE_EXTEND && newLinkMode != EXTENSION_LINK_MODE_MIRROR) {
+        request->send(400, "text/plain", "'linkMode' must be extend or mirror");
+        return;
+      }
+      bool changed = false;
       if (deviceRole != newRole) {
         deviceRole = newRole;
         writeFile(LittleFS, deviceRolePath, deviceRole.c_str());
+        changed = true;
+      }
+      if (extensionLinkMode != newLinkMode) {
+        extensionLinkMode = newLinkMode;
+        writeFile(LittleFS, extensionLinkModePath, extensionLinkMode.c_str());
+        changed = true;
+      }
+      if (changed) {
         checkBootSnapshotFreshness();
-        //combinedUnitsAmount() changes the moment this device stops/starts counting extensions -
-        //see displayRenderGeneration's own comment (CODE_REVIEW_V6.md #3).
+        //combinedUnitsAmount() changes the moment this device stops/starts counting extensions,
+        //and a link-mode switch changes what every extension gets sent - see
+        //displayRenderGeneration's own comment (CODE_REVIEW_V6.md #3).
         displayRenderGeneration++;
       }
       request->send(200, "text/plain", "OK");

@@ -212,6 +212,10 @@ unsigned long computeUnitAnimationDelayMs(int unitIndex, int unitsAmount, String
   if (staggerMs == 0 || unitsAmount <= 1) {
     return 0;
   }
+  //A mirror extension with more units than its primary asks for indexes past the width - clamp
+  //instead of letting e.g. (unitsAmount - 1 - unitIndex) go negative and wrap to a huge unsigned
+  //delay, which applyExtensionDisplaySegment()'s wait-until-due loop would never get past.
+  unitIndex = constrain(unitIndex, 0, unitsAmount - 1);
 
   int edgeDist = min(unitIndex, unitsAmount - 1 - unitIndex);
 
