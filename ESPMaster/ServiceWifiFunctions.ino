@@ -56,12 +56,26 @@ void checkWifiScanRequest() {
   WiFi.scanNetworksAsync([](int numNetworksFound) {});
 }
 
+//WiFi.begin() with the credentials also saved to flash as the network to join after a reboot.
+//WiFiManager::autoConnect() switches WiFi.persistent() off at boot and - when it connects with
+//saved credentials - never switches it back on, so a plain WiFi.begin() here only changed the
+//network until the next reboot (OTA, crash, power cut), after which the device silently rejoined
+//whatever network was still in flash. Persistence is switched back off right after, matching what
+//WiFiManager expects for the rest of the runtime.
+void beginWifiAndPersist(const String &ssid, const String &password) {
+  WiFi.persistent(true);
+  WiFi.begin(ssid.c_str(), password.c_str());
+  WiFi.persistent(false);
+}
+
 //Advances the "connect to a new WiFi network from the web UI" state machine started by
 //POST /api/wifi/connect - call every loop() iteration (a cheap no-op while WIFI_CONNECT_NONE).
+//Both the new network and, on failure, the reverted previous one are saved to flash (see
+//beginWifiAndPersist()), so flash always holds the network the device is actually using.
 void checkWifiConnectAttempt() {
   if (wifiConnectPhase == WIFI_CONNECT_PENDING) {
     SerialPrintln(F("Attempting to connect to new WiFi network: \"") + wifiConnectNewSsid + F("\""));
-    WiFi.begin(wifiConnectNewSsid.c_str(), wifiConnectNewPassword.c_str());
+    beginWifiAndPersist(wifiConnectNewSsid, wifiConnectNewPassword);
     wifiConnectPhaseChangedAt = millis();
     wifiConnectPhase = WIFI_CONNECT_TESTING;
   } else if (wifiConnectPhase == WIFI_CONNECT_TESTING) {
@@ -71,7 +85,7 @@ void checkWifiConnectAttempt() {
     } else if (millis() - wifiConnectPhaseChangedAt > WIFI_CONNECT_TIMEOUT_MS) {
       SerialPrintln(F("New WiFi network failed to connect within ") + String(WIFI_CONNECT_TIMEOUT_MS / 1000) +
         F("s - reverting to previous network: \"") + wifiConnectOldSsid + F("\""));
-      WiFi.begin(wifiConnectOldSsid.c_str(), wifiConnectOldPassword.c_str());
+      beginWifiAndPersist(wifiConnectOldSsid, wifiConnectOldPassword);
       wifiConnectPhase = WIFI_CONNECT_FAILED_REVERTED;
     }
   }
