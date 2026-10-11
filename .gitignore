@@ -1,5 +1,9 @@
 # Internal bugfix/debugging reference log - kept locally, never committed
 BUGFIX_LOG.md
+Use-Cases.md
+
+# Code-review reports - kept locally, never committed
+[Cc][Oo][Dd][Ee][-_][Rr][Ee][Vv][Ii][Ee][Ww]*
 
 # arduino-cli build output (--export-binaries), not source
 ESPMaster/build/
