@@ -7,21 +7,21 @@
 //Returns whether the message was actually accepted (already showing, or a job was successfully
 //started) vs. genuinely dropped (no units, or the display was busy) - callers with a one-shot
 //input (scheduled messages, /api/text) need this to know a message was actually lost.
-bool showText(String message) {
+bool showText(const String &message) {
   return showText(message, 0, "");
 }
 
-bool showText(String message, int delayMillis) {
+bool showText(const String &message, int delayMillis) {
   return showText(message, delayMillis, "");
 }
 
 //""/-1 = no animation override, use the global animation setting. Only Rotation items ever pass a
 //non-default value here (see checkRotation()).
-bool showText(String message, int delayMillis, String alignmentOverride) {
+bool showText(const String &message, int delayMillis, const String &alignmentOverride) {
   return showText(message, delayMillis, alignmentOverride, "", -1);
 }
 
-bool showText(String message, int delayMillis, String alignmentOverride, String animationModeOverride, int animationStaggerMsOverride) {
+bool showText(const String &requestedMessage, int delayMillis, const String &alignmentOverride, const String &animationModeOverride, int animationStaggerMsOverride) {
   //Nothing to display to - guarded here so scheduled messages, countdown, clock/date modes etc.
   //all stay safe automatically. A real failure to deliver, not a no-op.
   if (unitsAmount <= 0) {
@@ -29,8 +29,9 @@ bool showText(String message, int delayMillis, String alignmentOverride, String 
   }
 
   //Centralized here, not at each individual input path - must run before anything below measures
-  //length/position, including the lastWrittenText cache comparison.
-  message = normalizeUmlautsForDisplay(message);
+  //length/position, including the lastWrittenText cache comparison. The overloads above pass the
+  //caller's String by reference, so this is the only copy made per call.
+  String message = normalizeUmlautsForDisplay(requestedMessage);
 
   //Quiet Hours override whatever was actually requested - checked here so every path parks the
   //display uniformly without needing its own check.

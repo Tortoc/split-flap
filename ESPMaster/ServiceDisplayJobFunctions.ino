@@ -26,12 +26,12 @@ enum DisplayJobState {
 struct DisplayJob {
   DisplayJobState state = DISPLAY_JOB_IDLE;
   String originalMessage;      //what showText() was actually asked to show, for lastWrittenText
-  //Must stay a plain array, not LList<String> - LinkedList's destructor deletes every node, so
-  //assigning a temporary LList into a longer-lived struct leaves dangling pointers once the
-  //temporary is destroyed. Copy just the String elements instead.
+  //Lines aren't stored - DISPLAY_JOB_WRITE_LINE computes the current one from originalMessage
+  //with sentenceLine(), against the width the job was split for (lineWidth), so the line count
+  //checked at start can't drift if the combined width changes mid-job (CODE_REVIEW_V7.md B).
   static const int MAX_DISPLAY_LINES = 50; //500-char max message comfortably fits under this
-  String lines[MAX_DISPLAY_LINES];
   int lineCount = 0;
+  int lineWidth = 0;
   bool isMultiLine = false;    //split lines are only used when there's more than one; a single
                                 //(or zero) line always shows originalMessage as-is (see DISPLAY_JOB_WRITE_LINE below)
   int currentLineIndex = 0;
@@ -217,7 +217,7 @@ bool pollDisplayJobWaitAllExtensionsReady() {
 //pairs up symmetric units for outside-in/inside-out with no special-casing needed.
 //simultaneous/staggerMs==0 both collapse to "every unit due at 0" - no behavior change from before
 //this feature existed.
-unsigned long computeUnitAnimationDelayMs(int unitIndex, int unitsAmount, String animationMode, unsigned long staggerMs) {
+unsigned long computeUnitAnimationDelayMs(int unitIndex, int unitsAmount, const String &animationMode, unsigned long staggerMs) {
   if (staggerMs == 0 || unitsAmount <= 1) {
     return 0;
   }
@@ -252,14 +252,14 @@ unsigned long computeUnitAnimationDelayMs(int unitIndex, int unitsAmount, String
 //Normalizes umlauts FIRST, same as showText() does before it ever reaches startDisplayJob() - a
 //2-byte UTF-8 umlaut sequence collapses to a single 1-byte placeholder once normalized, so
 //counting the raw bytes instead double-counts every umlaut for line-wrapping purposes.
-bool isMessageTooLongToRender(String message) {
-  return processSentenceToLines(normalizeUmlautsForDisplay(message), combinedUnitsAmount()).size() > DisplayJob::MAX_DISPLAY_LINES;
+bool isMessageTooLongToRender(const String &message) {
+  return countSentenceLines(normalizeUmlautsForDisplay(message), combinedUnitsAmount()) > DisplayJob::MAX_DISPLAY_LINES;
 }
 
 //Starts a new display job. Returns false (does nothing) if one is already running - callers that
 //need strict ordering against other jobs (see updateUnitsResetSequence()) check isDisplayJobBusy()
 //themselves rather than relying on this to queue anything.
-bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPauseMs, String alignmentOverride, String animationModeOverride, int animationStaggerMsOverride) {
+bool startDisplayJob(const String &message, int flapSpeedValue, unsigned long finalPauseMs, const String &alignmentOverride, const String &animationModeOverride, int animationStaggerMsOverride) {
   if (displayJob.state != DISPLAY_JOB_IDLE) {
     return false;
   }
@@ -269,24 +269,20 @@ bool startDisplayJob(String message, int flapSpeedValue, unsigned long finalPaus
   SerialPrintln(F("New Message: ") + messageDisplay);
   SerialPrintln(F("Effective alignment: ") + (alignmentOverride != "" ? alignmentOverride : alignment));
 
-  //parsedLines is a plain local here, used and discarded entirely within this function - safe.
-  //See the long comment on DisplayJob::lines for why the LList itself must never be copied out
-  //of a scope like this one, only its individual String elements.
-  LList<String> parsedLines = processSentenceToLines(message, combinedUnitsAmount());
+  int lineWidth = combinedUnitsAmount();
+  int lineCount = countSentenceLines(message, lineWidth);
   //MAX_DISPLAY_LINES (50) was sized for "500 chars fits comfortably" assuming a fairly large
   //unitsAmount - with fewer units (or many explicit line breaks), a within-limits message can
   //genuinely need more lines than that. Reject clearly instead of silently truncating the tail
   //while still claiming the full text was shown.
-  if (parsedLines.size() > DisplayJob::MAX_DISPLAY_LINES) {
+  if (lineCount > DisplayJob::MAX_DISPLAY_LINES) {
     SerialPrintln(F("Message needs more lines than MAX_DISPLAY_LINES - refusing rather than silently truncating"));
     return false;
   }
 
   displayJob.originalMessage = message;
-  displayJob.lineCount = parsedLines.size();
-  for (int i = 0; i < displayJob.lineCount; i++) {
-    displayJob.lines[i] = parsedLines[i];
-  }
+  displayJob.lineCount = lineCount;
+  displayJob.lineWidth = lineWidth;
   displayJob.isMultiLine = displayJob.lineCount > 1;
   displayJob.currentLineIndex = 0;
   displayJob.flapSpeedValue = flapSpeedValue;
@@ -437,13 +433,9 @@ void finishDisplayJob() {
   }
 
   //Release any String heap buffers this job held - a plain "=" assignment reuses existing
-  //capacity rather than freeing it, so the NEXT job re-populating the same slots with SHORTER
-  //text wouldn't free it on its own. Safe here: lastWrittenText already captured originalMessage.
+  //capacity rather than freeing it. Safe here: lastWrittenText already captured originalMessage.
   displayJob.originalMessage = String();
   displayJob.currentAlignedLine = String();
-  for (int i = 0; i < DisplayJob::MAX_DISPLAY_LINES; i++) {
-    displayJob.lines[i] = String();
-  }
 
   SerialPrintln(F("Done showing message"));
   displayJob.state = DISPLAY_JOB_IDLE;
@@ -554,7 +546,10 @@ void updateDisplayJob() {
       //are a deliberate way to manually position text on this device - collapsing/trimming them
       //for a single-line message would be a regression, not a fix; only the multi-line word-wrap
       //path needs its own whitespace normalization for line-breaking purposes.
-      String line = displayJob.isMultiLine ? displayJob.lines[displayJob.currentLineIndex] : displayJob.originalMessage;
+      int ignoredLineCount;
+      String line = displayJob.isMultiLine
+        ? sentenceLine(displayJob.originalMessage, displayJob.lineWidth, displayJob.currentLineIndex, ignoredLineCount)
+        : displayJob.originalMessage;
       if (displayJob.isMultiLine) {
         SerialPrint(F("-- Message Line: "));
         SerialPrintln(line);

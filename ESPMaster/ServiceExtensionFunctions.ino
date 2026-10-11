@@ -84,7 +84,13 @@ void checkExtensionHealth() {
 //locally. Best-effort, no retry - a failed push is lost, the next showText() call simply retries.
 //Does NOT re-check reachability itself - callers only invoke this for extensions the last
 //checkExtensionHealth() sweep found reachable.
-bool pushSegmentToExtension(ExtensionDevice &ext, String segment, int globalOffset, int combinedWidth) {
+bool pushSegmentToExtension(ExtensionDevice &ext, const String &segment, int globalOffset, int combinedWidth) {
+  //How far this line's animation already is on this device when the push arrives over there:
+  //time since the line started here (local unit writes, pushes to earlier extensions) plus an
+  //estimate of the network delay - so the extension's units start on the same shared clock instead
+  //of whenever the push happened to arrive (CODE_REVIEW_V7.md, common start time). Capped, since a
+  //round trip that included a slow TCP connect would otherwise skew the estimate.
+  unsigned long startOffsetMs = (millis() - displayJob.lineWriteStartMillis) + min(ext.LastPushRoundTripMs / 2, 250UL);
   WiFiClient client;
   HTTPClient http;
   http.setTimeout(EXTENSION_HTTP_TIMEOUT_MS);
@@ -97,9 +103,14 @@ bool pushSegmentToExtension(ExtensionDevice &ext, String segment, int globalOffs
     "&animationMode=" + urlEncodeForFormBody(displayJob.animationModeValue) +
     "&staggerMs=" + String(displayJob.animationStaggerMsValue) +
     "&globalOffset=" + String(globalOffset) +
-    "&combinedWidth=" + String(combinedWidth);
+    "&combinedWidth=" + String(combinedWidth) +
+    "&startOffsetMs=" + String(startOffsetMs);
+  unsigned long sentAt = millis();
   int httpCode = http.POST(body);
   http.end();
+  if (httpCode == 200) {
+    ext.LastPushRoundTripMs = millis() - sentAt;
+  }
   return httpCode == 200;
 }
 
@@ -168,6 +179,7 @@ struct ExtensionDisplayState {
   int globalOffset = 0;
   int combinedWidth = 0;
   int speed = 0;
+  //Set back by the push's startOffsetMs, so delays count from the primary's line start.
   unsigned long startedAt = 0;
   uint64_t writtenMask = 0;
   //Same semantics as the primary's displayJob.hadWriteFailure: one attempt per unit, a failed
@@ -189,7 +201,7 @@ void tickExtensionDisplay() {
     extensionDisplay.globalOffset = pendingExtensionDisplayGlobalOffset;
     extensionDisplay.combinedWidth = pendingExtensionDisplayCombinedWidth;
     extensionDisplay.speed = convertSpeed(flapSpeed);
-    extensionDisplay.startedAt = millis();
+    extensionDisplay.startedAt = millis() - pendingExtensionDisplayStartOffsetMs;
     extensionDisplay.writtenMask = 0;
     extensionDisplay.writeFailed = false;
   }

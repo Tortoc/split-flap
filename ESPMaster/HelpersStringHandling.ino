@@ -40,7 +40,7 @@ String urlEncodeForFormBody(String value) {
 //that the physical letters[] array (ESPMaster.ino) actually has flaps for. Runs once, centrally,
 //in showText() - so every input path (Rotation, scheduled messages, /api/text) gets the same
 //handling, and raw 2-byte UTF-8 sequences never shift later characters' flap positions.
-String normalizeUmlautsForDisplay(String text) {
+String normalizeUmlautsForDisplay(const String &text) {
   String result = "";
   result.reserve(text.length());
   for (int i = 0; i < (int)text.length(); i++) {
@@ -134,7 +134,7 @@ String cleanString(String message) {
   return message;
 }
 
-int convertSpeed(String flapSpeed) {
+int convertSpeed(const String &flapSpeed) {
   int flapSpeedInt;
   flapSpeedInt = flapSpeed.toInt();
   flapSpeedInt = map(flapSpeedInt, 1, 100, MIN_SPEED, MAX_SPEED);
@@ -146,13 +146,31 @@ int convertSpeed(String flapSpeed) {
   return flapSpeedInt;
 }
 
+//Word-wraps `sentenceIn` into display lines of at most `width` characters (explicit "\n" breaks,
+//"-"-hyphenated over-long words) and returns only line number `wantedLine` (0-based; "" if there is
+//no such line, -1 to just count), setting `lineCount` to the total. Computed again for every line
+//instead of keeping a list of all lines: the display job only ever needs one line at a time, and a
+//500-character message no longer sits in memory a second time as words plus lines
+//(CODE_REVIEW_V7.md B). The lines aren't plain substrings of the input - hyphens get inserted and
+//whitespace collapsed - so positions/lengths into the original text wouldn't be enough.
+//
+//Same algorithm as the former processSentenceToLines() (host-tested line for line against it),
+//just walking the words in place and handing each finished line to emitLine below.
 //width - see centerString()'s own comment (same reasoning, same no-default-argument caveat).
-LList<String> processSentenceToLines(String sentence, int width) {
-  SerialPrintln(F("Processing Sentence to lines"));
-  
+String sentenceLine(const String &sentenceIn, int width, int wantedLine, int &lineCount) {
+  String sentence = sentenceIn;
+  String result;
+  lineCount = 0;
+  auto emitLine = [&](const String &line) {
+    if (lineCount == wantedLine) {
+      result = line;
+    }
+    lineCount++;
+  };
+
   //Remove trailing and preceding whitespace
   sentence.trim();
-  
+
   //Handle newline characters being passed up
   sentence.replace("\\n", "\n");
 
@@ -162,57 +180,40 @@ LList<String> processSentenceToLines(String sentence, int width) {
   }
 
   //Replace any double newlines with a single one, not allowing anymore then one
-  while(sentence.indexOf("\n\n") != -1) 
+  while(sentence.indexOf("\n\n") != -1)
   {
     sentence.replace("\n\n", "\n");
   }
 
   //Remove pre-ceding space to a newline
-  while(sentence.indexOf(" \n") != -1) 
+  while(sentence.indexOf(" \n") != -1)
   {
     sentence.replace(" \n", "\n");
   }
 
   //Replace all double spaces
-  while(sentence.indexOf("  ") != -1) 
+  while(sentence.indexOf("  ") != -1)
   {
     sentence.replace("  ", " ");
   }
-    
-  // Split the string into substrings based on spaces
-  LList<String> words; 
-  while (sentence.length() > 0)
-  {
-    //Find the next space
-    int indexOfSpace = sentence.indexOf(' ');
 
-    //If not space, take the rest of the string that is left
-    //Else, process the part of the string
-    if (indexOfSpace == -1)
-    {
-      words.add(sentence);
-      break;
-    }
-    else
-    {
-      words.add(sentence.substring(0, indexOfSpace));
-      sentence = sentence.substring(indexOfSpace + 1);
-    }
-  }
-
-  //Now process the words into lines where possible
-  LList<String> lines;
+  //Walk the space-separated words in place and process them into lines where possible
   String inProgressLine;
-  while(words.size() != 0) 
+  int position = 0;
+  int sentenceLength = sentence.length();
+  while (position < sentenceLength)
   {
-    //Always get the first word
-    String wordItem = words[0];
+    //Find the next space - if none, take the rest of the string that is left
+    int indexOfSpace = sentence.indexOf(' ', position);
+    String wordItem = indexOfSpace == -1 ? sentence.substring(position) : sentence.substring(position, indexOfSpace);
+    position = indexOfSpace == -1 ? sentenceLength : indexOfSpace + 1;
+    bool isLastWord = position >= sentenceLength;
 
     //Only measure the word up until the first newline
     int indexOfFirstNewline = wordItem.indexOf('\n');
 
     //If the first characeter is not a newline see if we can fit it on the current line, otherwise don't bother
-    if (indexOfFirstNewline != 0) 
+    if (indexOfFirstNewline != 0)
     {
       //Determine the word length up till the first newline as to see if it will fit on the current line
       int wordLength = indexOfFirstNewline == -1 ? wordItem.length() : indexOfFirstNewline;
@@ -220,14 +221,14 @@ LList<String> processSentenceToLines(String sentence, int width) {
       //If we cannot fit everything on the same line, start a new line
       if (inProgressLine != "" && inProgressLine.length() + wordLength + 1 > width)
       {
-          lines.add(inProgressLine);
+          emitLine(inProgressLine);
           inProgressLine = "";
       }
 
       //Only if we have a line that has letters in it, do we want a space on the end to split up the words
       if (inProgressLine.length() > 0)
       {
-        inProgressLine = inProgressLine + " ";
+        inProgressLine += ' ';
       }
     }
 
@@ -244,7 +245,7 @@ LList<String> processSentenceToLines(String sentence, int width) {
         //width-length check below - adding it again here would insert an empty line.
         if (inProgressLine != "")
         {
-          lines.add(inProgressLine);
+          emitLine(inProgressLine);
           inProgressLine = "";
         }
       }
@@ -256,33 +257,37 @@ LList<String> processSentenceToLines(String sentence, int width) {
         bool moreWordContentFollows = (letterIndex < currentWordLength - 1) && (wordItem[letterIndex + 1] != '\n');
         if (inProgressLine.length() == width - 1 && moreWordContentFollows)
         {
-          inProgressLine = inProgressLine + "-";
-          lines.add(inProgressLine);
+          inProgressLine += '-';
+          emitLine(inProgressLine);
           inProgressLine = "";
         }
 
         //Business as usual, add the letter onto the in progress line
-        inProgressLine = inProgressLine + wordItemLetter;
+        inProgressLine += wordItemLetter;
         if (inProgressLine.length() == width)
-        {  
-          lines.add(inProgressLine);
+        {
+          emitLine(inProgressLine);
           inProgressLine = "";
         }
       }
     }
-    
-    //Remove now we've processed that word
-    words.remove(0);
-    
+
     //Don't forgot the last processed item...
-    if (words.size() == 0 && inProgressLine != "")
+    if (isLastWord && inProgressLine != "")
     {
-      lines.add(inProgressLine);
+      emitLine(inProgressLine);
       inProgressLine = "";
     }
   }
 
-  return lines;
+  return result;
+}
+
+//Number of display lines sentenceLine() splits `sentence` into.
+int countSentenceLines(const String &sentence, int width) {
+  int lineCount;
+  sentenceLine(sentence, width, -1, lineCount);
+  return lineCount;
 }
 
 //Translates the user-facing format syntax (e.g. "HH:mm:ss", "dd.MM.yyyy") into ezTime's own
@@ -323,7 +328,7 @@ String convertUserDateFormatToEzTime(String userFormat) {
 }
 
 //Used for ensuring a string is a number
-bool isNumber(String str) {
+bool isNumber(const String &str) {
   //An empty string must be rejected explicitly - strtol("", &endPtr, 10) consumes no digits but
   //still leaves endPtr at the terminator, so the end-of-string check below would trivially pass.
   if (str.length() == 0) {

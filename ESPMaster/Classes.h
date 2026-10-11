@@ -105,6 +105,9 @@ struct ExtensionDevice {
   bool Reachable = false;        //last health-check result (ServiceExtensionFunctions.ino)
   int UnitsAmount = 0;           //that device's own unitsAmount, as of the last successful health check
   unsigned long LastCheckedAt = 0;
+  //Round trip of the last successful display push - half of it estimates how long the next push
+  //takes to arrive, see pushSegmentToExtension()'s startOffsetMs.
+  unsigned long LastPushRoundTripMs = 0;
 };
 
 //Workaround for LinkedList conflicting with other libraries.

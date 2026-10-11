@@ -406,6 +406,7 @@ String pendingExtensionDisplayAnimationMode;
 unsigned long pendingExtensionDisplayStaggerMs = 0;
 int pendingExtensionDisplayGlobalOffset = 0;
 int pendingExtensionDisplayCombinedWidth = 0;
+unsigned long pendingExtensionDisplayStartOffsetMs = 0;
 
 //Search for parameter in HTTP POST request
 const char* PARAM_ALIGNMENT = "alignment";
@@ -482,7 +483,7 @@ const char* ANIMATION_MODES[] = {
 //Shared by POST /api/settings' own validation and replaceRotationItemsFromJson()'s per-item
 //validation - one place for the "which values are valid" list. Functions (unlike #defines/
 //globals) are auto-prototyped regardless of file order, so this is safe to call from any file.
-bool isValidAnimationMode(String value) {
+bool isValidAnimationMode(const String &value) {
   for (int modeIndex = 0; modeIndex < ANIMATION_MODES_COUNT; modeIndex++) {
     if (value == ANIMATION_MODES[modeIndex]) {
       return true;
@@ -2643,21 +2644,28 @@ void setup() {
       String staggerMsRaw = request->hasParam("staggerMs", true) ? request->getParam("staggerMs", true)->value() : "0";
       String globalOffsetRaw = request->hasParam("globalOffset", true) ? request->getParam("globalOffset", true)->value() : "0";
       String combinedWidthRaw = request->hasParam("combinedWidth", true) ? request->getParam("combinedWidth", true)->value() : String(unitsAmount);
+      //Optional (older primaries don't send it) - how far the primary's line already is, see
+      //pushSegmentToExtension().
+      String startOffsetMsRaw = request->hasParam("startOffsetMs", true) ? request->getParam("startOffsetMs", true)->value() : "0";
       //Same bounds the primary itself is held to (CODE_REVIEW_V7.md #3) - an unchecked staggerMs or
       //width could otherwise schedule a unit's start hours into the future.
-      if (!isValidAnimationMode(animationMode) || !isNumber(staggerMsRaw) || !isNumber(globalOffsetRaw) || !isNumber(combinedWidthRaw)) {
-        request->send(400, "text/plain", "Invalid animationMode/staggerMs/globalOffset/combinedWidth");
+      if (!isValidAnimationMode(animationMode) || !isNumber(staggerMsRaw) || !isNumber(globalOffsetRaw) || !isNumber(combinedWidthRaw) || !isNumber(startOffsetMsRaw)) {
+        request->send(400, "text/plain", "Invalid animationMode/staggerMs/globalOffset/combinedWidth/startOffsetMs");
         return;
       }
       long staggerMs = staggerMsRaw.toInt();
       long globalOffset = globalOffsetRaw.toInt();
       long combinedWidth = combinedWidthRaw.toInt();
+      long startOffsetMs = startOffsetMsRaw.toInt();
       if (staggerMs < 0 || staggerMs > ANIMATION_STAGGER_MS_MAX ||
           combinedWidth < 1 || combinedWidth > UNITS_AMOUNT_MAX * (EXTENSION_DEVICES_MAX + 1) ||
-          globalOffset < 0 || globalOffset >= combinedWidth) {
-        request->send(400, "text/plain", "staggerMs/globalOffset/combinedWidth out of range");
+          globalOffset < 0 || globalOffset >= combinedWidth || startOffsetMs < 0) {
+        request->send(400, "text/plain", "staggerMs/globalOffset/combinedWidth/startOffsetMs out of range");
         return;
       }
+      //Clamped, not rejected: a late push (e.g. 0ms stagger, slow network) is still valid - every
+      //unit is simply already due. Anything past the longest possible stagger means the same.
+      startOffsetMs = min(startOffsetMs, staggerMs * combinedWidth);
 
       //Queued for loop() and acknowledged right away - see pendingExtensionDisplayQueued's comment.
       pendingExtensionDisplaySegment = segment;
@@ -2665,6 +2673,7 @@ void setup() {
       pendingExtensionDisplayStaggerMs = staggerMs;
       pendingExtensionDisplayGlobalOffset = globalOffset;
       pendingExtensionDisplayCombinedWidth = combinedWidth;
+      pendingExtensionDisplayStartOffsetMs = startOffsetMs;
       pendingExtensionDisplayQueued = true;
       request->send(200, "text/plain", "OK");
     });
