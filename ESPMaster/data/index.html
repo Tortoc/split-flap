@@ -5041,7 +5041,8 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					method: "POST",
 					headers: {
 						"Content-Type": "application/x-www-form-urlencoded",
-						"X-OTA-Password": password
+						"X-OTA-Password": password,
+						"X-Requested-With": "splitflap" //login session cookie, see the XHR wrapper
 					},
 					body: "size=" + file.size
 				});
@@ -5058,7 +5059,8 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						method: "POST",
 						headers: {
 							"Content-Type": "application/octet-stream",
-							"X-OTA-Password": password
+							"X-OTA-Password": password,
+							"X-Requested-With": "splitflap"
 						},
 						body: chunk
 					});
@@ -5074,7 +5076,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 				var finishResponse = await fetch("/api/firmware-finish", {
 					method: "POST",
-					headers: { "X-OTA-Password": password }
+					headers: { "X-OTA-Password": password, "X-Requested-With": "splitflap" }
 				});
 				if (!finishResponse.ok) {
 					if (finishResponse.status == 401) clearAdminPassword();
