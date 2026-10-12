@@ -930,6 +930,31 @@
 			border-bottom: 1px solid var(--border);
 		}
 
+		.ls-rot-grip {
+			display: flex;
+			flex: none;
+			color: var(--muted-foreground);
+			cursor: grab;
+			touch-action: none; /* dragging on a touch screen mustn't scroll the page */
+		}
+
+		.ls-rot-dragging {
+			opacity: .5;
+		}
+
+		.ls-rot-dragging .ls-rot-grip {
+			cursor: grabbing;
+		}
+
+		/* Where the dragged item will land: a line above (or, at the very end, below) an item. */
+		.ls-rot-drop-before {
+			box-shadow: 0 -3px 0 0 var(--ring);
+		}
+
+		.ls-rot-drop-after {
+			box-shadow: 0 3px 0 0 var(--ring);
+		}
+
 		.ls-rot-num {
 			display: inline-flex;
 			align-items: center;
@@ -3360,6 +3385,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 		function renderRotationItems() {
 			var container = document.getElementById("containerRotationItems");
 			container.innerHTML = "";
+			setupRotationDragAndDrop(container);
 
 			if (rotationItemsData.length === 0) {
 				container.innerHTML = '<p class="note">Noch keine Einträge - über den Button unten hinzufügen.</p>';
@@ -3373,6 +3399,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				//re-renders that type/alignment/animation changes trigger (rotationItemOpen).
 				var details = document.createElement("details");
 				details.className = "ls-rot-item";
+				details.dataset.index = index;
 				details.open = rotationItemOpen.get(item) === true;
 				details.addEventListener("toggle", (function (it, d) { return function () { rotationItemOpen.set(it, d.open); }; })(item, details));
 				var summary = document.createElement("summary");
@@ -3543,6 +3570,83 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			sizeRotationTextInputs();
 		}
 
+		//Reordering by dragging an item's grip. Pointer events instead of the HTML5 drag API, so it works
+		//with a mouse and on touch screens alike. Set up once on the (persistent) container.
+		function setupRotationDragAndDrop(container) {
+			if (container.dataset.dragReady) {
+				return;
+			}
+			container.dataset.dragReady = "1";
+			var drag = null; //{ from, item, pointerId, target }
+
+			//The grip lives inside <summary> - a click on it must not open/close the entry.
+			container.addEventListener("click", function (event) {
+				if (event.target.closest(".ls-rot-grip")) {
+					event.preventDefault();
+				}
+			});
+
+			container.addEventListener("pointerdown", function (event) {
+				var grip = event.target.closest(".ls-rot-grip");
+				if (!grip || event.button > 0) {
+					return;
+				}
+				event.preventDefault();
+				var item = grip.closest(".ls-rot-item");
+				drag = { from: Number(item.dataset.index), item: item, pointerId: event.pointerId, target: null };
+				try {
+					grip.setPointerCapture(event.pointerId); //keeps the moves coming even outside the grip
+				} catch (e) {
+					//not capturable (synthetic/ended pointer) - moves over the container still work
+				}
+				item.classList.add("ls-rot-dragging");
+			});
+
+			container.addEventListener("pointermove", function (event) {
+				if (!drag || event.pointerId !== drag.pointerId) {
+					return;
+				}
+				//Insertion point: before the first other item whose middle is below the pointer.
+				var items = Array.prototype.slice.call(container.querySelectorAll(".ls-rot-item"));
+				var target = items.length;
+				for (var i = 0; i < items.length; i++) {
+					var box = items[i].getBoundingClientRect();
+					if (event.clientY < box.top + box.height / 2) {
+						target = i;
+						break;
+					}
+				}
+				drag.target = target;
+				items.forEach(function (element, i) {
+					element.classList.toggle("ls-rot-drop-before", i === target && i !== drag.from && i !== drag.from + 1);
+					element.classList.toggle("ls-rot-drop-after", target === items.length && i === items.length - 1 && i !== drag.from);
+				});
+			});
+
+			var finish = function (event) {
+				if (!drag || event.pointerId !== drag.pointerId) {
+					return;
+				}
+				var from = drag.from;
+				var target = drag.target;
+				drag = null;
+				if (target === null || target === from || target === from + 1) {
+					renderRotationItems(); //dropped where it was - just clear the drag styling
+					return;
+				}
+				var moved = rotationItemsData.splice(from, 1)[0];
+				rotationItemsData.splice(target > from ? target - 1 : target, 0, moved);
+				renderRotationItems();
+			};
+			container.addEventListener("pointerup", finish);
+			container.addEventListener("pointercancel", function (event) {
+				if (drag && event.pointerId === drag.pointerId) {
+					drag = null;
+					renderRotationItems();
+				}
+			});
+		}
+
 		//Which rotation items are expanded - keyed by the item object itself, so it follows the item
 		//through re-renders and removals and is never sent to the device.
 		var rotationItemOpen = new WeakMap();
@@ -3587,7 +3691,8 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			if (item.animationMode) {
 				badges += '<span class="ls-rot-badge">' + ROTATION_ANIMATION_LABELS[item.animationMode] + " · " + item.animationStaggerMs + " ms</span>";
 			}
-			summary.innerHTML = '<span class="ls-rot-num">' + (index + 1) + "</span>" +
+			summary.innerHTML = '<span class="ls-rot-grip" title="Ziehen zum Verschieben"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.4"></circle><circle cx="15" cy="6" r="1.4"></circle><circle cx="9" cy="12" r="1.4"></circle><circle cx="15" cy="12" r="1.4"></circle><circle cx="9" cy="18" r="1.4"></circle><circle cx="15" cy="18" r="1.4"></circle></svg></span>' +
+				'<span class="ls-rot-num">' + (index + 1) + "</span>" +
 				'<span class="ls-rot-type">' + ROTATION_TYPE_LABELS[item.type] + "</span>" +
 				'<span class="ls-rot-sum">' + escapeHtml(content) + "</span>" + badges +
 				'<span class="ls-rot-dur">' + item.durationSeconds + " s</span>" +
