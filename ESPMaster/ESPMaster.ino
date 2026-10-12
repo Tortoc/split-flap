@@ -3823,6 +3823,8 @@ void loop() {
     //room (or the build lacks mmu=4816H, where HeapSelectIram is a no-op). free()/delete[] find the
     //right heap by address, so nothing else changes.
     bool ok;
+    //Update.begin() would switch the WiFi sleep type mid-session - see ServiceWifiSleepFunctions.cpp.
+    keepWifiSleepType = true;
     {
       HeapSelectIram iramHeap;
       ok = Update.begin(updateSize, U_FLASH);
@@ -3830,6 +3832,7 @@ void loop() {
     if (!ok && Update.getError() == UPDATE_ERROR_OOM) {
       ok = Update.begin(updateSize, U_FLASH);
     }
+    keepWifiSleepType = false;
     if (ok) {
       otaBytesWritten = 0;
       //Allocated here, not statically - free heap on this device is chronically tight, no reason

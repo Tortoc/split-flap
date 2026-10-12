@@ -14,4 +14,7 @@ void maintainEmergencyMemoryReserve();
 
 extern unsigned long connectionGateRejectedCount;
 
+//ServiceWifiSleepFunctions.cpp - true makes wifi_set_sleep_type() a no-op (OTA, see there).
+extern volatile bool keepWifiSleepType;
+
 #endif
