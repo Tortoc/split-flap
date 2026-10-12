@@ -1547,7 +1547,7 @@
 										Nachricht planen
 									</label>
 									<div id="divScheduleOptions" class="hidden">
-										<p class="note">Alle geplanten Nachrichten zusammen dürfen höchstens 4000 Zeichen lang sein (Arbeitsspeicher des Geräts).</p>
+										<p class="note">Alle geplanten Nachrichten zusammen: höchstens 4000 Zeichen.</p>
 										<p>
 											<label for="scheduledDateTime">Show Indefinitely?</label>
 											<input type="checkbox" id="inputCheckboxShowIndefinitely" name="scheduleShowIndefinitely" />
@@ -1595,7 +1595,7 @@
 										<input type="text" id="inputCountupSuffix" name="countupSuffix" autocomplete="off" maxlength="40" placeholder="z.B. Tage" />
 									</div>
 								</div>
-								<p class="note">Zeigt die Anzahl der vollen Tage seit dem Startdatum. Ohne Präfix und Suffix wird nur die Anzahl der Tage angezeigt.</p>
+								<p class="note">Zeigt die vollen Tage seit dem Startdatum, auf Wunsch mit Präfix und Suffix.</p>
 							</div>
 
 							<div id="tab-clock" class="tab hidden">
@@ -1612,7 +1612,7 @@
 
 							<div id="tab-rotation" class="tab hidden">
 								<label class="ls-microlabel">Ablauf</label>
-								<p class="note">Die Einträge werden der Reihe nach angezeigt, jeweils für die angegebene Dauer - am Ende beginnt der Ablauf wieder von vorne. Alle Texte zusammen dürfen höchstens 4000 Zeichen lang sein.</p>
+								<p class="note">Die Einträge laufen der Reihe nach, jeweils für ihre Dauer, danach von vorn. Alle Texte zusammen: höchstens 4000 Zeichen.</p>
 								<div id="containerRotationItems"></div>
 								<div class="ls-submit-row">
 									<input type="button" value="+ Eintrag hinzufügen" onclick="addRotationItem()" class="btn-small" />
@@ -1675,14 +1675,10 @@
 					     network directly from here, without rebooting into the AP captive portal. -->
 					<div style="text-align: left; margin-top: 1.5em;">
 						<p>
-							Direkt mit einem anderen WLAN verbinden, ohne das Gerät in den
-							AP-Konfigurationsmodus zu versetzen.
+							Direkt mit einem anderen WLAN verbinden, ohne AP-Konfigurationsmodus.
 						</p>
 						<p class="note-danger">
-							<b>Das Gerät kann nur mit einem WLAN gleichzeitig verbunden sein.</b> Beim
-							Verbinden trennt es sich sofort vom aktuellen Netzwerk, noch bevor feststeht, ob
-							die neuen Zugangsdaten funktionieren. Schlägt der Versuch fehl, wechselt es nach
-							ca. 15 Sekunden automatisch zurück zu den vorherigen Zugangsdaten. Das neue Netz bleibt auch nach einem Neustart gespeichert.
+							<b>Das Gerät trennt sich sofort vom aktuellen WLAN.</b> Klappt die neue Verbindung nicht, kehrt es nach ca. 15 Sekunden zum bisherigen WLAN zurück. Das neue WLAN bleibt nach einem Neustart gespeichert.
 						</p>
 
 						<p>
@@ -1717,9 +1713,7 @@
 					     unabhängig vom aktuellen WLAN gültig (überlebt einen Netzwerkwechsel). -->
 					<div style="text-align: left; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1.5em;">
 						<p>
-							Das Gerät ist zusätzlich zur IP-Adresse über einen Namen im lokalen Netzwerk
-							erreichbar (sofern Router/Client mDNS unterstützen - nicht garantiert in jedem
-							Netzwerk).
+							Zusätzlich zur IP-Adresse ist das Gerät über einen Namen erreichbar, sofern das Netzwerk mDNS unterstützt.
 						</p>
 						<p>
 							<label>Aktueller DNS-Name</label>
@@ -1733,8 +1727,7 @@
 							<button class="btn-primary" onclick="changeMdnsHostname()">Ändern</button>
 						</p>
 						<p class="note">
-							Nur Buchstaben, Ziffern und Bindestriche (nicht am Anfang/Ende), 1-63 Zeichen.
-							Bei mehreren Displays im selben Netzwerk muss jedes einen eigenen Namen bekommen.
+							Buchstaben, Ziffern und Bindestriche (nicht am Anfang/Ende), 1-63 Zeichen. Jedes Display im Netzwerk braucht einen eigenen Namen.
 						</p>
 						<p id="mdnsHostnameChangeStatus"></p>
 					</div>
@@ -1763,8 +1756,7 @@
 				<div id="systemTabQuietHours" class="hidden">
 					<div style="text-align: left;">
 						<p id="quietHoursExtensionNote" class="note hidden">
-							Dieses Gerät ist ein Erweiterungsgerät: Im Mehrgeräte-Verbund bestimmt das Primärgerät
-							die Ruhezeiten für alle Geräte. Die Einstellung hier wirkt nicht.
+							Erweiterungsgerät: Die Ruhezeiten legt das Primärgerät fest, die Einstellung hier wirkt nicht.
 						</p>
 						<p>
 							<label for="quietHoursEnabled" class="ls-checkbox-label">
@@ -1773,8 +1765,7 @@
 							</label>
 						</p>
 						<p class="note">
-							Während der Ruhezeiten bleibt das Display leer (keine Motorbewegung), egal welcher
-							Modus eingestellt ist - danach läuft alles automatisch normal weiter.
+							In den Ruhezeiten bleibt das Display leer und die Motoren stehen, unabhängig vom Modus.
 						</p>
 						<p>
 							<label for="quietHoursStart">Von</label>
@@ -1793,9 +1784,7 @@
 				<div id="systemTabCrashLog" class="hidden">
 					<div style="text-align: left;">
 						<p class="note">
-							Absturz-Details, die das Gerät direkt vor dem letzten automatischen Neustart
-							selbst gespeichert hat - bleibt auch erhalten, wenn zum Absturz-Zeitpunkt keine
-							serielle Verbindung bestand.
+							Absturzdaten, die das Gerät vor dem letzten automatischen Neustart gespeichert hat.
 						</p>
 						<p>
 							<a href="/api/crash-log" target="_blank" class="btn-small action-link">Crash-Log öffnen</a>
@@ -1811,9 +1800,7 @@
 							<span id="accessControlPasswordStatus" class="ls-value-mono">wird geladen...</span>
 						</p>
 						<p class="note">
-							Ein leeres Passwort schaltet den Schutz <b>komplett</b> ab - dann sind auch
-							Firmware-Update und WLAN-Verwaltung ohne Passwort erreichbar, unabhängig von den
-							Häkchen unten.
+							Ein leeres Passwort schaltet den Schutz <b>komplett</b> ab, auch für Firmware-Update und WLAN-Verwaltung.
 						</p>
 
 						<p>
@@ -1833,10 +1820,7 @@
 						<p id="otaPasswordChangeStatus"></p>
 
 						<p class="note" style="margin-top: 1.5em;">
-							Diese Kategorien sind <b>ohne</b> Passwort erreichbar, solange eines gesetzt ist
-							(wirkt erst, wenn oben ein Passwort gesetzt ist). Firmware-Update, Web-UI-Datei-
-							Upload und dieses Zugriffskontroll-Formular selbst sind immer geschützt, sobald
-							ein Passwort gesetzt ist - dafür gibt es bewusst kein Häkchen.
+							Angehakte Bereiche sind trotz Passwort <b>ohne</b> Anmeldung erreichbar. Firmware-Update, Upload der Web-Oberfläche und diese Einstellungen bleiben immer geschützt.
 						</p>
 						<p>
 							<label class="ls-checkbox-label"><input type="checkbox" id="accessControlText" /> Anzeige-Text setzen (<code>/api/text</code>)</label><br>
@@ -1856,10 +1840,7 @@
 				<div id="systemTabMqtt" class="hidden">
 					<div style="text-align: left;">
 						<p class="note">
-							Verbindet das Gerät mit einem MQTT-Broker und meldet sich dort per Home-Assistant-
-							Auto-Discovery an - ein Text-Entity zum Setzen/Auslesen des Anzeigetexts, plus ein
-							Diagnose-Sensor für freien Heap-Speicher. Ohne Broker-Adresse bzw. deaktiviert
-							bleibt dieser Teil des Codes zwar mitkompiliert, verbindet sich aber nie.
+							Verbindet das Gerät mit einem MQTT-Broker und meldet es per Home-Assistant-Auto-Discovery an: eine Text-Entity für den Anzeigetext und ein Sensor für den freien Heap.
 						</p>
 						<p>
 							<label class="ls-checkbox-label"><input type="checkbox" id="mqttEnabled" /> MQTT aktivieren</label>
@@ -1885,8 +1866,7 @@
 							<input type="password" id="mqttPassword" autocomplete="new-password" placeholder="(unverändert lassen: leer lassen)" />
 						</p>
 						<p class="note">
-							Aktueller Passwort-Status: <span id="mqttPasswordStatus">wird geladen...</span>.
-							Leer lassen, um ein bereits gesetztes Passwort unverändert zu lassen.
+							Passwort: <span id="mqttPasswordStatus">wird geladen...</span>. Leer lassen, um es nicht zu ändern.
 						</p>
 						<p>
 							<button class="btn-primary" onclick="saveMqttSettings()">MQTT-Einstellungen speichern</button>
@@ -1903,12 +1883,7 @@
 				<div id="systemTabMultiDevice" class="hidden">
 					<div style="text-align: left;">
 						<p class="note">
-							Verbindet dieses Gerät mit einem oder mehreren anderen Split-Flap-Geräten im selben
-							WLAN, sodass ein <strong>Primärgerät</strong> seinen Anzeigetext über die eigenen
-							Units hinaus auf zusätzliche <strong>Erweiterungsgeräte</strong> ausdehnt oder sie
-							denselben Text anzeigen lässt (Spiegeln). Standalone
-							(Standard) entspricht dem bisherigen Verhalten unverändert. Details: <code>multiple-units.md</code>
-							im Projekt-Repository.
+							Verbindet dieses Gerät mit anderen Split-Flap-Geräten im selben WLAN: Ein <strong>Primärgerät</strong> verteilt seinen Text auf <strong>Erweiterungsgeräte</strong> (Erweitern) oder lässt sie denselben Text zeigen (Spiegeln).
 						</p>
 						<p>
 							<label for="deviceRoleSelect">Rolle dieses Geräts</label>
@@ -1929,10 +1904,7 @@
 								</select>
 							</p>
 							<p class="note">
-								Erweitern: der Text läuft über alle Geräte hinweg.
-								Spiegeln: jedes Erweiterungsgerät zeigt dieselben Zeichen wie dieses Gerät, mit
-								derselben Animation. Hat es weniger Units, wird rechts abgeschnitten, hat es mehr,
-								bleiben die übrigen leer. Gilt für alle eingetragenen Geräte.
+								Erweitern: Der Text läuft über alle Geräte. Spiegeln: Jedes Erweiterungsgerät zeigt dieselben Zeichen; bei weniger Units wird rechts abgeschnitten, bei mehr bleiben die übrigen leer. Gilt für alle Geräte.
 							</p>
 						</div>
 						<p>
@@ -1943,10 +1915,7 @@
 						<div id="extensionDevicesSection" class="hidden">
 							<hr>
 							<p class="note">
-								Bis zu 4 Erweiterungsgeräte, je per Hostname (z.B. <code>split-flap.local</code>)
-								oder IP-Adresse. Leere Felder bleiben unbelegt. Ein Erweiterungsgerät braucht keine
-								eigene Konfiguration außer der Rolle "Erweiterungsgerät" - dieses Gerät fragt
-								dessen Unit-Anzahl selbst periodisch ab.
+								Bis zu 4 Erweiterungsgeräte, per Hostname (z.B. <code>split-flap.local</code>) oder IP-Adresse. Dort muss nur die Rolle "Erweiterungsgerät" eingestellt sein.
 							</p>
 							<p>
 								<label for="extensionHost0">Erweiterungsgerät 1</label>
@@ -1975,7 +1944,7 @@
 							<p>
 								<label>Status</label>
 								<span class="note" style="display: inline; margin-left: var(--space-sm);">
-									(aktualisiert sich automatisch, solange dieser Tab geöffnet ist)
+									(aktualisiert sich automatisch)
 								</span>
 							</p>
 							<div id="extensionDevicesStatus">wird geladen...</div>
@@ -1986,18 +1955,10 @@
 				<div id="systemTabHelp" class="hidden">
 					<div style="text-align: left;">
 						<p class="note">
-							Kompakte Referenz aller HTTP-Endpunkte dieses Geräts, mit fertigen
-							<code>curl</code>-Beispielen zum Kopieren. <code>192.168.1.50</code> ist ein
-							Platzhalter - durch die tatsächliche IP dieses Geräts ersetzen (oder,
-							sofern das Netzwerk mDNS unterstützt, <code>split-flap.local</code>).
-							Ausführlichere Erklärungen (Antwortformate, Fehlerfälle, Hintergründe)
-							stehen in <code>ESPMaster/API.md</code> im Quellcode-Repository.
+							Alle HTTP-Endpunkte mit <code>curl</code>-Beispielen. <code>192.168.1.50</code> durch die IP dieses Geräts ersetzen (oder <code>split-flap.local</code>). Details: <code>ESPMaster/API.md</code> im Repository.
 						</p>
 						<p class="note">
-							<code>X-OTA-Password</code> wird nur gebraucht, wenn ein Passwort gesetzt ist UND
-							der jeweilige Endpunkt nicht als "öffentlich" freigeschaltet wurde (siehe Reiter
-							"Zugriffskontrolle"). Ist kein Passwort gesetzt, kann der Header überall weggelassen
-							werden.
+							<code>X-OTA-Password</code> ist nur nötig, wenn ein Passwort gesetzt und der Endpunkt nicht freigegeben ist (Reiter "Zugriffskontrolle").
 						</p>
 
 						<p class="api-group-title">Anzeige &amp; Text</p>
@@ -2011,7 +1972,7 @@
 						<details class="api-endpoint">
 							<summary>POST /api/settings</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Einstellungen ändern (Modus, Text, Ausrichtung, Tempo, Animation, Countdown, geplante Nachricht, Rotation) - das, was das Hauptformular sendet. <code>animationMode</code> (<code>simultaneous</code>/<code>left-to-right</code>/<code>right-to-left</code>/<code>outside-in</code>/<code>inside-out</code>) + <code>animationStaggerMs</code> (0-1000) steuern den zeitversetzten Start pro Unit - <code>simultaneous</code> ist der Standard und verhält sich wie vor diesem Feature.</p>
+								<p class="api-endpoint-desc">Einstellungen ändern, wie das Hauptformular. <code>animationMode</code> (<code>simultaneous</code>/<code>left-to-right</code>/<code>right-to-left</code>/<code>outside-in</code>/<code>inside-out</code>) und <code>animationStaggerMs</code> (0-1000) steuern den versetzten Start je Unit; Standard ist <code>simultaneous</code>.</p>
 								<pre class="api-code">curl -X POST http://192.168.1.50/api/settings \
   --data "deviceMode=text&amp;inputText=HELLO&amp;alignment=center&amp;flapSpeed=80&amp;animationMode=left-to-right&amp;animationStaggerMs=200"</pre>
 							</div>
@@ -2019,7 +1980,7 @@
 						<details class="api-endpoint">
 							<summary>POST /api/text</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Schlanker Text-Push für Automatisierungen (Webhooks, Home Assistant, Kurzbefehle) - ohne <code>duration</code> dauerhaft, mit <code>duration</code> (Sekunden) nur vorübergehend.</p>
+								<p class="api-endpoint-desc">Text setzen für Automatisierungen (Webhooks, Home Assistant, Kurzbefehle): ohne <code>duration</code> dauerhaft, mit <code>duration</code> (Sekunden) vorübergehend.</p>
 								<pre class="api-code"># Dauerhaft
 curl -X POST http://192.168.1.50/api/text --data "text=HELLO WORLD"
 
@@ -2030,7 +1991,7 @@ curl -X POST http://192.168.1.50/api/text --data "text=BRB&amp;duration=10"</pre
 						<details class="api-endpoint">
 							<summary>GET /api/rotation-items</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Alle aktuellen Rotation-Einträge inkl. per-Item-Overrides für Ausrichtung und Animation (<code>alignment</code>/<code>animationMode</code>/<code>animationStaggerMs</code> - leer/<code>-1</code> = Standard erben). Ändern über <code>POST /api/settings</code> mit dem Parameter <code>rotationItems</code> (komplette Liste, kein Patch).</p>
+								<p class="api-endpoint-desc">Alle Rotationseinträge inkl. eigener Ausrichtung und Animation (<code>alignment</code>/<code>animationMode</code>/<code>animationStaggerMs</code>; leer/<code>-1</code> = Standard). Ändern über <code>POST /api/settings</code> mit <code>rotationItems</code> (immer die komplette Liste).</p>
 								<pre class="api-code">curl http://192.168.1.50/api/rotation-items</pre>
 							</div>
 						</details>
@@ -2055,7 +2016,7 @@ curl -X POST http://192.168.1.50/api/text --data "text=BRB&amp;duration=10"</pre
 						<details class="api-endpoint">
 							<summary>GET /api/units</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Live-Status und Kalibrierungs-Offset jeder Unit. Mit <code>?detail=1</code> zusätzlich Phase/Fortschritt sowie zwei Diagnose-Zähler (unerwartete Sensor-Trigger, ungewöhnlich lange Home-Suchen) - Details in <code>API.md</code>. <b>Bis alle Units die neue Firmware haben, zeigen diese beiden Zähler bei älteren Units <code>255</code> statt echter Daten.</b></p>
+								<p class="api-endpoint-desc">Status und Kalibrierungs-Offset jeder Unit. Mit <code>?detail=1</code> zusätzlich Phase, Fortschritt und zwei Diagnose-Zähler (siehe <code>API.md</code>); Units mit älterer Firmware melden dort <code>255</code>.</p>
 								<pre class="api-code">curl http://192.168.1.50/api/units
 curl "http://192.168.1.50/api/units?detail=1"</pre>
 							</div>
@@ -2063,7 +2024,7 @@ curl "http://192.168.1.50/api/units?detail=1"</pre>
 						<details class="api-endpoint">
 							<summary>POST /api/units?action=rescan|offset|reset</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc"><code>rescan</code> braucht kein Passwort; <code>offset</code>/<code>reset</code> schon (sofern ein Passwort gesetzt und diese Kategorie nicht öffentlich ist).</p>
+								<p class="api-endpoint-desc"><code>rescan</code> braucht kein Passwort, <code>offset</code>/<code>reset</code> schon (außer die Kategorie ist freigegeben).</p>
 								<pre class="api-code">curl -X POST "http://192.168.1.50/api/units?action=rescan"
 
 curl -X POST "http://192.168.1.50/api/units?action=offset" \
@@ -2076,7 +2037,7 @@ curl -X POST "http://192.168.1.50/api/units?action=reset" \
 						<details class="api-endpoint">
 							<summary>GET /api/i2c-scan</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Roher I2C-Bus-Scan (Diagnose auf niedriger Ebene, unabhängig von den bereits bekannten Units).</p>
+								<p class="api-endpoint-desc">Roher I2C-Bus-Scan, unabhängig von den bekannten Units.</p>
 								<pre class="api-code">curl http://192.168.1.50/api/i2c-scan</pre>
 							</div>
 						</details>
@@ -2092,7 +2053,7 @@ curl -X POST "http://192.168.1.50/api/units?action=reset" \
 						<details class="api-endpoint">
 							<summary>POST /api/timezone</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Zeitzone ändern - braucht Netzwerkzugriff (fragt live bei ezTimes Zeitzonen-Dienst nach).</p>
+								<p class="api-endpoint-desc">Zeitzone ändern; fragt online beim ezTime-Zeitzonendienst nach.</p>
 								<pre class="api-code">curl -X POST http://192.168.1.50/api/timezone \
   -H "X-OTA-Password: splitflap" --data "timezone=Europe/Berlin"</pre>
 							</div>
@@ -2102,7 +2063,7 @@ curl -X POST "http://192.168.1.50/api/units?action=reset" \
 						<details class="api-endpoint">
 							<summary>POST /api/wifi?action=reset|scan|connect</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc"><code>reset</code> löscht die WLAN-Zugangsdaten und startet in den AP-Konfigurationsmodus neu. <code>connect</code> trennt sofort und verbindet mit dem neuen Netzwerk - fällt nach ca. 15s automatisch zurück, falls das nicht klappt.</p>
+								<p class="api-endpoint-desc"><code>reset</code> löscht die WLAN-Zugangsdaten und startet im AP-Konfigurationsmodus neu. <code>connect</code> trennt sofort und kehrt nach ca. 15 s zurück, falls das neue WLAN nicht klappt.</p>
 								<pre class="api-code">curl -X POST "http://192.168.1.50/api/wifi?action=reset" -H "X-OTA-Password: splitflap"
 curl -X POST "http://192.168.1.50/api/wifi?action=scan" -H "X-OTA-Password: splitflap"
 curl -X POST "http://192.168.1.50/api/wifi?action=connect" \
@@ -2112,7 +2073,7 @@ curl -X POST "http://192.168.1.50/api/wifi?action=connect" \
 						<details class="api-endpoint">
 							<summary>GET /api/wifi?type=scan-result|connect-status</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Zum Abfragen des Ergebnisses von <code>action=scan</code> bzw. <code>action=connect</code> oben.</p>
+								<p class="api-endpoint-desc">Ergebnis von <code>action=scan</code> bzw. <code>action=connect</code>.</p>
 								<pre class="api-code">curl "http://192.168.1.50/api/wifi?type=scan-result" -H "X-OTA-Password: splitflap"
 curl "http://192.168.1.50/api/wifi?type=connect-status" -H "X-OTA-Password: splitflap"</pre>
 							</div>
@@ -2120,7 +2081,7 @@ curl "http://192.168.1.50/api/wifi?type=connect-status" -H "X-OTA-Password: spli
 						<details class="api-endpoint">
 							<summary>POST /api/wifi?action=set-hostname</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Ändert den mDNS-Namen (<code>http://&lt;name&gt;.local/</code>) - nur Buchstaben, Ziffern und Bindestriche (nicht am Anfang/Ende), 1-63 Zeichen. Startet den mDNS-Responder sofort neu, kein Neustart nötig.</p>
+								<p class="api-endpoint-desc">Ändert den mDNS-Namen (<code>http://&lt;name&gt;.local/</code>): Buchstaben, Ziffern und Bindestriche, 1-63 Zeichen. Wirkt sofort, ohne Neustart.</p>
 								<pre class="api-code">curl -X POST "http://192.168.1.50/api/wifi?action=set-hostname" \
   -H "X-OTA-Password: splitflap" --data "hostname=mein-split-flap"</pre>
 							</div>
@@ -2130,7 +2091,7 @@ curl "http://192.168.1.50/api/wifi?type=connect-status" -H "X-OTA-Password: spli
 						<details class="api-endpoint">
 							<summary>GET/POST /api/mqtt</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">MQTT-Broker-Einstellungen + Home-Assistant-Auto-Discovery (Text-Entity + Heap-Sensor). Nur vorhanden, wenn <code>MQTT_ENABLE</code> einkompiliert ist (Standard). Passwort-Feld beim POST optional weglassen, um es unverändert zu lassen.</p>
+								<p class="api-endpoint-desc">MQTT-Broker und Home-Assistant-Auto-Discovery (nur mit <code>MQTT_ENABLE</code>, Standard). Ohne Passwort-Feld bleibt das Passwort unverändert.</p>
 								<pre class="api-code">curl http://192.168.1.50/api/mqtt
 
 curl -X POST http://192.168.1.50/api/mqtt \
@@ -2143,7 +2104,7 @@ curl -X POST http://192.168.1.50/api/mqtt \
 						<details class="api-endpoint">
 							<summary>POST /api/ota-password</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Passwort und/oder Zugriffskontroll-Häkchen ändern - <code>currentPassword</code> ist immer Pflicht. Leeres <code>newPassword=</code> deaktiviert den Schutz global.</p>
+								<p class="api-endpoint-desc">Passwort und/oder Freigaben ändern; <code>currentPassword</code> ist immer Pflicht. Leeres <code>newPassword=</code> schaltet den Schutz ab.</p>
 								<pre class="api-code"># Nur Passwort ändern
 curl -X POST http://192.168.1.50/api/ota-password \
   --data "currentPassword=splitflap&amp;newPassword=neuesPasswort"
@@ -2162,7 +2123,7 @@ curl -X POST http://192.168.1.50/api/ota-password \
 						<details class="api-endpoint">
 							<summary>GET /api/diag?type=health|heap|tcp|test</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Vier Diagnose-Checks: Lebenszeichen, freier Heap, TCP-Verbindungspool, Basis-Konnektivität.</p>
+								<p class="api-endpoint-desc">Diagnose: Lebenszeichen, freier Heap, TCP-Verbindungen, Konnektivität.</p>
 								<pre class="api-code">curl "http://192.168.1.50/api/diag?type=health"
 curl "http://192.168.1.50/api/diag?type=heap"
 curl "http://192.168.1.50/api/diag?type=tcp"</pre>
@@ -2185,7 +2146,7 @@ curl "http://192.168.1.50/api/diag?type=tcp"</pre>
 						<details class="api-endpoint">
 							<summary>POST /api/debug-mode</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Debug-Modus (Boot-Log-Seite, Fehlerstatus, Ladeprotokoll) ein-/ausschalten - bleibt über Neustarts hinweg gespeichert.</p>
+								<p class="api-endpoint-desc">Debug-Modus (Boot-Log-Seite, Fehlerstatus, Ladeprotokoll) ein/aus; bleibt nach einem Neustart erhalten.</p>
 								<pre class="api-code">curl -X POST http://192.168.1.50/api/debug-mode \
   -H "X-OTA-Password: splitflap" --data "enabled=true"</pre>
 							</div>
@@ -2202,7 +2163,7 @@ curl "http://192.168.1.50/api/diag?type=tcp"</pre>
 						<details class="api-endpoint">
 							<summary>POST /api/web-file</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Ersetzt die Web-Oberfläche (<code>index.html.gz</code>) einzeln, ohne komplettes Dateisystem-Reflash.</p>
+								<p class="api-endpoint-desc">Ersetzt nur die Web-Oberfläche (<code>index.html.gz</code>).</p>
 								<pre class="api-code">gzip -9 -k -c index.html > index.html.gz
 curl -X POST http://192.168.1.50/api/web-file \
   -H "X-OTA-Password: splitflap" \
@@ -2212,7 +2173,7 @@ curl -X POST http://192.168.1.50/api/web-file \
 						<details class="api-endpoint">
 							<summary>POST /api/units/firmware</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Lädt eine kompilierte Unit-Firmware (<code>.bin</code>) hoch - speichert sie nur, sendet sie noch nicht an eine Unit.</p>
+								<p class="api-endpoint-desc">Lädt eine Unit-Firmware (<code>.bin</code>) hoch, ohne sie schon an eine Unit zu senden.</p>
 								<pre class="api-code">curl -X POST http://192.168.1.50/api/units/firmware \
   -H "X-OTA-Password: splitflap" -F "firmware=@Unit.bin"</pre>
 							</div>
@@ -2220,7 +2181,7 @@ curl -X POST http://192.168.1.50/api/web-file \
 						<details class="api-endpoint">
 							<summary>POST /api/units/firmware-push?action=push|probe</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc"><code>push</code> sendet die zuvor hochgeladene Firmware per I2C an eine Unit. <code>probe</code> prüft nur, ob/wo eine Unit im Bootloader antwortet und schreibt selbst nichts an sie - erfordert aber seit Code_REVIEW_V5.md #03 dasselbe Passwort wie <code>push</code>, weil es die Unit über <code>requestUnitEnterBootloader()</code> tatsächlich neu startet.</p>
+								<p class="api-endpoint-desc"><code>push</code> sendet die hochgeladene Firmware per I2C an eine Unit. <code>probe</code> prüft nur, ob die Unit im Bootloader antwortet, und schreibt nichts; da es die Unit neu startet, braucht es ebenfalls das Passwort.</p>
 								<pre class="api-code">curl -X POST http://192.168.1.50/api/units/firmware-push \
   -H "X-OTA-Password: splitflap" --data "action=push&amp;id=0"
 
@@ -2231,7 +2192,7 @@ curl -X POST http://192.168.1.50/api/units/firmware-push \
 						<details class="api-endpoint">
 							<summary>POST /api/firmware-start / -chunk / -finish</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Browser-/Skript-basiertes ESPMaster-Firmware-Update in drei Schritten - <code>-chunk</code> je Aufruf max. 4096 Byte, erst nach Antwort den nächsten senden.</p>
+								<p class="api-endpoint-desc">ESPMaster-Firmware-Update in drei Schritten; je <code>-chunk</code> höchstens 4096 Byte, den nächsten erst nach der Antwort senden.</p>
 								<pre class="api-code">SIZE=$(stat -c%s ESPMaster.ino.bin)
 curl -X POST http://192.168.1.50/api/firmware-start \
   -H "X-OTA-Password: splitflap" --data "size=$SIZE"
@@ -2258,7 +2219,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			</div>
 			<div class="modal-body">
 				<form onsubmit="submitLogin(); return false;" style="text-align: left;">
-					<p class="note">Dieses Gerät ist mit einem Passwort geschützt. Die Anmeldung bleibt in diesem Browser 90 Tage nach der letzten Nutzung erhalten.</p>
+					<p class="note">Dieses Gerät ist passwortgeschützt. Die Anmeldung gilt in diesem Browser bis 90 Tage nach der letzten Nutzung.</p>
 					<p>
 						<label for="loginPassword">Passwort</label>
 						<br>
@@ -2286,19 +2247,13 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					<button onclick="loadUnits()" class="btn-small">Refresh</button>
 				</div>
 				<p class="note-muted" style="text-align: left; padding: 0;">
-					Units werden automatisch beim Start von ESPMaster über I2C erkannt (fortlaufend ab Adresse 0).
-					Falls eine Unit erst nachträglich angeschlossen oder repariert wurde, hier "Rescan Units"
-					klicken statt neu zu starten.
+					Units werden beim Start über I2C erkannt. Eine später angeschlossene oder reparierte Unit mit "Rescan Units" einbinden, ohne Neustart.
 				</p>
 
 				<div id="containerUnits"></div>
 
 				<div class="info-box" style="margin-left: 0; margin-right: 0;">
-					<b>Wie funktioniert das?</b> Der Offset ist die Nullposition der Trommel relativ zum
-					Hall-Sensor, in Motorschritten. Ein guter Startwert liegt meist um die <b>100</b>. Nach dem
-					Speichern fährt die Einheit sofort eine komplette Umdrehung, um sich mit dem neuen Offset neu
-					zu kalibrieren - das ist normal und dauert ein paar Sekunden. Prüfe danach, ob die Leerzeichen-Klappe
-					exakt in der Anzeige steht, und passe den Wert bei Bedarf weiter an.
+					<b>Offset:</b> Nullposition der Trommel relativ zum Hall-Sensor in Motorschritten, meist um <b>100</b>. Nach dem Speichern kalibriert sich die Unit mit einer Umdrehung neu. Steht die Leerzeichen-Klappe danach nicht exakt, den Wert nachjustieren.
 				</div>
 			</div>
 		</div>
@@ -2328,13 +2283,10 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						</p>
 						<hr>
 						<p>
-							Lädt eine kompilierte <code>.bin</code>-Datei (Sketch, exportiert über
-							<i>Sketch &gt; Export compiled Binary</i> in der Arduino IDE) direkt per Browser
-							auf das ESPMaster-Modul hoch. Kein Arduino IDE oder USB-Kabel nötig.
+							Lädt eine kompilierte <code>.bin</code>-Datei (Arduino IDE: <i>Sketch &gt; Export compiled Binary</i>) direkt auf das ESPMaster-Modul, ohne USB-Kabel.
 						</p>
 						<p class="note-danger">
-							<b>Während des Uploads nicht die Stromversorgung trennen oder die Seite schließen.</b>
-							Schlägt der Upload fehl, bleibt die aktuell laufende Firmware unverändert aktiv.
+							<b>Während des Uploads Strom nicht trennen und Seite nicht schließen.</b> Schlägt er fehl, bleibt die bisherige Firmware aktiv.
 						</p>
 
 						<p>
@@ -2358,17 +2310,10 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 					<div id="firmwareTabUnits" class="hidden">
 						<p>
-							Überträgt ein kompiliertes <code>Unit.ino</code>-Firmware-Image (rohes
-							AVR-Flash-<code>.bin</code>, siehe <code>Unit/BOOTLOADER_SETUP.md</code>) über I2C
-							auf eine einzelne Unit. Setzt voraus, dass diese Unit bereits einmalig mit dem
-							twiboot-Bootloader per ISP-Programmer vorbereitet wurde.
+							Überträgt eine kompilierte Unit-Firmware (<code>.bin</code>, siehe <code>Unit/BOOTLOADER_SETUP.md</code>) per I2C auf Units. Jede Unit braucht dafür einmalig den twiboot-Bootloader (per ISP).
 						</p>
 						<p class="note-danger">
-							<b>Units werden immer nacheinander aktualisiert, nie gleichzeitig.</b> Während der
-							Übertragung Stromversorgung nicht unterbrechen. Schlägt die Verifikation fehl, bleibt
-							die bisherige Firmware der betroffenen Unit unangetastet (die kritische erste Seite
-							wird immer zuletzt geschrieben, erst wenn alles andere geprüft ist) - bei "Alle Units"
-							wird nach einem Fehlschlag nicht mit den restlichen Units weitergemacht.
+							<b>Während der Übertragung Strom nicht trennen.</b> Units werden nacheinander aktualisiert. Schlägt die Prüfung fehl, behält die Unit ihre bisherige Firmware; bei "Alle Units" bricht das Update dann ab.
 						</p>
 
 						<p>
@@ -2406,9 +2351,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 								<button id="unitBootloaderProbeButton" class="btn-small" onclick="probeUnitBootloader()">Bootloader-Info abrufen</button>
 							</p>
 							<p class="note">
-								"Bootloader-Info abrufen" versetzt die Ziel-Unit kurz in den Bootloader-Modus (die
-								App wird dabei unterbrochen, die Unit re-homed danach neu) und liest u.a. die
-								twiboot-Versionskennung aus - kein Firmware-Schreibvorgang.
+								"Bootloader-Info abrufen" startet die Unit kurz im Bootloader, liest dessen Version aus und startet sie neu. Es wird nichts geschrieben.
 							</p>
 						</div>
 
@@ -4297,7 +4240,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				alert("Bitte eine SSID auswählen oder eingeben.");
 				return;
 			}
-			if (!confirm("Mit \"" + ssid + "\" verbinden? Die Verbindung zum aktuellen Netzwerk wird dabei sofort getrennt, noch bevor feststeht, ob die neuen Zugangsdaten funktionieren.")) {
+			if (!confirm("Mit \"" + ssid + "\" verbinden? Die aktuelle WLAN-Verbindung wird sofort getrennt.")) {
 				return;
 			}
 
@@ -4545,7 +4488,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 			var newPassword = newPasswordInput.value;
 			if (!newPassword) {
-				alert("Bitte ein neues Passwort eingeben (oder \"Passwortschutz komplett deaktivieren\" für ein leeres Passwort).");
+				alert("Bitte ein neues Passwort eingeben (zum Abschalten: \"Passwortschutz komplett deaktivieren\").");
 				return;
 			}
 
@@ -4606,7 +4549,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			var currentPasswordInput = document.getElementById("accessControlCurrentPassword");
 			var statusEl = document.getElementById("otaPasswordChangeStatus");
 
-			if (!confirm("Passwortschutz wirklich komplett deaktivieren? Danach ist JEDE Aktion - auch Firmware-Updates und WLAN-Verwaltung - ohne Passwort im Netzwerk erreichbar.")) {
+			if (!confirm("Passwortschutz wirklich deaktivieren? Dann ist alles, auch Firmware-Update und WLAN-Verwaltung, ohne Passwort erreichbar.")) {
 				return;
 			}
 
@@ -5634,7 +5577,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				return;
 			}
 
-			if (!confirm("Firmware jetzt auf Unit " + select.value + " übertragen? Die Unit macht dabei eine kurze Zwangspause und startet danach neu.")) {
+			if (!confirm("Firmware jetzt auf Unit " + select.value + " übertragen? Die Unit startet danach neu.")) {
 				return;
 			}
 
@@ -5692,7 +5635,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				return;
 			}
 
-			if (!confirm("Firmware jetzt nacheinander auf alle " + units.length + " Unit(s) übertragen? Das kann je nach Anzahl mehrere Minuten dauern.")) {
+			if (!confirm("Firmware jetzt nacheinander auf alle " + units.length + " Unit(s) übertragen? Das kann mehrere Minuten dauern.")) {
 				return;
 			}
 
@@ -5811,7 +5754,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				return;
 			}
 
-			if (!confirm("Unit " + select.value + " kurz in den Bootloader versetzen, um dessen Version auszulesen? Die App wird dabei unterbrochen und rehomed danach neu.")) {
+			if (!confirm("Unit " + select.value + " kurz in den Bootloader versetzen, um die Version auszulesen? Die Unit startet danach neu.")) {
 				return;
 			}
 
