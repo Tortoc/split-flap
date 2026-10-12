@@ -139,6 +139,10 @@ const char* wifiDirectPassword = "";
 //flash ones) is then unauthenticated, no exceptions, regardless of the toggles below.
 String otaPassword = "";
 const char* otaPasswordPath = "/otapassword.txt";
+//Only one delivery of the web page at a time - see GET "/"'s comment (BUILD_INFO Punkt 237).
+bool pageDeliveryActive = false;
+unsigned long pageDeliveryStartedAt = 0;
+
 //POST /api/rotation-items body, collected into one buffer - see that handler's comment. 8000
 //matches the old form field limit; the text budget (STORED_TEXT_BUDGET) is checked afterwards.
 #define ROTATION_BODY_MAX 8000
@@ -1150,6 +1154,26 @@ void setup() {
         request->send(503, "text/plain", "Low memory, try again shortly");
         return;
       }
+
+      //One page delivery at a time (BUILD_INFO Punkt 237): two AsyncFileResponses streaming
+      //index.html.gz from LittleFS at the same time reproducibly hung the device (hardware
+      //watchdog reset after ~8s) or crashed it in lfs_mlist_isopen() (LittleFS's list of open
+      //files corrupted) - sequential deliveries, parallel non-file requests and uploads alone were
+      //all stable. A second visitor during a delivery gets a tiny page that reloads itself after a
+      //second. Released when the delivering connection ends; the time limit only guards against
+      //a release that somehow never happens.
+      if (pageDeliveryActive && millis() - pageDeliveryStartedAt < 30000) {
+        AsyncWebServerResponse *busyResponse = request->beginResponse(503, "text/html",
+          String(F("<!DOCTYPE html><meta http-equiv=\"refresh\" content=\"1\"><p>Einen Moment ...</p>")));
+        busyResponse->addHeader("Retry-After", "1");
+        request->send(busyResponse);
+        return;
+      }
+      pageDeliveryActive = true;
+      pageDeliveryStartedAt = millis();
+      request->onDisconnect([]() {
+        pageDeliveryActive = false;
+      });
 
       //Actually stored gzip-compressed as "/index.html.gz" - AsyncFileResponse falls back to that
       //automatically and adds Content-Encoding: gzip itself.
