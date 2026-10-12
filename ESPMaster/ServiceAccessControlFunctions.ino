@@ -19,7 +19,7 @@ bool isRequestAllowedWithoutPassword(bool categoryPublicToggle) {
 //CSRF: browsers attach the cookie to cross-site requests too, so a cookie only counts together
 //with the X-Requested-With header the web UI sends on every request - another site can't add that
 //header without a CORS preflight this device never approves. SameSite=Strict on top.
-//LOGIN_SESSION_* constants, loginSessionsPath and lastFailedLoginAt live in ESPMaster.ino (used by
+//LOGIN_SESSION_* constants, loginSessionsPath and failedLogins live in ESPMaster.ino (used by
 //its /api/login handlers, and that file is compiled first).
 struct LoginSession {
   char token[33] = ""; //32 hex chars (128 random bits), "" = free slot
@@ -138,17 +138,32 @@ int findValidLoginSession(AsyncWebServerRequest* request) {
 }
 
 //Every admin-password comparison goes through here - login form, X-OTA-Password header,
-///api/extension-display and the password change - so one wrong guess anywhere pauses ALL of them
-//for 2 seconds (security review 2026-10-12, Live-02). While paused nothing is compared, not even
-//a correct password. Sessions are unaffected.
-int checkAdminPassword(const String &provided) {
-  if (lastFailedLoginAt != 0 && millis() - lastFailedLoginAt < 2000) {
+///api/extension-display and the password change - so a wrong guess on any of them pauses all of
+//them for 2 seconds (security review 2026-10-12, Live-02), but only for the sender that guessed
+//wrong (OW-09). While paused nothing is compared, not even a correct password. If
+//FAILED_LOGIN_SLOTS senders are paused at once, any further sender waits too - so more addresses
+//don't buy more guesses per second than that. Sessions are unaffected.
+int checkAdminPassword(AsyncWebServerRequest* request, const String &provided) {
+  uint32_t ip = request->client() != nullptr ? (uint32_t)request->client()->remoteIP() : 0;
+  unsigned long now = millis();
+  int freeSlot = -1;
+  for (int i = 0; i < FAILED_LOGIN_SLOTS; i++) {
+    bool paused = failedLogins[i].at != 0 && now - failedLogins[i].at < FAILED_LOGIN_PAUSE_MS;
+    if (paused && failedLogins[i].ip == ip) {
+      return PASSWORD_THROTTLED;
+    }
+    if (!paused && freeSlot == -1) {
+      freeSlot = i;
+    }
+  }
+  if (freeSlot == -1) {
     return PASSWORD_THROTTLED;
   }
   if (constantTimeEquals(provided, String(otaPassword))) {
     return PASSWORD_OK;
   }
-  lastFailedLoginAt = millis();
+  failedLogins[freeSlot].ip = ip;
+  failedLogins[freeSlot].at = now == 0 ? 1 : now;
   return PASSWORD_WRONG;
 }
 
@@ -159,7 +174,7 @@ bool requestIsAuthenticated(AsyncWebServerRequest* request) {
     return true;
   }
   String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-  if (providedPassword != "" && checkAdminPassword(providedPassword) == PASSWORD_OK) {
+  if (providedPassword != "" && checkAdminPassword(request, providedPassword) == PASSWORD_OK) {
     return true;
   }
   bool fromWebUi = request->hasHeader("X-Requested-With") && request->getHeader("X-Requested-With")->value() == "splitflap";

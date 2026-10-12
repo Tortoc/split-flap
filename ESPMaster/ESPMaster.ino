@@ -179,7 +179,17 @@ void freeRotationBody(bool ownBuffer) {
 #define LOGIN_SESSION_COOKIE_MAX_AGE 34560000UL //400 days, the most browsers accept
 const char* loginSessionsPath = "/loginsessions.json";
 
-unsigned long lastFailedLoginAt = 0; //throttles every admin-password check after a wrong one, see checkAdminPassword()
+//Wrong admin-password attempts per sender IP, see checkAdminPassword(): each sender waits
+//FAILED_LOGIN_PAUSE_MS after its own wrong guess. Per sender, not global - otherwise anyone could
+//lock out every header login (and the primary's display pushes) with one wrong guess every 2 s
+//(security review 2026-10-12, OW-09).
+#define FAILED_LOGIN_SLOTS 8
+#define FAILED_LOGIN_PAUSE_MS 2000
+struct FailedLogin {
+  uint32_t ip = 0;
+  unsigned long at = 0; //millis() of the wrong guess, 0 = free slot
+};
+FailedLogin failedLogins[FAILED_LOGIN_SLOTS];
 //checkAdminPassword() results (ServiceAccessControlFunctions.ino).
 #define PASSWORD_OK 0
 #define PASSWORD_WRONG 1
@@ -2905,7 +2915,7 @@ void setup() {
     webServer.on("/api/extension-display", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (String(otaPassword) != "") {
         String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-        int passwordCheck = checkAdminPassword(providedPassword);
+        int passwordCheck = checkAdminPassword(request, providedPassword);
         if (passwordCheck != PASSWORD_OK) {
           request->send(passwordCheck == PASSWORD_THROTTLED ? 429 : 401, "text/plain", "Invalid password");
           return;
@@ -3285,9 +3295,9 @@ void setup() {
         request->send(200, "text/plain", "No password set");
         return;
       }
-      //Slows down guessing - one wrong attempt anywhere blocks further attempts for 2 seconds.
+      //Slows down guessing - a wrong attempt blocks that sender's further attempts for 2 seconds.
       String password = request->hasParam("password", true) ? request->getParam("password", true)->value() : "";
-      int passwordCheck = checkAdminPassword(password);
+      int passwordCheck = checkAdminPassword(request, password);
       if (passwordCheck == PASSWORD_THROTTLED) {
         request->send(429, "text/plain", "Too many attempts, wait a moment");
         return;
@@ -3319,7 +3329,7 @@ void setup() {
       }
 
       String currentPasswordValue = request->getParam("currentPassword", true)->value();
-      int passwordCheck = checkAdminPassword(currentPasswordValue);
+      int passwordCheck = checkAdminPassword(request, currentPasswordValue);
       if (passwordCheck == PASSWORD_THROTTLED) {
         request->send(429, "text/plain", "Too many attempts, wait a moment");
         return;

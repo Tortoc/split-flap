@@ -52,7 +52,7 @@ current password itself) don't take sessions.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/session` | Public. `{"loginRequired": bool, "loggedIn": bool}` - `loginRequired` is true while a password is set and at least one category is still protected. |
-| `POST /api/login` | Form param `password`, header `X-Requested-With: splitflap`. 200 + `Set-Cookie` on success, 401 wrong password, 429 for 2 s after a wrong attempt. |
+| `POST /api/login` | Form param `password`, header `X-Requested-With: splitflap`. 200 + `Set-Cookie` on success, 401 wrong password, 429 for 2 s after a wrong attempt from the same address (since 4.10.16 per sender IP; every password check - login, `X-OTA-Password`, extension push, password change - shares it; if 8 senders are paused at once, new ones wait too). |
 | `POST /api/logout` | Ends the request's own session and clears the cookie. |
 
 **Global on/off switch**: an empty password (the default before you set one) means every endpoint
