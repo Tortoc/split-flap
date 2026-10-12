@@ -3465,6 +3465,8 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 				var contentWrapper = document.createElement("div");
 				contentWrapper.className = "ls-rotation-item-content";
+				//Characters one display line has - the most a text, prefix or suffix can ever show.
+				var displayCharacters = displayWidth > 0 ? displayWidth : (unitCount > 0 ? Number(unitCount) : 20);
 
 				if (item.type === "clock" || item.type === "date") {
 					var formatInput = document.createElement("input");
@@ -3483,7 +3485,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					prefixInput.type = "text";
 					prefixInput.className = "ls-rotation-text ls-rotation-text-15";
 					prefixInput.placeholder = "Präfix";
-					prefixInput.maxLength = 40;
+					prefixInput.maxLength = displayCharacters;
 					prefixInput.value = item.prefix;
 					prefixInput.oninput = (function (i) { return function () { updateRotationItemField(i, "prefix", this.value); }; })(index);
 					countFieldsWrapper.appendChild(prefixInput);
@@ -3503,7 +3505,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					suffixInput.type = "text";
 					suffixInput.className = "ls-rotation-text ls-rotation-text-15";
 					suffixInput.placeholder = "Suffix";
-					suffixInput.maxLength = 40;
+					suffixInput.maxLength = displayCharacters;
 					suffixInput.value = item.suffix;
 					suffixInput.oninput = (function (i) { return function () { updateRotationItemField(i, "suffix", this.value); }; })(index);
 					countFieldsWrapper.appendChild(suffixInput);
@@ -3512,7 +3514,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				} else { //"text" - single line only, hence limited to the display's width
 					//As wide as the display has characters (monospace, so 1ch = 1 character) and no
 					//more characters than that.
-					var textWidth = displayWidth > 0 ? displayWidth : (unitCount > 0 ? unitCount : 20);
+					var textWidth = displayCharacters;
 					contentWrapper.className += " ls-rotation-item-content-fixed";
 					var textInput = document.createElement("input");
 					textInput.type = "text";
