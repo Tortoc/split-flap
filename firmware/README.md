@@ -31,7 +31,7 @@ firmware/
 ## Build-Konfiguration (wie diese Dateien entstanden sind)
 
 ⚠️ **Immer `./compile-espmaster.sh` benutzen, nicht `arduino-cli compile` von Hand tippen.**
-Dieses Skript (in diesem Ordner) verdrahtet `:eesz=4M1M` und die `-Wl,--wrap=...`-Flags fest -
+Dieses Skript (in diesem Ordner) verdrahtet `:eesz=4M1M,mmu=4816H` und die `-Wl,--wrap=...`-Flags fest -
 beide wurden in der Vergangenheit schon mehrfach vergessen (zuletzt 2026-09-16), mit stundenlanger Fehlsuche in
 die falsche Richtung (WLAN-Flakiness) als Folge. Die Befehle unten sind nur zur Dokumentation,
 was das Skript intern tut - nicht zum Abtippen.
@@ -51,9 +51,9 @@ oben) - Recovery nur per seriellem `arduino-cli upload`/`esptool.py`, das
 unabhängig vom aktuell laufenden (falschen) Partitionsschema an absoluten
 Flash-Adressen schreibt.
 
-**ESPMaster** (`esp8266:esp8266:generic`, Flash-Layout `eesz=4M1M`):
+**ESPMaster** (`esp8266:esp8266:generic`, Flash-Layout `eesz=4M1M`, MMU `4816H`):
 ```bash
-arduino-cli compile --fqbn "esp8266:esp8266:generic:eesz=4M1M" \
+arduino-cli compile --fqbn "esp8266:esp8266:generic:eesz=4M1M,mmu=4816H" \
   --build-property "compiler.c.elf.extra_flags=-Wl,--wrap=_Znwj -Wl,--wrap=tcp_accept" \
   ESPMaster
 ```
@@ -68,6 +68,13 @@ lauter Build-Fehler). Der Mechanismus selbst ist nicht neu erfunden: dieser Core
 dasselbe `-Wl,-wrap,...`-Muster bereits selbst für zwei andere Symbole
 (`compiler.c.elf.flags` in `platform.txt`: `-Wl,-wrap,system_restart_local
 -Wl,-wrap,spi_flash_read`).
+
+**`mmu=4816H` (seit ESPMaster 4.10.11):** 16 KB Flash-Cache statt 32 KB, dafür 48 KB IRAM; was
+der Code davon nicht belegt (~19 KB), wird ein zweiter Heap. Dort landet nur, was gezielt unter
+`HeapSelectIram` allokiert wird - derzeit die beiden 4-KB-OTA-Puffer, damit ein Upload bei
+offener Weboberfläche nicht am knappen DRAM scheitert (Code-Review V7, Punkt C). Fehlt die
+Option, baut der Sketch trotzdem; die Puffer liegen dann wie früher im DRAM. Freier IRAM-Heap:
+`iramFree` in `GET /api/diag?type=heap`.
 
 **Änderung 2026-08-21:** vorher `eesz=1M128`
 (~438KB OTA-Slot). Per neuem `/api/heap`-Diagnosefeld

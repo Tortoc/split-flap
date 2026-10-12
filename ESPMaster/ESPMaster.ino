@@ -107,6 +107,7 @@
 #include <memory> //std::shared_ptr - PendingRequestSlot's per-generation disconnect flag
 #include <atomic> //std::atomic<bool> - same reason
 #include <user_interface.h> //struct rst_info, for the crash reporter
+#include <umm_malloc/umm_heap_select.h> //HeapSelectIram - OTA buffers in the second heap (mmu=4816H)
 #include <lwip/priv/tcp_priv.h> //exposes tcp_active_pcbs/etc. for /api/tcp-status
 #include "Classes.h"
 #include "ServiceMemoryReserveFunctions.h"
@@ -1830,7 +1831,7 @@ void setup() {
       }
 
       if (type == "heap") {
-        char buf[520]; //worst-case length checked by hand incl. the longest wifiDisconnectReason string, +100 for the temporary diag fields
+        char buf[540]; //worst-case length checked by hand incl. the longest wifiDisconnectReason string, +100 for the temporary diag fields, +20 for iramFree
         //getFlashChipRealSize() = physical chip's own SPI ID (ground truth); getFlashChipSize() =
         //what the eesz board-menu choice assumes - a mismatch means the compiled layout is wrong.
         //rtc/rtcOsf: the only way to verify the optional DS3231's detection/trustworthiness
@@ -1844,14 +1845,22 @@ void setup() {
         //ASSOC_EXPIRE disconnects observable over HTTP without a live serial capture.
         const char* lastDisconnectReasonForDiag = wifiDisconnectCount > 0 ? lastWifiDisconnectReason.c_str() : "none";
         long lastDisconnectSecAgo = wifiDisconnectCount > 0 ? (long)((millis() - lastWifiDisconnectAt) / 1000) : -1;
-        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s rtc=%s rtcOsf=%u resetReason=%s uptimeSec=%lu wifiDisconnects=%lu lastWifiDisconnectReason=%s lastWifiDisconnectSecAgo=%ld minFreeHeap=%u minFreeHeapAtSec=%u minMaxBlock=%u freeHeapAtLastWifiDisconnect=%u")),
+        //iramFree: second heap in IRAM (mmu=4816H, OTA buffers), 0 if the build has none.
+        uint32_t iramFree = 0;
+#ifdef UMM_HEAP_IRAM
+        {
+          HeapSelectIram iramHeap;
+          iramFree = ESP.getFreeHeap();
+        }
+#endif
+        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s rtc=%s rtcOsf=%u resetReason=%s uptimeSec=%lu wifiDisconnects=%lu lastWifiDisconnectReason=%s lastWifiDisconnectSecAgo=%ld minFreeHeap=%u minFreeHeapAtSec=%u minMaxBlock=%u freeHeapAtLastWifiDisconnect=%u iramFree=%u")),
           ESP.getFreeHeap(), ESP.getHeapFragmentation(), ESP.getMaxFreeBlockSize(),
           ESP.getFlashChipRealSize(), ESP.getFlashChipSize(), ESP.getFlashChipId(), ESP.getChipId(),
           ESP.getSdkVersion(), ESP.getCoreVersion().c_str(),
           rtcPresent ? "present" : "absent", rtcOscillatorStopFlag ? 1 : 0,
           crashResetReasonText(ESP.getResetInfoPtr()->reason), millis() / 1000,
           wifiDisconnectCount, lastDisconnectReasonForDiag, lastDisconnectSecAgo,
-          diagMinFreeHeap, diagMinFreeHeapAtSec, diagMinMaxBlock, diagFreeHeapAtLastWifiDisconnect); //temporary diag, see diagMinFreeHeap
+          diagMinFreeHeap, diagMinFreeHeapAtSec, diagMinMaxBlock, diagFreeHeapAtLastWifiDisconnect, iramFree); //temporary diag, see diagMinFreeHeap
         request->send(200, "text/plain", buf);
         return;
       }
@@ -3739,7 +3748,20 @@ void loop() {
     uint32_t rounded = (otaBeginSize + 0xFFF) & 0xFFFFF000; //round up to a flash sector
     uint32_t updateSize = (rounded > 0 && rounded < maxSketchSpace) ? rounded : maxSketchSpace;
 
-    bool ok = Update.begin(updateSize, U_FLASH);
+    //Both 4KB OTA buffers (Update's internal sector buffer, allocated inside begin(), and
+    //otaChunkBuffer) go to the second heap in IRAM (mmu=4816H, code-review-V7 Punkt C) - an upload
+    //is started from the open web UI, exactly when DRAM is tightest. The heap selection is global,
+    //so these scopes stay yield-free and allocate nothing else. Falls back to DRAM if IRAM has no
+    //room (or the build lacks mmu=4816H, where HeapSelectIram is a no-op). free()/delete[] find the
+    //right heap by address, so nothing else changes.
+    bool ok;
+    {
+      HeapSelectIram iramHeap;
+      ok = Update.begin(updateSize, U_FLASH);
+    }
+    if (!ok && Update.getError() == UPDATE_ERROR_OOM) {
+      ok = Update.begin(updateSize, U_FLASH);
+    }
     if (ok) {
       otaBytesWritten = 0;
       //Allocated here, not statically - free heap on this device is chronically tight, no reason
@@ -3747,7 +3769,13 @@ void loop() {
       if (otaChunkBuffer != nullptr) {
         delete[] otaChunkBuffer; //shouldn't happen (always freed below before this runs again), don't leak if it somehow does
       }
-      otaChunkBuffer = new (std::nothrow) uint8_t[OTA_CHUNK_SIZE];
+      {
+        HeapSelectIram iramHeap;
+        otaChunkBuffer = new (std::nothrow) uint8_t[OTA_CHUNK_SIZE];
+      }
+      if (otaChunkBuffer == nullptr) {
+        otaChunkBuffer = new (std::nothrow) uint8_t[OTA_CHUNK_SIZE];
+      }
       ok = (otaChunkBuffer != nullptr);
       if (!ok) {
         SerialPrintln(F("Firmware upload: could not allocate chunk buffer"));
