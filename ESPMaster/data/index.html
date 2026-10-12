@@ -896,11 +896,9 @@
 			font-family: var(--font-mono);
 		}
 
-		/* Only as wide as the selected entry (field-sizing); browsers without it fall back to the
-		   width of the longest entry. */
+		/* Same width in every item: just wide enough for the longest entry ("Countdown"). */
 		select.ls-rotation-type {
 			width: auto;
-			field-sizing: content;
 		}
 
 		/* Rotation item: collapsible - a one-line summary, the labelled fields when expanded. */
@@ -3703,7 +3701,8 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				'<svg class="ls-rot-chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 6l6 6-6 6"></path></svg>';
 		}
 
-		//Makes every rotation text field exactly as wide as its maxLength in characters. Measured
+		//Makes every rotation text field as wide as its maxLength in characters, but at least 15
+		//characters wide (a 1- or 9-unit display would otherwise get a cramped field). Measured
 		//with the font the field really renders in - CSS's "ch" unit came out at 7px while a
 		//character of that monospace stack is 8.4px wide, which clipped the last characters.
 		function sizeRotationTextInputs() {
@@ -3711,7 +3710,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			document.querySelectorAll("input.ls-rotation-text").forEach(function (input) {
 				var style = getComputedStyle(input);
 				context.font = style.fontWeight + " " + style.fontSize + " " + style.fontFamily;
-				var textWidth = context.measureText("W".repeat(input.maxLength)).width;
+				var textWidth = context.measureText("W".repeat(Math.max(input.maxLength, 15))).width;
 				var chrome = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight) +
 					parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth);
 				input.style.width = Math.ceil(textWidth + chrome + 2) + "px"; //+2: room for the caret
