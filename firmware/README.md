@@ -54,7 +54,7 @@ Flash-Adressen schreibt.
 **ESPMaster** (`esp8266:esp8266:generic`, Flash-Layout `eesz=4M1M`, MMU `4816H`):
 ```bash
 arduino-cli compile --fqbn "esp8266:esp8266:generic:eesz=4M1M,mmu=4816H" \
-  --build-property "compiler.c.elf.extra_flags=-Wl,--wrap=_Znwj -Wl,--wrap=tcp_accept -Wl,--wrap=wifi_set_sleep_type" \
+  --build-property "compiler.c.elf.extra_flags=-Wl,--wrap=_Znwj -Wl,--wrap=tcp_accept" \
   ESPMaster
 ```
 **⚠️ Das `--build-property` mit den beiden `-Wl,--wrap=...`-Flags ist seit Punkt 207/209
@@ -68,12 +68,6 @@ lauter Build-Fehler). Der Mechanismus selbst ist nicht neu erfunden: dieser Core
 dasselbe `-Wl,-wrap,...`-Muster bereits selbst für zwei andere Symbole
 (`compiler.c.elf.flags` in `platform.txt`: `-Wl,-wrap,system_restart_local
 -Wl,-wrap,spi_flash_read`).
-
-**`-Wl,--wrap=wifi_set_sleep_type` (seit ESPMaster 4.10.13), ebenfalls Pflicht:**
-`ServiceWifiSleepFunctions.cpp` verhindert damit, dass `Update.begin()` den WLAN-Sleep-Modus
-mitten im Betrieb umschaltet - das ließ OTA-Uploads sporadisch hängen (Hardware-Watchdog, BUILD_INFO
-Punkt 252). Ohne das Flag schlägt der Build mit "undefined reference to
-`__real_wifi_set_sleep_type`" fehl.
 
 **`mmu=4816H` (seit ESPMaster 4.10.11):** 16 KB Flash-Cache statt 32 KB, dafür 48 KB IRAM; was
 der Code davon nicht belegt (~19 KB), wird ein zweiter Heap. Dort landet nur, was gezielt unter
