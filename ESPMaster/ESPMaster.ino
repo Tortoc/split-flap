@@ -1194,6 +1194,9 @@ void setup() {
       JsonDocument minimalDoc;
       minimalDoc["timezoneOffset"] = timezone.getOffset();
       minimalDoc["unitCount"] = unitsAmount;
+      //Characters one display line really has - own units, plus reachable extensions on a primary in
+      //extend mode. The web UI limits a rotation text item to this.
+      minimalDoc["displayWidth"] = combinedUnitsAmount();
       minimalDoc["alignment"] = alignment;
       minimalDoc["flapSpeed"] = flapSpeed;
       minimalDoc["animationMode"] = animationMode;
