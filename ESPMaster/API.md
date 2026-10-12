@@ -231,6 +231,11 @@ missing/wrong.
 | `countdownDateTimeUnix` | unix timestamp | Countdown target, only relevant for `deviceMode=countdown` |
 | `rotationItems` | JSON array (string) | Replaces the whole Rotation item list - see [`GET /api/rotation-items`](#get-apirotation-items) for the item schema. Only relevant for `deviceMode=rotation`, but can be sent regardless of the current mode. |
 
+**Stored text budget** (since ESPMaster 4.10.5): all scheduled message texts together, and
+separately all rotation item texts (`value`/`format`/`prefix`/`suffix`), may hold at most 4000
+characters - every stored text stays in RAM. A submission that would exceed it is rejected with
+`400` and leaves the existing list unchanged.
+
 When `scheduleEnabled=on` is present, this call adds a new entry to the scheduled-message queue
 (via `inputText` + `scheduledDateTimeUnix` + `scheduleShowIndefinitely`) rather than changing the
 live display immediately - remove one later via

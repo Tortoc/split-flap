@@ -171,7 +171,16 @@ bool replaceRotationItemsFromJson(const String &rotationItemsJson) {
   //blocking the rotation from ever progressing past it. Only the text type can be checked exactly
   //here - clock/date/countdown/countup render dynamic content checkRotation() bounds at runtime
   //instead. "" (mode) / -1 (stagger) means "inherit the global default".
+  unsigned int totalTextLength = 0;
   for (JsonVariant value : jsonDocument.as<JsonArray>()) {
+    //Every text field stays in RAM for as long as the list exists - see STORED_TEXT_BUDGET.
+    totalTextLength += strlen(value["value"] | "") + strlen(value["format"] | "") +
+      strlen(value["prefix"] | "") + strlen(value["suffix"] | "");
+    if (totalTextLength > STORED_TEXT_BUDGET) {
+      SerialPrintln(F("Rotation items JSON rejected: texts exceed STORED_TEXT_BUDGET - keeping the existing list, not touching it"));
+      return false;
+    }
+
     String itemType = value["type"] | DEVICE_MODE_TEXT;
     if (itemType == DEVICE_MODE_TEXT && isMessageTooLongToRender(String((const char*)(value["value"] | "")))) {
       SerialPrintln(F("Rotation items JSON rejected: a text item needs more lines than fit to display - keeping the existing list, not touching it"));

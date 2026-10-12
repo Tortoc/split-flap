@@ -620,11 +620,19 @@ int rotationItemCount = 0;
 //generous for the device's actual use case (a handful of upcoming scheduled messages), while
 //keeping the worst-case JSON blob a small, bounded size.
 #define SCHEDULED_MESSAGES_MAX 20
+//Total characters of all scheduled message texts (and, separately, of all rotation item texts)
+//kept in RAM. Every stored text stays on the heap permanently - a hardware test with 16-20
+//messages of 440 characters (~7-9 KB) left only ~9-11 KB free: the device hung while saving the
+//17th and an OTA update failed at the connection gate (BUILD_INFO Punkt 233). 4000 characters keep
+//~16 KB free after boot. New/changed entries that would exceed it are rejected; a list already on
+//flash that's bigger (saved by an older firmware) is still loaded in full.
+#define STORED_TEXT_BUDGET 4000
 //Results of addAndPersistScheduledMessage()/removeScheduledMessage()
 //(ServiceScheduledMessageFunctions.ino) - declared here since this file is compiled first.
 #define SCHEDULE_ADDED 0
 #define SCHEDULE_REJECTED 1 //already due/in the past, or SCHEDULED_MESSAGES_MAX reached
 #define SCHEDULE_SAVE_FAILED 2
+#define SCHEDULE_OVER_BUDGET 3 //all texts together would exceed STORED_TEXT_BUDGET
 #define SCHEDULE_REMOVED 0
 #define SCHEDULE_NOT_FOUND 1
 //Results of readJsonArrayFile() (ServiceFileSystemFunctions.ino) - see its own comment.
@@ -1599,6 +1607,10 @@ void setup() {
               SerialPrintln(F("Scheduled Message rejected: date/time is not in the future, or too many are already scheduled"));
               scheduledMessageRejected = true;
               scheduledMessageRejectionReason = "the scheduled date/time has already passed, or the maximum number of scheduled messages is already reached - it was NOT scheduled.";
+            } else if (scheduleResult == SCHEDULE_OVER_BUDGET) {
+              SerialPrintln(F("Scheduled Message rejected: stored text budget exceeded"));
+              scheduledMessageRejected = true;
+              scheduledMessageRejectionReason = String(F("all scheduled messages together would exceed ")) + String(STORED_TEXT_BUDGET) + F(" characters - delete or shorten some first. It was NOT scheduled.");
             } else if (scheduleResult == SCHEDULE_SAVE_FAILED) {
               SerialPrintln(F("Scheduled Message rejected: could not be saved"));
               scheduledMessageRejected = true;
@@ -1662,9 +1674,9 @@ void setup() {
           : "the text needs more lines than fit to display and was NOT applied - the previous mode/text is unchanged.";
 
         if (rotationItemsUpdateRejected && anyTextRejected) {
-          request->send(400, "text/plain", "OK, but the submitted rotation items were rejected (invalid JSON, a text item needs more lines than fit, or not enough memory to save them) AND " + textRejectionReason);
+          request->send(400, "text/plain", String(F("OK, but the submitted rotation items were rejected (invalid JSON, a text item needs more lines than fit, all texts together over ")) + String(STORED_TEXT_BUDGET) + F(" characters, or not enough memory to save them) AND ") + textRejectionReason);
         } else if (rotationItemsUpdateRejected) {
-          request->send(400, "text/plain", "OK, but the submitted rotation items were rejected (invalid JSON, a text item needs more lines than fit to ever display, or not enough memory to save them) and were NOT applied - the existing rotation list is unchanged.");
+          request->send(400, "text/plain", String(F("OK, but the submitted rotation items were rejected (invalid JSON, a text item needs more lines than fit to ever display, all texts together over ")) + String(STORED_TEXT_BUDGET) + F(" characters, or not enough memory to save them) and were NOT applied - the existing rotation list is unchanged."));
         } else if (anyTextRejected) {
           request->send(400, "text/plain", "OK, but " + textRejectionReason);
         } else {

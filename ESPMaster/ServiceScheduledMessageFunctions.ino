@@ -2,6 +2,10 @@
 //list couldn't be saved (e.g. out of memory) - it's reloaded from the untouched file, so memory
 //and flash agree again and the message counts as not scheduled (CODE_REVIEW_V7.md #1).
 int addAndPersistScheduledMessage(String scheduledText, long scheduledDateTimeUnix, bool showIndefinitely) {
+  //An entry with the same timestamp gets replaced by addScheduledMessage(), so its text doesn't count.
+  if (scheduledMessagesTextLength(scheduledDateTimeUnix) + scheduledText.length() > STORED_TEXT_BUDGET) {
+    return SCHEDULE_OVER_BUDGET;
+  }
   if (!addScheduledMessage(scheduledText, scheduledDateTimeUnix, showIndefinitely)) {
     return SCHEDULE_REJECTED;
   }
@@ -10,6 +14,19 @@ int addAndPersistScheduledMessage(String scheduledText, long scheduledDateTimeUn
     return SCHEDULE_SAVE_FAILED;
   }
   return SCHEDULE_ADDED;
+}
+
+//Total length of all stored scheduled message texts, leaving out the one at excludeTimestamp - see
+//STORED_TEXT_BUDGET.
+unsigned int scheduledMessagesTextLength(long excludeTimestamp) {
+  unsigned int total = 0;
+  for (int i = 0; i < scheduledMessages.size(); i++) {
+    ScheduledMessage scheduledMessage = scheduledMessages.get(i);
+    if (scheduledMessage.ScheduledDateTimeUnix != excludeTimestamp) {
+      total += scheduledMessage.Message.length();
+    }
+  }
+  return total;
 }
 
 //Replace/add a scheduled message. Returns whether it was actually added, so the caller can report
