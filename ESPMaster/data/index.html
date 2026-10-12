@@ -89,8 +89,21 @@
 		}
 
 		p {
-			font-size: 1rem;
+			font-size: var(--text-sm);
 			line-height: 1.5;
+		}
+
+		/* Typography inlineCode */
+		:not(pre) > code {
+			font: 500 var(--text-sm) var(--font-mono);
+			background: var(--muted);
+			padding: .1rem .3rem;
+			border-radius: var(--radius-md);
+		}
+
+		/* A read-only value (version, hostname, status ...) next to its label */
+		.ls-value-mono {
+			font: var(--text-sm) var(--font-mono);
 		}
 
 		hr {
@@ -162,6 +175,7 @@
 		input[type=text],
 		input[type=password],
 		input[type=date],
+		input[type=time],
 		input[type=datetime-local],
 		input[type=number],
 		input[type=file],
@@ -191,11 +205,22 @@
 			background-color: var(--popover);
 		}
 
+		/* Field width: one consistent width for every text-like field and select, instead of
+		   the former mix of 50%, 250px, 120px and 100px. */
 		input[type=text],
+		input[type=password],
 		input[type=date],
+		input[type=datetime-local],
+		input[type=number],
+		input[type=file],
 		select {
-			width: 50%;
-			margin: 10px;
+			width: 100%;
+			max-width: 20rem;
+			margin: 0;
+		}
+
+		input[type=time] {
+			width: auto;
 		}
 
 		input::placeholder,
@@ -225,6 +250,9 @@
 		input[type=radio],
 		input[type=checkbox] {
 			accent-color: var(--primary);
+			width: 1rem;
+			height: 1rem;
+			margin: 0;
 		}
 
 		input[type=datetime-local] {
@@ -496,7 +524,7 @@
 			background: transparent;
 			border: 1px solid transparent;
 			color: var(--muted-foreground);
-			font-size: 1.25rem;
+			font-size: 1rem;
 			line-height: 1;
 			padding: 2px 8px;
 			border-radius: var(--radius);
@@ -778,11 +806,8 @@
 		   going out to the physical letters. */
 		input.ls-display-input {
 			width: 100%;
+			max-width: none;
 			font-family: var(--font-mono);
-			font-size: 1.15rem;
-			letter-spacing: .03em;
-			padding: 14px 16px;
-			margin: 0;
 		}
 
 		.ls-field-meta {
@@ -874,6 +899,7 @@
 
 		.ls-rotation-item-countfields input[type="text"] {
 			flex: 1;
+			width: auto;
 			min-width: 70px;
 		}
 
@@ -1002,8 +1028,8 @@
 
 		.actions {
 			display: flex;
-			justify-content: center;
-			padding: 0 10px 10px;
+			justify-content: flex-start;
+			padding: 0 0 var(--space-sm);
 		}
 
 		@media (max-width: 700px) {
@@ -1443,7 +1469,7 @@
 					<!-- Addition to (not a replacement for) "Reset WiFi" above - connects to a new
 					     network directly from here, without rebooting into the AP captive portal. -->
 					<div style="text-align: left; margin-top: 1.5em;">
-						<p style="font-size: 1rem;">
+						<p>
 							Direkt mit einem anderen WLAN verbinden, ohne das Gerät in den
 							AP-Konfigurationsmodus zu versetzen.
 						</p>
@@ -1463,17 +1489,17 @@
 							<p>
 								<label for="wifiConnectSsidSelect">Gefundene Netzwerke</label>
 								<br>
-								<select id="wifiConnectSsidSelect" onchange="document.getElementById('wifiConnectSsid').value = this.value" style="padding: 8px 10px; border-radius: 4px; width: 250px;"></select>
+								<select id="wifiConnectSsidSelect" onchange="document.getElementById('wifiConnectSsid').value = this.value"></select>
 							</p>
 							<p>
 								<label for="wifiConnectSsid">SSID</label>
 								<br>
-								<input type="text" id="wifiConnectSsid" style="width: 250px;" placeholder="Netzwerkname" />
+								<input type="text" id="wifiConnectSsid" placeholder="Netzwerkname" />
 							</p>
 							<p>
 								<label for="wifiConnectPassword">Passwort</label>
 								<br>
-								<input type="password" id="wifiConnectPassword" autocomplete="off" style="width: 250px;" />
+								<input type="password" id="wifiConnectPassword" autocomplete="off" />
 							</p>
 							<p>
 								<button id="wifiConnectButton" type="button" class="btn-primary" onclick="connectToWifi()">Verbinden</button>
@@ -1485,7 +1511,7 @@
 					<!-- mDNS-Hostname - eigener Abschnitt, nicht Teil des Verbinden-Formulars oben, da
 					     unabhängig vom aktuellen WLAN gültig (überlebt einen Netzwerkwechsel). -->
 					<div style="text-align: left; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1.5em;">
-						<p style="font-size: 1rem;">
+						<p>
 							Das Gerät ist zusätzlich zur IP-Adresse über einen Namen im lokalen Netzwerk
 							erreichbar (sofern Router/Client mDNS unterstützen - nicht garantiert in jedem
 							Netzwerk).
@@ -1493,12 +1519,12 @@
 						<p>
 							<label>Aktueller DNS-Name</label>
 							<br>
-							<span id="currentMdnsHostnameDisplay" style="font-family: monospace; font-size: 1.1rem;">wird geladen...</span><span style="font-family: monospace;">.local</span>
+							<span id="currentMdnsHostnameDisplay" class="ls-value-mono">wird geladen...</span><span class="ls-value-mono">.local</span>
 						</p>
 						<p>
 							<label for="newMdnsHostname">DNS-Name ändern</label>
 							<br>
-							<input type="text" id="newMdnsHostname" style="width: 250px;" placeholder="z.B. split-flap" maxlength="63" />
+							<input type="text" id="newMdnsHostname" placeholder="z.B. split-flap" maxlength="63" />
 							<button class="btn-primary" onclick="changeMdnsHostname()">Ändern</button>
 						</p>
 						<p class="note">
@@ -1514,12 +1540,12 @@
 						<p>
 							<label>Aktuell eingestellte Zeitzone</label>
 							<br>
-							<span id="currentTimezoneDisplay" style="font-family: monospace; font-size: 1.1rem;">wird geladen...</span>
+							<span id="currentTimezoneDisplay" class="ls-value-mono">wird geladen...</span>
 						</p>
 						<p>
 							<label for="newTimezone">Zeitzone ändern</label>
 							<br>
-							<input type="text" id="newTimezone" style="width: 250px;" placeholder="z.B. Europe/Berlin" />
+							<input type="text" id="newTimezone" placeholder="z.B. Europe/Berlin" />
 							<button class="btn-primary" onclick="changeTimezone()">Ändern</button>
 						</p>
 						<p class="note">
@@ -1548,9 +1574,9 @@
 						<p>
 							<label for="quietHoursStart">Von</label>
 							<br>
-							<input type="time" id="quietHoursStart" style="width: 120px;" />
+							<input type="time" id="quietHoursStart" />
 							<label for="quietHoursEnd" style="margin-left: 1em;">Bis</label>
-							<input type="time" id="quietHoursEnd" style="width: 120px;" />
+							<input type="time" id="quietHoursEnd" />
 						</p>
 						<p>
 							<button id="quietHoursSaveButton" class="btn-primary" onclick="saveQuietHours()">Speichern</button>
@@ -1577,7 +1603,7 @@
 						<p>
 							<label>Passwortschutz</label>
 							<br>
-							<span id="accessControlPasswordStatus" style="font-family: monospace; font-size: 1.1rem;">wird geladen...</span>
+							<span id="accessControlPasswordStatus" class="ls-value-mono">wird geladen...</span>
 						</p>
 						<p class="note">
 							Ein leeres Passwort schaltet den Schutz <b>komplett</b> ab - dann sind auch
@@ -1588,12 +1614,12 @@
 						<p>
 							<label for="accessControlCurrentPassword">Aktuelles Passwort</label>
 							<br>
-							<input type="password" id="accessControlCurrentPassword" autocomplete="current-password" style="width: 250px;" placeholder="(leer, falls noch kein Passwort gesetzt)" />
+							<input type="password" id="accessControlCurrentPassword" autocomplete="current-password" placeholder="(leer, falls noch kein Passwort gesetzt)" />
 						</p>
 						<p>
 							<label for="accessControlNewPassword">Neues Passwort setzen</label>
 							<br>
-							<input type="password" id="accessControlNewPassword" autocomplete="new-password" style="width: 250px;" placeholder="Neues Passwort" />
+							<input type="password" id="accessControlNewPassword" autocomplete="new-password" placeholder="Neues Passwort" />
 							<button class="btn-primary" onclick="changeOtaPassword()">Ändern</button>
 						</p>
 						<p>
@@ -1636,22 +1662,22 @@
 						<p>
 							<label for="mqttBrokerHost">Broker-Host</label>
 							<br>
-							<input type="text" id="mqttBrokerHost" style="width: 250px;" placeholder="z.B. 192.168.1.50 oder mqtt.local" />
+							<input type="text" id="mqttBrokerHost" placeholder="z.B. 192.168.1.50 oder mqtt.local" />
 						</p>
 						<p>
 							<label for="mqttBrokerPort">Broker-Port</label>
 							<br>
-							<input type="number" id="mqttBrokerPort" style="width: 100px;" min="1" max="65535" placeholder="1883" />
+							<input type="number" id="mqttBrokerPort" min="1" max="65535" placeholder="1883" />
 						</p>
 						<p>
 							<label for="mqttUsername">Benutzername (optional)</label>
 							<br>
-							<input type="text" id="mqttUsername" autocomplete="off" style="width: 250px;" />
+							<input type="text" id="mqttUsername" autocomplete="off" />
 						</p>
 						<p>
 							<label for="mqttPassword">Passwort (optional)</label>
 							<br>
-							<input type="password" id="mqttPassword" autocomplete="new-password" style="width: 250px;" placeholder="(unverändert lassen: leer lassen)" />
+							<input type="password" id="mqttPassword" autocomplete="new-password" placeholder="(unverändert lassen: leer lassen)" />
 						</p>
 						<p class="note">
 							Aktueller Passwort-Status: <span id="mqttPasswordStatus">wird geladen...</span>.
@@ -1663,7 +1689,7 @@
 						<p>
 							<label>Verbindungsstatus</label>
 							<br>
-							<span id="mqttConnectionStatus" style="font-family: monospace; font-size: 1.1rem;">wird geladen...</span>
+							<span id="mqttConnectionStatus" class="ls-value-mono">wird geladen...</span>
 						</p>
 						<p id="mqttSettingsChangeStatus"></p>
 					</div>
@@ -1682,7 +1708,7 @@
 						<p>
 							<label for="deviceRoleSelect">Rolle dieses Geräts</label>
 							<br>
-							<select id="deviceRoleSelect" style="width: 250px;" onchange="showDeviceRoleSections(this.value)">
+							<select id="deviceRoleSelect" onchange="showDeviceRoleSections(this.value)">
 								<option value="standalone">Eigenständig (Standard)</option>
 								<option value="primary">Primärgerät</option>
 								<option value="extension">Erweiterungsgerät</option>
@@ -1692,7 +1718,7 @@
 							<p>
 								<label for="extensionLinkModeSelect">Art des Verbunds</label>
 								<br>
-								<select id="extensionLinkModeSelect" style="width: 250px;">
+								<select id="extensionLinkModeSelect">
 									<option value="extend">Erweitern</option>
 									<option value="mirror">Spiegeln</option>
 								</select>
@@ -1720,22 +1746,22 @@
 							<p>
 								<label for="extensionHost0">Erweiterungsgerät 1</label>
 								<br>
-								<input type="text" id="extensionHost0" style="width: 250px;" placeholder="z.B. 192.168.1.51 oder split-flap-2.local" />
+								<input type="text" id="extensionHost0" placeholder="z.B. 192.168.1.51 oder split-flap-2.local" />
 							</p>
 							<p>
 								<label for="extensionHost1">Erweiterungsgerät 2</label>
 								<br>
-								<input type="text" id="extensionHost1" style="width: 250px;" />
+								<input type="text" id="extensionHost1" />
 							</p>
 							<p>
 								<label for="extensionHost2">Erweiterungsgerät 3</label>
 								<br>
-								<input type="text" id="extensionHost2" style="width: 250px;" />
+								<input type="text" id="extensionHost2" />
 							</p>
 							<p>
 								<label for="extensionHost3">Erweiterungsgerät 4</label>
 								<br>
-								<input type="text" id="extensionHost3" style="width: 250px;" />
+								<input type="text" id="extensionHost3" />
 							</p>
 							<p>
 								<button class="btn-primary" onclick="saveExtensionDevices()">Erweiterungsgeräte speichern</button>
@@ -2093,10 +2119,10 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						<p>
 							<label>Aktuelle Firmware-Version</label>
 							<br>
-							<span id="currentEspVersionDisplay" style="font-family: var(--font-mono); font-size: 1.1rem;">wird geladen...</span>
+							<span id="currentEspVersionDisplay" class="ls-value-mono">wird geladen...</span>
 						</p>
 						<hr>
-						<p style="font-size: 1rem;">
+						<p>
 							Lädt eine kompilierte <code>.bin</code>-Datei (Sketch, exportiert über
 							<i>Sketch &gt; Export compiled Binary</i> in der Arduino IDE) direkt per Browser
 							auf das ESPMaster-Modul hoch. Kein Arduino IDE oder USB-Kabel nötig.
@@ -2126,7 +2152,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					</div>
 
 					<div id="firmwareTabUnits" class="hidden">
-						<p style="font-size: 1rem;">
+						<p>
 							Überträgt ein kompiliertes <code>Unit.ino</code>-Firmware-Image (rohes
 							AVR-Flash-<code>.bin</code>, siehe <code>Unit/BOOTLOADER_SETUP.md</code>) über I2C
 							auf eine einzelne Unit. Setzt voraus, dass diese Unit bereits einmalig mit dem
@@ -2170,9 +2196,9 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 							<p>
 								<label for="unitFirmwareTarget">Ziel-Unit</label>
 								<br>
-								<select id="unitFirmwareTarget" style="padding: 8px 10px; border-radius: 4px;"></select>
+								<select id="unitFirmwareTarget"></select>
 								<button id="unitFirmwarePushButton" class="btn-primary" onclick="pushUnitFirmware()">Update starten</button>
-								<button id="unitBootloaderProbeButton" onclick="probeUnitBootloader()">Bootloader-Info abrufen</button>
+								<button id="unitBootloaderProbeButton" class="btn-small" onclick="probeUnitBootloader()">Bootloader-Info abrufen</button>
 							</p>
 							<p class="note">
 								"Bootloader-Info abrufen" versetzt die Ziel-Unit kurz in den Bootloader-Modus (die
