@@ -64,6 +64,13 @@ void fillLoginSessionJson(int index, JsonDocument &element) {
 
 //Ticked from loop() - flash writes stay out of the AsyncWebServer callbacks that change sessions.
 //Packs the used slots to the front first, so the file only lists real sessions.
+//Saves right away (logout, password change) instead of waiting for loop(). True once the file
+//matches memory.
+bool saveLoginSessionsNow() {
+  saveLoginSessionsIfDirty();
+  return !loginSessionsDirty;
+}
+
 void saveLoginSessionsIfDirty() {
   if (!loginSessionsDirty) {
     return;
@@ -130,6 +137,21 @@ int findValidLoginSession(AsyncWebServerRequest* request) {
   return -1;
 }
 
+//Every admin-password comparison goes through here - login form, X-OTA-Password header,
+///api/extension-display and the password change - so one wrong guess anywhere pauses ALL of them
+//for 2 seconds (security review 2026-10-12, Live-02). While paused nothing is compared, not even
+//a correct password. Sessions are unaffected.
+int checkAdminPassword(const String &provided) {
+  if (lastFailedLoginAt != 0 && millis() - lastFailedLoginAt < 2000) {
+    return PASSWORD_THROTTLED;
+  }
+  if (constantTimeEquals(provided, String(otaPassword))) {
+    return PASSWORD_OK;
+  }
+  lastFailedLoginAt = millis();
+  return PASSWORD_WRONG;
+}
+
 //Password header, or a session cookie sent by the web UI itself (see the CSRF note above).
 //Always true while no password is set.
 bool requestIsAuthenticated(AsyncWebServerRequest* request) {
@@ -137,7 +159,7 @@ bool requestIsAuthenticated(AsyncWebServerRequest* request) {
     return true;
   }
   String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-  if (providedPassword != "" && constantTimeEquals(providedPassword, String(otaPassword))) {
+  if (providedPassword != "" && checkAdminPassword(providedPassword) == PASSWORD_OK) {
     return true;
   }
   bool fromWebUi = request->hasHeader("X-Requested-With") && request->getHeader("X-Requested-With")->value() == "splitflap";

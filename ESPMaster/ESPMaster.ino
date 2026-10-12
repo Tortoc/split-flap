@@ -173,7 +173,11 @@ void freeRotationBody(bool ownBuffer) {
 #define LOGIN_SESSION_COOKIE_MAX_AGE 34560000UL //400 days, the most browsers accept
 const char* loginSessionsPath = "/loginsessions.json";
 
-unsigned long lastFailedLoginAt = 0; //throttles POST /api/login after a wrong password
+unsigned long lastFailedLoginAt = 0; //throttles every admin-password check after a wrong one, see checkAdminPassword()
+//checkAdminPassword() results (ServiceAccessControlFunctions.ino).
+#define PASSWORD_OK 0
+#define PASSWORD_WRONG 1
+#define PASSWORD_THROTTLED 2
 const char* mdnsHostnamePath = "/mdnsname.txt";
 
 //Unit 63's bootloader address is UNIT_BOOTLOADER_BASE_ADDRESS(0x29) + 63 = 0x68 - EXACTLY
@@ -2094,6 +2098,12 @@ void setup() {
           if (unitFirmwareFile) {
             unitFirmwareFile.close();
           }
+          //Authorized again right before the file replaces the stored one - a password change or
+          //revoked session during the transfer must not still let it through (CR-03).
+          if (!unitFirmwareUploadWriteFailed && String(otaPassword) != "" && !requestIsAuthenticated(request)) {
+            SerialPrintln(F("Unit firmware upload: no longer authorized at the end - discarding it"));
+            unitFirmwareUploadWriteFailed = true;
+          }
           if (unitFirmwareUploadWriteFailed) {
             LittleFS.remove(unitFirmwareTmpPath); //don't leave a corrupt temp file lying around
             SerialPrintln(F("DEBUG: Unit firmware upload failed, previously stored firmware (if any) left untouched"));
@@ -2425,6 +2435,11 @@ void setup() {
         if (final) {
           if (webUploadFile) {
             webUploadFile.close();
+          }
+          //Authorized again right before the swap - see /api/units/firmware (CR-03).
+          if (!webFileUploadWriteFailed && String(otaPassword) != "" && !requestIsAuthenticated(request)) {
+            SerialPrintln(F("Web file upload: no longer authorized at the end - discarding it"));
+            webFileUploadWriteFailed = true;
           }
           if (webFileUploadWriteFailed) {
             LittleFS.remove(webUploadTmpPath); //don't leave a corrupt temp file lying around
@@ -2791,8 +2806,9 @@ void setup() {
     webServer.on("/api/extension-display", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (String(otaPassword) != "") {
         String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-        if (!constantTimeEquals(providedPassword, String(otaPassword))) {
-          request->send(401, "text/plain", "Invalid password");
+        int passwordCheck = checkAdminPassword(providedPassword);
+        if (passwordCheck != PASSWORD_OK) {
+          request->send(passwordCheck == PASSWORD_THROTTLED ? 429 : 401, "text/plain", "Invalid password");
           return;
         }
       }
@@ -2851,7 +2867,10 @@ void setup() {
     //their last-known health-check status, POST replaces the whole list (same "client always
     //submits the complete list" convention as /api/rotation-items).
     webServer.on("/api/extension-devices", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
-      if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
+      //Changing the list always needs the password, whatever "settings public" says: a primary
+      //sends its admin password to every listed host, so a public write would hand it to any
+      //host an outsider adds (security review 2026-10-12, CR-01).
+      if (rejectIfPasswordRequired(request, request->method() == ASYNC_HTTP_GET && accessControlSettingsPublic)) return;
 
       if (request->method() == ASYNC_HTTP_GET) {
         JsonDocument doc;
@@ -3151,14 +3170,14 @@ void setup() {
         request->send(200, "text/plain", "No password set");
         return;
       }
-      //Slows down guessing - one wrong attempt blocks further attempts for 2 seconds.
-      if (lastFailedLoginAt != 0 && millis() - lastFailedLoginAt < 2000) {
+      //Slows down guessing - one wrong attempt anywhere blocks further attempts for 2 seconds.
+      String password = request->hasParam("password", true) ? request->getParam("password", true)->value() : "";
+      int passwordCheck = checkAdminPassword(password);
+      if (passwordCheck == PASSWORD_THROTTLED) {
         request->send(429, "text/plain", "Too many attempts, wait a moment");
         return;
       }
-      String password = request->hasParam("password", true) ? request->getParam("password", true)->value() : "";
-      if (!constantTimeEquals(password, String(otaPassword))) {
-        lastFailedLoginAt = millis();
+      if (passwordCheck == PASSWORD_WRONG) {
         SerialPrintln(F("Login rejected: wrong password"));
         request->send(401, "text/plain", "Wrong password");
         return;
@@ -3171,7 +3190,9 @@ void setup() {
 
     webServer.on("/api/logout", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       endLoginSession(request);
-      AsyncWebServerResponse *response = request->beginResponse(200, "text/plain", "OK");
+      //Saved before answering - see /api/ota-password (CR-02). The cookie is cleared either way.
+      bool saved = saveLoginSessionsNow();
+      AsyncWebServerResponse *response = request->beginResponse(saved ? 200 : 500, "text/plain", saved ? "OK" : "Logout could not be saved");
       response->addHeader("Set-Cookie", F(LOGIN_SESSION_COOKIE "=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict"));
       request->send(response);
     });
@@ -3183,7 +3204,12 @@ void setup() {
       }
 
       String currentPasswordValue = request->getParam("currentPassword", true)->value();
-      if (!constantTimeEquals(currentPasswordValue, String(otaPassword))) {
+      int passwordCheck = checkAdminPassword(currentPasswordValue);
+      if (passwordCheck == PASSWORD_THROTTLED) {
+        request->send(429, "text/plain", "Too many attempts, wait a moment");
+        return;
+      }
+      if (passwordCheck == PASSWORD_WRONG) {
         SerialPrintln(F("OTA password/access-control change rejected: current password incorrect"));
         request->send(401, "text/plain", "Current password is incorrect");
         return;
@@ -3194,9 +3220,16 @@ void setup() {
       //Omitting the param entirely (not present at all) leaves the password unchanged, so a
       //request that only wants to update the access-control toggles doesn't have to resend it.
       if (request->hasParam("newPassword", true)) {
+        //No session may outlive the password it was created with - revoked and saved BEFORE the
+        //new password is, so a power cut or failed write can't leave old sessions on flash that
+        //a reboot would accept again (security review 2026-10-12, CR-02).
+        endAllLoginSessions();
+        if (!saveLoginSessionsNow()) {
+          request->send(500, "text/plain", "Could not revoke existing sessions - password not changed");
+          return;
+        }
         otaPassword = request->getParam("newPassword", true)->value();
         writeFile(LittleFS, otaPasswordPath, otaPassword.c_str());
-        endAllLoginSessions(); //no session may outlive the password it was created with
         SerialPrintln(otaPassword == "" ? F("OTA password cleared - protection now globally OFF") : F("OTA password changed"));
       }
 
