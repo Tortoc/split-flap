@@ -147,12 +147,12 @@ void checkRotation() {
 //the complete list. Extra entries beyond ROTATION_ITEMS_MAX are dropped as a server-side backstop.
 //Returns whether the submitted JSON was actually valid and applied, so the caller can report
 //failure instead of always answering 200 OK.
-bool replaceRotationItemsFromJson(const String &rotationItemsJson) {
+bool replaceRotationItemsFromJson(const char *rotationItemsJson) {
   //Every individual item field below already uses ArduinoJson's `| default` fallback operator,
   //which never fails, so the only real validation concern is at the TOP level (malformed JSON, or
   //valid JSON that isn't an array) - only touch rotationItemCount/rotationItems/the persisted
   //file once that's confirmed, leaving the previous, working list untouched otherwise.
-  if (rotationItemsJson == "") {
+  if (rotationItemsJson == nullptr || rotationItemsJson[0] == '\0') {
     return true; //nothing submitted - leave the existing list exactly as it is, don't wipe it either
   }
 

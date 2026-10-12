@@ -127,6 +127,20 @@ const char* wifiDirectPassword = "";
 //flash ones) is then unauthenticated, no exceptions, regardless of the toggles below.
 String otaPassword = "";
 const char* otaPasswordPath = "/otapassword.txt";
+//POST /api/rotation-items body, collected into one buffer - see that handler's comment. 8000
+//matches the old form field limit; the text budget (STORED_TEXT_BUDGET) is checked afterwards.
+#define ROTATION_BODY_MAX 8000
+char* rotationBodyBuffer = nullptr;
+size_t rotationBodyLength = 0;
+AsyncWebServerRequest* rotationBodyOwner = nullptr;
+bool rotationBodyTooLarge = false;
+void freeRotationBody(bool ownBuffer) {
+  if (ownBuffer && rotationBodyBuffer != nullptr) {
+    free(rotationBodyBuffer);
+    rotationBodyBuffer = nullptr;
+  }
+}
+
 //Web UI login sessions - see ServiceAccessControlFunctions.ino's own comment.
 #define LOGIN_SESSIONS_MAX 8
 #define LOGIN_SESSION_DAYS 90
@@ -1584,7 +1598,15 @@ void setup() {
           //Invalid rotation JSON no longer wipes the existing list, but the response below says
           //so too rather than unconditionally claiming success. The rest of this request
           //(scheduled messages, mode switch, etc.) still gets processed normally.
-          if (replaceRotationItemsFromJson(newRotationItemsJson)) {
+          //An EMPTY value isn't "nothing submitted" here (the web UI always sent at least "[]"): the
+          //web server library assembles form values character by character and copies them twice,
+          //and on a fragmented heap a value of a few KB silently arrives as "". Report that instead of
+          //answering OK while keeping the old list (BUILD_INFO Punkt 235). The web UI now uses
+          //POST /api/rotation-items instead.
+          if (newRotationItemsJson.length() == 0) {
+            SerialPrintln(F("Rotation items arrived empty (too large for the available memory) - rejected"));
+            rotationItemsUpdateRejected = true;
+          } else if (replaceRotationItemsFromJson(newRotationItemsJson.c_str())) {
             SerialPrintln(F("Rotation Items Updated, count: ") + String(rotationItemCount));
           } else {
             rotationItemsUpdateRejected = true;
@@ -1687,9 +1709,73 @@ void setup() {
 
     //Own small handler, not sharing a stack frame with /api/settings - only fetched when the
     //Rotation tab is opened.
-    webServer.on("/api/rotation-items", HTTP_GET, [](AsyncWebServerRequest * request) {
-      //Element by element - see sendJsonArrayChunked()'s comment for why.
-      sendJsonArrayChunked(request, rotationItemCount, fillRotationItemJson);
+    //GET: the list, element by element - see sendJsonArrayChunked()'s comment for why.
+    //POST: replaces the whole list from a raw JSON array body (Content-Type: application/json) -
+    //collected into ONE buffer allocated at its final size, unlike a form field, which the web
+    //server library grows character by character and copies twice (lists of a few KB got lost that
+    //way, BUILD_INFO Punkt 235). One registration for both methods, same reason as /api/wifi's.
+    webServer.on("/api/rotation-items", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (request->method() == HTTP_GET) {
+        sendJsonArrayChunked(request, rotationItemCount, fillRotationItemJson);
+        return;
+      }
+      if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
+      bool owner = rotationBodyOwner == request;
+      if (owner) {
+        rotationBodyOwner = nullptr;
+      }
+      if (!owner || rotationBodyBuffer == nullptr) {
+        freeRotationBody(owner);
+        request->send(rotationBodyTooLarge ? 413 : 400, "text/plain", rotationBodyTooLarge
+          ? F("Body too large or not enough memory")
+          : F("Expected a JSON array body (Content-Type: application/json)"));
+        rotationBodyTooLarge = false;
+        return;
+      }
+      bool applied = replaceRotationItemsFromJson(rotationBodyBuffer);
+      freeRotationBody(true);
+      if (!applied) {
+        request->send(400, "text/plain", String(F("Rotation items rejected (invalid JSON, a text item needs more lines than fit, all texts together over ")) +
+          String(STORED_TEXT_BUDGET) + F(" characters, or not enough memory to save them) - the existing list is unchanged."));
+        return;
+      }
+      SerialPrintln(F("Rotation Items Updated via JSON body, count: ") + String(rotationItemCount));
+      request->send(200, "text/plain", "OK");
+    }, nullptr, [](AsyncWebServerRequest * request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (index == 0) {
+        //Only one body at a time, only for a caller that may change settings, and bounded - so an
+        //unauthenticated or oversized request never makes the device allocate anything.
+        if (rotationBodyOwner != nullptr || request->method() != HTTP_POST ||
+            !(isRequestAllowedWithoutPassword(accessControlSettingsPublic) || requestIsAuthenticated(request))) {
+          return;
+        }
+        if (total > ROTATION_BODY_MAX) {
+          rotationBodyTooLarge = true;
+          return;
+        }
+        rotationBodyBuffer = (char*)malloc(total + 1);
+        if (rotationBodyBuffer == nullptr) {
+          rotationBodyTooLarge = true;
+          return;
+        }
+        rotationBodyOwner = request;
+        rotationBodyLength = 0;
+        //A client that drops mid-body never reaches the request handler - release the buffer here
+        //instead of keeping it (and this endpoint) blocked forever. After a normal response the
+        //owner is already cleared, so this is a no-op then.
+        request->onDisconnect([request]() {
+          if (rotationBodyOwner == request) {
+            rotationBodyOwner = nullptr;
+            freeRotationBody(true);
+          }
+        });
+      }
+      if (rotationBodyOwner != request || rotationBodyBuffer == nullptr || rotationBodyLength + len > total) {
+        return;
+      }
+      memcpy(rotationBodyBuffer + rotationBodyLength, data, len);
+      rotationBodyLength += len;
+      rotationBodyBuffer[rotationBodyLength] = '\0';
     });
 
     //Consolidates the four pure-diagnostic endpoints (former /api/health, /api/heap,

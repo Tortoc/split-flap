@@ -1386,7 +1386,6 @@
 								<div class="ls-submit-row">
 									<input type="button" value="+ Eintrag hinzufügen" onclick="addRotationItem()" class="btn-small" />
 								</div>
-								<input type="hidden" id="inputHiddenRotationItems" name="rotationItems" value="[]" />
 							</div>
 
 							<div class="ls-submit-row" id="containerSubmit">
@@ -2237,6 +2236,10 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				//Holds the ä/ö/ü-encoded value actually sent to the server, kept separate so the
 				//input field keeps showing what the user actually typed.
 				var encodedTextValue = null;
+				//Rotation list as JSON, sent to POST /api/rotation-items BEFORE the settings form -
+				//a form field of a few KB could silently arrive empty on the device (BUILD_INFO
+				//Punkt 235).
+				var rotationItemsJson = null;
 
 				switch(deviceMode) {
 					case "text":
@@ -2266,7 +2269,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 						break;
 					case "rotation":
-						collectRotationItemsForSubmit();
+						rotationItemsJson = JSON.stringify(rotationItemsData);
 						break;
 				}
 
@@ -2304,9 +2307,42 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					restoreSubmitButton(loadingIconContainer);
 					showBannerMessage("Network error while submitting.");
 				};
-				xhrRequest.open("POST", "/api/settings", true);
-				xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
-				xhrRequest.send(formData);
+				var sendSettings = function () {
+					xhrRequest.open("POST", "/api/settings", true);
+					xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
+					xhrRequest.send(formData);
+				};
+
+				if (rotationItemsJson === null) {
+					sendSettings();
+					return false;
+				}
+
+				//Rotation: list first, the mode switch only once the list is really stored.
+				var rotationRequest = new XMLHttpRequest();
+				rotationRequest.onreadystatechange = function () {
+					if (this.readyState != 4) {
+						return;
+					}
+					if (this.status == 200) {
+						sendSettings();
+						return;
+					}
+					restoreSubmitButton(loadingIconContainer);
+					if (this.status == 401) {
+						clearAdminPassword();
+					} else {
+						showBannerMessage(this.responseText ? escapeHtml(this.responseText) : "Rotation konnte nicht gespeichert werden.");
+					}
+				};
+				rotationRequest.onerror = function () {
+					restoreSubmitButton(loadingIconContainer);
+					showBannerMessage("Network error while submitting.");
+				};
+				rotationRequest.open("POST", "/api/rotation-items", true);
+				rotationRequest.setRequestHeader("Content-Type", "application/json");
+				rotationRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
+				rotationRequest.send(rotationItemsJson);
 
 				return false;
 			}
@@ -3317,12 +3353,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				};
 			});
 			renderRotationItems();
-		}
-
-		//Serializes the current rotationItemsData into the hidden form field - called from
-		//form.onsubmit's "rotation" case, just before the FormData is built.
-		function collectRotationItemsForSubmit() {
-			document.getElementById("inputHiddenRotationItems").value = JSON.stringify(rotationItemsData);
 		}
 
 		//Sets the WiFi status with signal strength and qualitative assessment
