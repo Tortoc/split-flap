@@ -14,7 +14,7 @@ This project has built on the original project to add extra features such as:
 - Countdown Mode
   - Countdown in days to a specified date
 - Added ability to setup WiFi connection on device
-  - The device will set itself up as a Access Point (AP) on first start. You will be able to connect to this network and a web portal will be provided where you can setup the WiFi network you want to connect to. The network (`Split-Flap-AP`) is protected by a random 8-character password that the display shows while the setup portal is open
+  - The device will set itself up as a Access Point (AP) on first start. You will be able to connect to this network and a web portal will be provided where you can setup the WiFi network you want to connect to. The network (`Split-Flap-AP`) is protected by a random 8-character password that the display shows while the setup portal is open (a display with fewer than 8 units shows it in parts, over and over, each round starting after a row of dashes)
   - If the device was to lose connection, it should retry and if all else fails, it will open up the web portal again to change the WiFi settings if necessary
   - Option to be able use direct mode is also possible as previously implemented
 - Reworked UI

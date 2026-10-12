@@ -1730,6 +1730,16 @@
 							Buchstaben, Ziffern und Bindestriche (nicht am Anfang/Ende), 1-63 Zeichen. Jedes Display im Netzwerk braucht einen eigenen Namen.
 						</p>
 						<p id="mdnsHostnameChangeStatus"></p>
+						<p>
+							<label for="routerHostname">DNS-Name im Router (optional)</label>
+							<br>
+							<input type="text" id="routerHostname" placeholder="z.B. split-flap.fritz.box" maxlength="253" />
+							<button class="btn-primary" onclick="changeRouterHostname()">Speichern</button>
+						</p>
+						<p class="note">
+							Aus Sicherheitsgründen antwortet das Gerät nur unter seiner IP-Adresse, unter dem DNS-Namen oben (auch mit <code>.local</code>) und unter dem hier eingetragenen vollständigen Namen. Leer lassen und speichern entfernt ihn.
+						</p>
+						<p id="routerHostnameChangeStatus"></p>
 					</div>
 				</div>
 
@@ -2080,11 +2090,15 @@ curl "http://192.168.1.50/api/wifi?type=connect-status" -H "X-OTA-Password: spli
 							</div>
 						</details>
 						<details class="api-endpoint">
-							<summary>POST /api/wifi?action=set-hostname</summary>
+							<summary>POST /api/wifi?action=set-hostname|set-router-hostname</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Ändert den mDNS-Namen (<code>http://&lt;name&gt;.local/</code>): Buchstaben, Ziffern und Bindestriche, 1-63 Zeichen. Wirkt sofort, ohne Neustart.</p>
+								<p class="api-endpoint-desc">Ändert den mDNS-Namen (<code>http://&lt;name&gt;.local/</code>): Buchstaben, Ziffern und Bindestriche, 1-63 Zeichen. Wirkt sofort, ohne Neustart. <code>set-router-hostname</code> trägt den vollständigen Namen aus dem Router ein, unter dem das Gerät zusätzlich antworten soll.</p>
 								<pre class="api-code">curl -X POST "http://192.168.1.50/api/wifi?action=set-hostname" \
-  -H "X-OTA-Password: splitflap" --data "hostname=mein-split-flap"</pre>
+  -H "X-OTA-Password: splitflap" --data "hostname=mein-split-flap"
+
+# Vollständiger DNS-Name aus dem Router (leer = entfernen)
+curl -X POST "http://192.168.1.50/api/wifi?action=set-router-hostname" \
+  -H "X-OTA-Password: splitflap" --data "hostname=split-flap.fritz.box"</pre>
 							</div>
 						</details>
 
@@ -4062,6 +4076,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 							currentEspVersionEl.innerText = responseObject.version || "unbekannt";
 						}
 						document.getElementById("currentMdnsHostnameDisplay").innerText = responseObject.mdnsHostname || "split-flap";
+						document.getElementById("routerHostname").value = responseObject.routerHostname || "";
 						document.getElementById("deviceRoleSelect").value = responseObject.deviceRole || "standalone";
 						document.getElementById("extensionLinkModeSelect").value = responseObject.extensionLinkMode || "extend";
 						showDeviceRoleSections(responseObject.deviceRole);
@@ -4777,6 +4792,37 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("hostname=" + encodeURIComponent(newHostname));
+		}
+
+		//Same endpoint as changeMdnsHostname(); the device validates the name (full DNS name, no port).
+		function changeRouterHostname() {
+			var statusEl = document.getElementById("routerHostnameChangeStatus");
+			var value = document.getElementById("routerHostname").value.trim();
+			if (localDevelopment) {
+				statusEl.innerHTML = '<span class="status-online-ready">Gespeichert (simuliert).</span>';
+				return;
+			}
+			statusEl.innerHTML = "";
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						statusEl.innerHTML = '<span class="status-online-ready">' + (value ? "Gespeichert." : "Entfernt.") + '</span>';
+					} else if (this.status == 401) {
+						clearAdminPassword();
+						statusEl.innerHTML = '<span class="status-offline">Falsches Administrator-Passwort.</span>';
+					} else {
+						statusEl.innerHTML = '<span class="status-offline">Fehlgeschlagen: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
+					}
+				}
+			};
+			xhrRequest.onerror = function () {
+				statusEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
+			};
+			xhrRequest.open("POST", "/api/wifi?action=set-router-hostname", true);
+			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
+			xhrRequest.send("hostname=" + encodeURIComponent(value));
 		}
 
 		//POST /api/mqtt: `password` is only sent when the field isn't empty (leaving it blank means

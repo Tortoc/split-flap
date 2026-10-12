@@ -85,8 +85,11 @@ category toggles above. Only these stay open: `GET /`, `GET /api/session`,
 there without credentials).
 
 **Host header** (since 4.10.14, OW-07, against DNS rebinding): requests are only answered (400
-otherwise) if `Host` is an IPv4 address or the device's mDNS/DHCP name - alone, as
-`<name>.local` or with a router domain (`<name>.fritz.box`). Address extension devices the same way.
+otherwise) if `Host` is an IPv4 address, the device's mDNS/DHCP name alone or as `<name>.local`, or
+exactly the router DNS name set via
+[`POST /api/wifi?action=set-router-hostname`](#post-apiwifi) (since 4.10.15 - before that any
+`<name>.<domain>` was accepted, which a foreign domain could abuse). Address extension devices the
+same way. A request with more than one `Content-Type` header is refused with 400 as well.
 
 **Password length**: a new non-empty password needs at least 8 characters (4.10.14, OW-04).
 
@@ -115,7 +118,7 @@ otherwise) if `Host` is an IPv4 address or the device's mDNS/DHCP name - alone, 
 | GET | [`/api/rotation-items`](#get-apirotation-items) | List all Rotation items |
 | GET | [`/api/scheduled-messages`](#get-apischeduled-messages) | List all scheduled messages |
 | DELETE | [`/api/scheduled-messages`](#delete-apischeduled-messages) | Remove a scheduled message |
-| POST | [`/api/wifi?action=`](#post-apiwifi) | WiFi actions: `reset`\|`scan`\|`connect`\|`set-hostname` |
+| POST | [`/api/wifi?action=`](#post-apiwifi) | WiFi actions: `reset`\|`scan`\|`connect`\|`set-hostname`\|`set-router-hostname` |
 | GET | [`/api/wifi?type=`](#get-apiwifi) | WiFi queries: `scan-result`\|`connect-status` |
 | GET | [`/api/mqtt`](#getpost-apimqtt) | Read MQTT broker settings/connection status |
 | POST | [`/api/mqtt`](#getpost-apimqtt) | Change MQTT broker settings |
@@ -168,6 +171,7 @@ speed, mode, WiFi status, etc.
   "rotationItemCount": 0,
   "wifiSettingsResettable": true,
   "mdnsHostname": "split-flap",
+  "routerHostname": "",
   "mqttEnabled": false,
   "mqttBrokerHost": "",
   "mqttBrokerPort": 1883,
@@ -851,7 +855,7 @@ route-registration-costs-heap reasoning as `GET /api/diag` and `POST /api/units`
 `WIFI_USE_DIRECT` is `false` (it is, by default - this device uses WiFiManager's AP-config flow
 rather than hardcoded credentials).
 
-**Query param** `action` (required): `reset` | `scan` | `connect` | `set-hostname`.
+**Query param** `action` (required): `reset` | `scan` | `connect` | `set-hostname` | `set-router-hostname`.
 
 **`action=reset`** - erases the stored WiFi configuration and reboots into AP setup mode (connect
 to the device's own `Split-Flap-AP` network to reconfigure). Since 4.10.14 that hotspot is
@@ -878,13 +882,21 @@ only, must not start or end with a hyphen.
 **Response:** `200 text/plain`: `"Hostname updated"`. `400 text/plain` if `hostname` is
 missing/invalid.
 
-`400 text/plain` if `action` is missing or not one of the four values above.
+**`action=set-router-hostname`** (since 4.10.15) - the full name the router's DNS gives this
+device (e.g. `split-flap.fritz.box`); the device then also answers requests addressed to it (see
+the Host header note under [Authentication](#authentication)). Shown as `routerHostname` in
+`GET /api/settings`.
+**Body params:** `hostname` - a full DNS name without port; empty clears it.
+**Response:** `200 text/plain`: `"Router hostname updated"`. `400 text/plain` if invalid.
+
+`400 text/plain` if `action` is missing or not one of the five values above.
 
 ```bash
 curl -X POST "http://192.168.1.50/api/wifi?action=reset" -H "X-OTA-Password: splitflap"
 curl -X POST "http://192.168.1.50/api/wifi?action=scan" -H "X-OTA-Password: splitflap"
 curl -X POST "http://192.168.1.50/api/wifi?action=connect" -H "X-OTA-Password: splitflap" --data "ssid=MyNetwork&password=secret"
 curl -X POST "http://192.168.1.50/api/wifi?action=set-hostname" -H "X-OTA-Password: splitflap" --data "hostname=my-split-flap"
+curl -X POST "http://192.168.1.50/api/wifi?action=set-router-hostname" -H "X-OTA-Password: splitflap" --data "hostname=split-flap.fritz.box"
 ```
 
 ---

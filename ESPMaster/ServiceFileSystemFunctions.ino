@@ -93,6 +93,7 @@ bool loadValuesFromBootSnapshot() {
   extensionLinkMode = String((const char*)(doc["extensionLinkMode"] | EXTENSION_LINK_MODE_EXTEND));
   otaPassword = String((const char*)(doc["otaPassword"] | "splitflap"));
   mdnsHostname = String((const char*)(doc["mdnsHostname"] | "split-flap"));
+  routerHostname = String((const char*)(doc["routerHostname"] | ""));
 #if MQTT_ENABLE == true
   mqttEnabled = doc["mqttEnabled"] | false;
   mqttBrokerHost = String((const char*)(doc["mqttBrokerHost"] | ""));
@@ -140,6 +141,7 @@ void loadValuesFromIndividualFiles() {
   extensionLinkMode = readFile(LittleFS, extensionLinkModePath, EXTENSION_LINK_MODE_EXTEND);
   otaPassword = readFile(LittleFS, otaPasswordPath, "splitflap"); //persisted, not a compile-time constant
   mdnsHostname = readFile(LittleFS, mdnsHostnamePath, "split-flap"); //persisted, not a compile-time constant
+  routerHostname = readFile(LittleFS, routerHostnamePath, "");
 #if MQTT_ENABLE == true
   mqttEnabled = readFile(LittleFS, mqttEnabledPath, "false") == "true";
   mqttBrokerHost = readFile(LittleFS, mqttBrokerHostPath, ""); //"" = not configured yet
@@ -193,6 +195,7 @@ bool saveBootSnapshot() {
   doc["extensionLinkMode"] = extensionLinkMode;
   doc["otaPassword"] = otaPassword;
   doc["mdnsHostname"] = mdnsHostname;
+  doc["routerHostname"] = routerHostname;
 #if MQTT_ENABLE == true
   doc["mqttEnabled"] = mqttEnabled;
   doc["mqttBrokerHost"] = mqttBrokerHost;
@@ -247,6 +250,7 @@ String computeSettingsSignature() {
   sig += extensionLinkMode; sig += '|';
   sig += otaPassword; sig += '|';
   sig += mdnsHostname; sig += '|';
+  sig += routerHostname; sig += '|';
 #if MQTT_ENABLE == true
   sig += mqttEnabled ? '1' : '0'; sig += '|';
   sig += mqttBrokerHost; sig += '|';

@@ -249,7 +249,7 @@ void tickExtensionDisplay() {
 //in full instead of trusting lastWrittenText.
 void cancelDisplayControllers() {
   if (isDisplayJobBusy()) {
-    SerialPrintln(F("Device role changed - cancelling the running display job"));
+    SerialPrintln(F("Cancelling the running display job (role change or WiFi setup)"));
     displayJob.state = DISPLAY_JOB_IDLE;
     displayJob.originalMessage = String();
     displayJob.currentAlignedLine = String();

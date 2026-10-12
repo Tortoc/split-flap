@@ -107,6 +107,7 @@
 #include <memory> //std::shared_ptr - PendingRequestSlot's per-generation disconnect flag
 #include <atomic> //std::atomic<bool> - same reason
 #include <user_interface.h> //struct rst_info, for the crash reporter
+#include <Schedule.h> //schedule_recurrent_function_us() - setup hotspot password display, see initWiFi()
 #include <umm_malloc/umm_heap_select.h> //HeapSelectIram - OTA buffers in the second heap (mmu=4816H)
 #include <lwip/priv/tcp_priv.h> //exposes tcp_active_pcbs/etc. for /api/tcp-status
 #include "Classes.h"
@@ -130,6 +131,11 @@ const WebRequestMethodComposite ASYNC_HTTP_DELETE = 0b00000100;
 //on networks whose clients support mDNS. Persisted, not a compile-time constant - see POST
 ///api/wifi's "set-hostname" action (Netzwerk tab in the UI).
 String mdnsHostname = "split-flap";
+//Full name the router's DNS gives this device (e.g. "split-flap.fritz.box"), "" = none. Only used
+//to accept that name in the Host header (RequestGuard) - set via POST /api/wifi?action=
+//set-router-hostname (Netzwerk tab). Must be exact: any other domain is refused (code review V9-02).
+String routerHostname = "";
+const char* routerHostnamePath = "/routerhostname.txt";
 
 //Used if connecting via "WIFI_USE_DIRECT" of "true" - Otherwise, leave blank
 const char* wifiDirectSsid = "";
@@ -205,9 +211,10 @@ bool isReservedI2CAddress(int address) {
 //   extraction (WebRequest.cpp).
 //2. Unknown Host header (DNS rebinding, OW-07): a web page from elsewhere that re-points its own
 //   domain to this device's IP would otherwise read and call everything not behind the password.
-//   Accepted: an IPv4 address, or this device's mDNS/DHCP name - alone, as "<name>.local" or with
-//   any router domain ("<name>.fritz.box"). An extension device configured under a different DNS
-//   alias isn't reachable that way any more.
+//   Accepted: an IPv4 address, this device's mDNS/DHCP name alone or as "<name>.local", or the
+//   exact router DNS name entered in routerHostname. Any other domain is refused, even one that
+//   starts with this device's name - its owner could point "split-flap.attacker.example" here
+//   (code review V9-02). An extension device must be configured under one of these names.
 class RequestGuard : public AsyncWebHandler {
   public:
     bool canHandle(AsyncWebServerRequest *request) override {
@@ -218,11 +225,25 @@ class RequestGuard : public AsyncWebHandler {
     }
 
   private:
+    //The library parses EVERY Content-Type header and keeps the boundary of the last multipart
+    //one, while getHeader("Content-Type") returns only the first - a second header would slip a
+    //long boundary past a check of the first (code review V9-01). So more than one is refused,
+    //and the single one is the value the parser actually saw.
     static bool hasInvalidMultipartBoundary(AsyncWebServerRequest *request) {
-      if (!request->hasHeader("Content-Type")) {
+      AsyncWebHeader *contentType = nullptr;
+      for (size_t i = 0; i < request->headers(); i++) {
+        AsyncWebHeader *header = request->getHeader(i);
+        if (header->name().equalsIgnoreCase("Content-Type")) {
+          if (contentType != nullptr) {
+            return true;
+          }
+          contentType = header;
+        }
+      }
+      if (contentType == nullptr) {
         return false;
       }
-      String value = request->getHeader("Content-Type")->value();
+      String value = contentType->value();
       if (!value.startsWith("multipart/")) {
         return false;
       }
@@ -231,12 +252,9 @@ class RequestGuard : public AsyncWebHandler {
       return value.indexOf('=') == -1 || boundary.length() == 0 || boundary.length() > 70;
     }
 
-    //True for "<name>", "<name>.local", "<name>.<anything>" (case-insensitive).
+    //True for exactly "<name>" or "<name>.local" (case-insensitive).
     static bool isOwnName(const String &host, const String &name) {
-      if (name.length() == 0 || host.length() < name.length() || !host.substring(0, name.length()).equalsIgnoreCase(name)) {
-        return false;
-      }
-      return host.length() == name.length() || host.charAt(name.length()) == '.';
+      return name.length() > 0 && (host.equalsIgnoreCase(name) || host.equalsIgnoreCase(name + ".local"));
     }
 
     static bool isIpv4Address(const String &host) {
@@ -250,7 +268,8 @@ class RequestGuard : public AsyncWebHandler {
         host = host.substring(0, colon);
       }
       //No Host header at all (HTTP/1.0 tools) - no browser sends that, so rebinding can't either.
-      return host.length() == 0 || isIpv4Address(host) || isOwnName(host, mdnsHostname) || isOwnName(host, WiFi.hostname());
+      return host.length() == 0 || isIpv4Address(host) || isOwnName(host, mdnsHostname) || isOwnName(host, WiFi.hostname()) ||
+        (routerHostname.length() > 0 && host.equalsIgnoreCase(routerHostname));
     }
 };
 
@@ -1330,6 +1349,7 @@ void setup() {
       minimalDoc["wifiIp"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
       minimalDoc["wifiSettingsResettable"] = true;
       minimalDoc["mdnsHostname"] = mdnsHostname; //user-editable, see POST /api/wifi's "set-hostname" action
+      minimalDoc["routerHostname"] = routerHostname; //"set-router-hostname" action, same endpoint
       minimalDoc["deviceRole"] = deviceRole; //user-editable, see POST /api/device-role (multiple-units.md)
       minimalDoc["extensionLinkMode"] = extensionLinkMode; //same endpoint, optional 'linkMode' param
 #if MQTT_ENABLE == true
@@ -3218,7 +3238,23 @@ void setup() {
         return;
       }
 
-      request->send(400, "text/plain", "Unknown 'action' - use reset, scan, connect, or set-hostname");
+      if (action == "set-router-hostname") {
+        //The router's full DNS name for this device (RequestGuard accepts it in the Host header).
+        //Empty clears it. A full hostname without port.
+        String newRouterHostname = request->hasParam("hostname", true) ? request->getParam("hostname", true)->value() : "";
+        newRouterHostname.trim();
+        if (newRouterHostname != "" && (newRouterHostname.indexOf(':') != -1 || !isValidExtensionHost(newRouterHostname))) {
+          request->send(400, "text/plain", F("Invalid hostname - a full DNS name like split-flap.fritz.box, or empty to clear"));
+          return;
+        }
+        routerHostname = newRouterHostname;
+        writeFile(LittleFS, routerHostnamePath, routerHostname.c_str());
+        checkBootSnapshotFreshness();
+        request->send(200, "text/plain", "Router hostname updated");
+        return;
+      }
+
+      request->send(400, "text/plain", F("Unknown 'action' - use reset, scan, connect, set-hostname, or set-router-hostname"));
     });
 #endif
 

@@ -92,6 +92,67 @@ void checkWifiConnectAttempt() {
 }
 #endif
 
+#if WIFI_USE_DIRECT == false
+//Setup hotspot password on the display (security review OW-06, code review V9-03/04). A display
+//with 8+ units shows it whole and keeps it. A narrower one cycles through it for as long as the
+//portal is open: frame 0 is all dashes (marks the start, the password has no '-'), frames 1..n
+//are consecutive parts of the password, each held for SETUP_AP_PASSWORD_HOLD_MS.
+char setupApPassword[9] = "";
+int setupApPasswordFrame = 0;
+bool setupApPasswordFrameStarted = false;
+unsigned long setupApPasswordFrameDoneAt = 0; //0 = current frame not finished yet
+#define SETUP_AP_PASSWORD_HOLD_MS 4000
+
+int setupApPasswordFrameCount() {
+  return unitsAmount >= 8 ? 1 : 1 + (8 + unitsAmount - 1) / unitsAmount;
+}
+
+String setupApPasswordFrameText(int frame) {
+  if (unitsAmount >= 8) {
+    return String(setupApPassword);
+  }
+  if (frame == 0) {
+    String dashes;
+    for (int i = 0; i < unitsAmount; i++) {
+      dashes += '-';
+    }
+    return dashes;
+  }
+  //Exactly one display line per part - a longer text would be hyphenated and paged.
+  return String(setupApPassword).substring((frame - 1) * unitsAmount, min(frame * unitsAmount, 8));
+}
+
+//Recurrent function (schedule_recurrent_function_us) - runs after every yield() until the portal
+//closes. Must not call yield()/delay() itself.
+bool tickSetupApPasswordDisplay() {
+  if (!wifiSetupPortalOpen) {
+    return false; //portal closed - unschedule; loop() takes the display over again
+  }
+  if (isDisplayJobBusy()) {
+    updateDisplayJob();
+    return true;
+  }
+  if (!setupApPasswordFrameStarted) {
+    bool wide = unitsAmount >= 8;
+    //Simultaneous animation: every character lands at once, whatever animation the user set.
+    setupApPasswordFrameStarted = showText(setupApPasswordFrameText(setupApPasswordFrame), 0,
+      wide ? ALIGNMENT_MODE_CENTER : ALIGNMENT_MODE_LEFT, ANIMATION_MODE_SIMULTANEOUS, 0);
+    return true;
+  }
+  if (setupApPasswordFrameCount() == 1) {
+    return true; //whole password is on the display - leave it there
+  }
+  if (setupApPasswordFrameDoneAt == 0) {
+    setupApPasswordFrameDoneAt = millis();
+  } else if (millis() - setupApPasswordFrameDoneAt >= SETUP_AP_PASSWORD_HOLD_MS) {
+    setupApPasswordFrame = (setupApPasswordFrame + 1) % setupApPasswordFrameCount();
+    setupApPasswordFrameStarted = false;
+    setupApPasswordFrameDoneAt = 0;
+  }
+  return true;
+}
+#endif
+
 //Initialize WiFi
 void initWiFi() {
   int wifiConnectTimeoutSeconds = 180;
@@ -148,33 +209,33 @@ void initWiFi() {
   //shown on the flaps once the hotspot is up: only someone standing in front of the display can
   //use it. Uppercase letters and digits only (the flaps have no lowercase), without the
   //look-alikes 0/O, 1/I, 2/Z, 5/S and 8/B.
+  //No two equal characters in a row - on a one-unit display they'd look like a single one.
   static const char apPasswordAlphabet[] = "ACDEFGHJKLMNPQRTUVWXY34679";
-  char apPassword[9];
   for (int i = 0; i < 8; i++) {
-    apPassword[i] = apPasswordAlphabet[ESP.random() % (sizeof(apPasswordAlphabet) - 1)];
+    do {
+      setupApPassword[i] = apPasswordAlphabet[ESP.random() % (sizeof(apPasswordAlphabet) - 1)];
+    } while (i > 0 && setupApPassword[i] == setupApPassword[i - 1]);
   }
-  apPassword[8] = '\0';
-  wifiManager.setAPCallback([&apPassword](WiFiManager*) {
-    SerialPrintln(F("Setup hotspot \"Split-Flap-AP\" open - password: ") + String(apPassword));
+  setupApPassword[8] = '\0';
+  wifiManager.setAPCallback([](WiFiManager*) {
+    SerialPrintln(F("Setup hotspot \"Split-Flap-AP\" open - password: ") + String(setupApPassword));
     wifiSetupPortalOpen = true;
-    displayRenderGeneration++; //redraw even if the display coincidentally already shows it
-    //loop() doesn't run yet - pump the jobs here, same as setup()'s pre-WiFi display. The first
-    //pass finishes a job that may still be running from there (a busy display refuses new text).
-    for (int pass = 0; pass < 2; pass++) {
-      if (pass == 1 && !showText(apPassword)) {
-        break; //no units - the password is only on the serial log then
-      }
-      unsigned long pumpStart = millis();
-      while (isDisplayJobBusy() && !millisReached(pumpStart + 20000)) {
-        updateDisplayJob();
-        delay(5);
-        yield();
-      }
+    //The setup takes precedence over whatever setup()'s pre-WiFi display is still writing (code
+    //review V9-03) - a busy display would refuse the password.
+    cancelDisplayControllers();
+    setupApPasswordFrame = unitsAmount >= 8 ? 0 : 1; //narrow display: start with the first part
+    setupApPasswordFrameStarted = false;
+    setupApPasswordFrameDoneAt = 0;
+    //WiFiManager's portal loop offers no hook of its own, but it yield()s on every pass, and the
+    //core runs recurrent functions after each yield() - this keeps the display job going for the
+    //whole portal instead of only while this callback runs.
+    if (unitsAmount > 0) {
+      schedule_recurrent_function_us(tickSetupApPasswordDisplay, 10000);
     }
   });
 
   SerialPrintln(F("Attempting to connect to WiFi... Will fallback to AP mode to allow configuring of WiFi if fails..."));
-  bool wifiConnected = wifiManager.autoConnect("Split-Flap-AP", apPassword);
+  bool wifiConnected = wifiManager.autoConnect("Split-Flap-AP", setupApPassword);
   wifiSetupPortalOpen = false;
   if(wifiConnected) {
     SerialPrint(F("Successfully Connected to WiFi. IP Address: "));
