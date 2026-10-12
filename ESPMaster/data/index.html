@@ -1958,7 +1958,7 @@
 							Alle HTTP-Endpunkte mit <code>curl</code>-Beispielen. <code>192.168.1.50</code> durch die IP dieses Geräts ersetzen (oder <code>split-flap.local</code>). Details: <code>ESPMaster/API.md</code> im Repository.
 						</p>
 						<p class="note">
-							<code>X-OTA-Password</code> ist nur nötig, wenn ein Passwort gesetzt und der Endpunkt nicht freigegeben ist (Reiter "Zugriffskontrolle").
+							<code>X-OTA-Password</code> ist nur nötig, wenn ein Passwort gesetzt und der Endpunkt nicht freigegeben ist (Reiter "Zugriffskontrolle") - auch fürs Lesen. Ohne Passwort erreichbar sind nur <code>GET /api/units</code>, <code>/api/diag?type=health</code> und <code>/api/session</code>.
 						</p>
 
 						<p class="api-group-title">Anzeige &amp; Text</p>
@@ -1966,7 +1966,7 @@
 							<summary>GET /api/settings</summary>
 							<div class="api-endpoint-body">
 								<p class="api-endpoint-desc">Aktuelle Geräte-Einstellungen als JSON (Modus, Text, Tempo, WLAN-Status, Zugriffskontrolle, ...).</p>
-								<pre class="api-code">curl http://192.168.1.50/api/settings</pre>
+								<pre class="api-code">curl http://192.168.1.50/api/settings -H "X-OTA-Password: splitflap"</pre>
 							</div>
 						</details>
 						<details class="api-endpoint">
@@ -1974,6 +1974,7 @@
 							<div class="api-endpoint-body">
 								<p class="api-endpoint-desc">Einstellungen ändern, wie das Hauptformular. <code>animationMode</code> (<code>simultaneous</code>/<code>left-to-right</code>/<code>right-to-left</code>/<code>outside-in</code>/<code>inside-out</code>) und <code>animationStaggerMs</code> (0-1000) steuern den versetzten Start je Unit; Standard ist <code>simultaneous</code>.</p>
 								<pre class="api-code">curl -X POST http://192.168.1.50/api/settings \
+  -H "X-OTA-Password: splitflap" \
   --data "deviceMode=text&amp;inputText=HELLO&amp;alignment=center&amp;flapSpeed=80&amp;animationMode=left-to-right&amp;animationStaggerMs=200"</pre>
 							</div>
 						</details>
@@ -1982,17 +1983,17 @@
 							<div class="api-endpoint-body">
 								<p class="api-endpoint-desc">Text setzen für Automatisierungen (Webhooks, Home Assistant, Kurzbefehle): ohne <code>duration</code> dauerhaft, mit <code>duration</code> (Sekunden) vorübergehend.</p>
 								<pre class="api-code"># Dauerhaft
-curl -X POST http://192.168.1.50/api/text --data "text=HELLO WORLD"
+curl -X POST http://192.168.1.50/api/text -H "X-OTA-Password: splitflap" --data "text=HELLO WORLD"
 
 # 10 Sekunden lang, dann zurück zur vorherigen Anzeige
-curl -X POST http://192.168.1.50/api/text --data "text=BRB&amp;duration=10"</pre>
+curl -X POST http://192.168.1.50/api/text -H "X-OTA-Password: splitflap" --data "text=BRB&amp;duration=10"</pre>
 							</div>
 						</details>
 						<details class="api-endpoint">
 							<summary>GET /api/rotation-items</summary>
 							<div class="api-endpoint-body">
 								<p class="api-endpoint-desc">Alle Rotationseinträge inkl. eigener Ausrichtung und Animation (<code>alignment</code>/<code>animationMode</code>/<code>animationStaggerMs</code>; leer/<code>-1</code> = Standard). Ändern über <code>POST /api/settings</code> mit <code>rotationItems</code> (immer die komplette Liste).</p>
-								<pre class="api-code">curl http://192.168.1.50/api/rotation-items</pre>
+								<pre class="api-code">curl http://192.168.1.50/api/rotation-items -H "X-OTA-Password: splitflap"</pre>
 							</div>
 						</details>
 
@@ -2001,14 +2002,14 @@ curl -X POST http://192.168.1.50/api/text --data "text=BRB&amp;duration=10"</pre
 							<summary>GET /api/scheduled-messages</summary>
 							<div class="api-endpoint-body">
 								<p class="api-endpoint-desc">Liste aller geplanten Nachrichten.</p>
-								<pre class="api-code">curl http://192.168.1.50/api/scheduled-messages</pre>
+								<pre class="api-code">curl http://192.168.1.50/api/scheduled-messages -H "X-OTA-Password: splitflap"</pre>
 							</div>
 						</details>
 						<details class="api-endpoint">
 							<summary>DELETE /api/scheduled-messages?id=</summary>
 							<div class="api-endpoint-body">
 								<p class="api-endpoint-desc"><code>id</code> ist der <code>scheduledDateTimeUnix</code>-Wert aus der Liste oben.</p>
-								<pre class="api-code">curl -X DELETE "http://192.168.1.50/api/scheduled-messages?id=1755331200"</pre>
+								<pre class="api-code">curl -X DELETE "http://192.168.1.50/api/scheduled-messages?id=1755331200" -H "X-OTA-Password: splitflap"</pre>
 							</div>
 						</details>
 
@@ -2024,8 +2025,8 @@ curl "http://192.168.1.50/api/units?detail=1"</pre>
 						<details class="api-endpoint">
 							<summary>POST /api/units?action=rescan|offset|reset</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc"><code>rescan</code> braucht kein Passwort, <code>offset</code>/<code>reset</code> schon (außer die Kategorie ist freigegeben).</p>
-								<pre class="api-code">curl -X POST "http://192.168.1.50/api/units?action=rescan"
+								<p class="api-endpoint-desc">Alle drei brauchen das Passwort (außer die Kategorie ist freigegeben).</p>
+								<pre class="api-code">curl -X POST "http://192.168.1.50/api/units?action=rescan" -H "X-OTA-Password: splitflap"
 
 curl -X POST "http://192.168.1.50/api/units?action=offset" \
   -H "X-OTA-Password: splitflap" --data "id=0&amp;offset=100"
@@ -2038,7 +2039,7 @@ curl -X POST "http://192.168.1.50/api/units?action=reset" \
 							<summary>GET /api/i2c-scan</summary>
 							<div class="api-endpoint-body">
 								<p class="api-endpoint-desc">Roher I2C-Bus-Scan, unabhängig von den bekannten Units.</p>
-								<pre class="api-code">curl http://192.168.1.50/api/i2c-scan</pre>
+								<pre class="api-code">curl http://192.168.1.50/api/i2c-scan -H "X-OTA-Password: splitflap"</pre>
 							</div>
 						</details>
 
@@ -2047,7 +2048,7 @@ curl -X POST "http://192.168.1.50/api/units?action=reset" \
 							<summary>GET /api/timezone</summary>
 							<div class="api-endpoint-body">
 								<p class="api-endpoint-desc">Aktuell konfigurierte Zeitzone (TZ-Datenbank-Name).</p>
-								<pre class="api-code">curl http://192.168.1.50/api/timezone</pre>
+								<pre class="api-code">curl http://192.168.1.50/api/timezone -H "X-OTA-Password: splitflap"</pre>
 							</div>
 						</details>
 						<details class="api-endpoint">
@@ -2092,7 +2093,7 @@ curl "http://192.168.1.50/api/wifi?type=connect-status" -H "X-OTA-Password: spli
 							<summary>GET/POST /api/mqtt</summary>
 							<div class="api-endpoint-body">
 								<p class="api-endpoint-desc">MQTT-Broker und Home-Assistant-Auto-Discovery (nur mit <code>MQTT_ENABLE</code>, Standard). Ohne Passwort-Feld bleibt das Passwort unverändert.</p>
-								<pre class="api-code">curl http://192.168.1.50/api/mqtt
+								<pre class="api-code">curl http://192.168.1.50/api/mqtt -H "X-OTA-Password: splitflap"
 
 curl -X POST http://192.168.1.50/api/mqtt \
   -H "X-OTA-Password: splitflap" \
@@ -2104,7 +2105,7 @@ curl -X POST http://192.168.1.50/api/mqtt \
 						<details class="api-endpoint">
 							<summary>POST /api/ota-password</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Passwort und/oder Freigaben ändern; <code>currentPassword</code> ist immer Pflicht. Leeres <code>newPassword=</code> schaltet den Schutz ab.</p>
+								<p class="api-endpoint-desc">Passwort und/oder Freigaben ändern; <code>currentPassword</code> ist immer Pflicht. Ein neues Passwort braucht mindestens 8 Zeichen; leeres <code>newPassword=</code> schaltet den Schutz ab.</p>
 								<pre class="api-code"># Nur Passwort ändern
 curl -X POST http://192.168.1.50/api/ota-password \
   --data "currentPassword=splitflap&amp;newPassword=neuesPasswort"
@@ -2123,24 +2124,24 @@ curl -X POST http://192.168.1.50/api/ota-password \
 						<details class="api-endpoint">
 							<summary>GET /api/diag?type=health|heap|tcp|test</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Diagnose: Lebenszeichen, freier Heap, TCP-Verbindungen, Konnektivität.</p>
+								<p class="api-endpoint-desc">Diagnose: Lebenszeichen, freier Heap, TCP-Verbindungen, Konnektivität. Nur <code>health</code> geht ohne Passwort.</p>
 								<pre class="api-code">curl "http://192.168.1.50/api/diag?type=health"
-curl "http://192.168.1.50/api/diag?type=heap"
-curl "http://192.168.1.50/api/diag?type=tcp"</pre>
+curl "http://192.168.1.50/api/diag?type=heap" -H "X-OTA-Password: splitflap"
+curl "http://192.168.1.50/api/diag?type=tcp" -H "X-OTA-Password: splitflap"</pre>
 							</div>
 						</details>
 						<details class="api-endpoint">
 							<summary>GET /api/crash-log</summary>
 							<div class="api-endpoint-body">
 								<p class="api-endpoint-desc">Gespeichertes Absturz-Log (siehe auch den Reiter "Crash-Log" oben).</p>
-								<pre class="api-code">curl http://192.168.1.50/api/crash-log</pre>
+								<pre class="api-code">curl http://192.168.1.50/api/crash-log -H "X-OTA-Password: splitflap"</pre>
 							</div>
 						</details>
 						<details class="api-endpoint">
 							<summary>DELETE /api/crash-log</summary>
 							<div class="api-endpoint-body">
 								<p class="api-endpoint-desc">Absturz-Log löschen.</p>
-								<pre class="api-code">curl -X DELETE http://192.168.1.50/api/crash-log</pre>
+								<pre class="api-code">curl -X DELETE http://192.168.1.50/api/crash-log -H "X-OTA-Password: splitflap"</pre>
 							</div>
 						</details>
 						<details class="api-endpoint">

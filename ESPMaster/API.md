@@ -74,7 +74,7 @@ a newly-added category always starts protected):
 
 **Never toggleable - always protected whenever a password is set**, no matter what any category
 toggle says: `POST /api/web-file`, `POST /api/units/firmware`, `POST /api/units/firmware-push`
-with `action=push` (`action=probe` needs no password), `POST /api/firmware-start`,
+(both `action=push` and `action=probe` - a probe restarts the unit), `POST /api/firmware-start`,
 `POST /api/firmware-chunk`, `POST /api/firmware-finish`, and `POST /api/ota-password` itself
 (changing the password or any toggle always requires the *current* password - otherwise a
 category opened via one toggle could reopen every other one through this same endpoint).
@@ -207,7 +207,7 @@ pattern issue combined with a stack-overflow-prone `yield()` inside this handler
 message actually sat in the queue.
 
 ```bash
-curl http://192.168.1.50/api/settings
+curl http://192.168.1.50/api/settings -H "X-OTA-Password: splitflap"
 ```
 
 ---
@@ -257,6 +257,7 @@ live display immediately - remove one later via
 
 ```bash
 curl -X POST http://192.168.1.50/api/settings \
+  -H "X-OTA-Password: splitflap" \
   --data "deviceMode=text&inputText=HELLO&alignment=center&flapSpeed=80&animationMode=left-to-right&animationStaggerMs=200"
 ```
 
@@ -294,10 +295,10 @@ missing/wrong.
 
 ```bash
 # Permanent - switches into Text mode and stays
-curl -X POST http://192.168.1.50/api/text --data "text=HELLO WORLD"
+curl -X POST http://192.168.1.50/api/text -H "X-OTA-Password: splitflap" --data "text=HELLO WORLD"
 
 # Temporary - shows for 10s, then reverts to whatever was showing before
-curl -X POST http://192.168.1.50/api/text --data "text=BRB&duration=10"
+curl -X POST http://192.168.1.50/api/text -H "X-OTA-Password: splitflap" --data "text=BRB&duration=10"
 ```
 
 ---
@@ -340,9 +341,9 @@ list.
 
 ```bash
 curl "http://192.168.1.50/api/diag?type=health"
-curl "http://192.168.1.50/api/diag?type=heap"
-curl "http://192.168.1.50/api/diag?type=tcp"
-curl "http://192.168.1.50/api/diag?type=test"
+curl "http://192.168.1.50/api/diag?type=heap" -H "X-OTA-Password: splitflap"
+curl "http://192.168.1.50/api/diag?type=tcp" -H "X-OTA-Password: splitflap"
+curl "http://192.168.1.50/api/diag?type=test" -H "X-OTA-Password: splitflap"
 ```
 
 ---
@@ -356,7 +357,7 @@ the moment of the crash. One JSON object per line (JSON Lines format), oldest fi
 yet.
 
 ```bash
-curl http://192.168.1.50/api/crash-log
+curl http://192.168.1.50/api/crash-log -H "X-OTA-Password: splitflap"
 ```
 
 ---
@@ -368,7 +369,7 @@ Clears the persisted crash log file.
 **Response** `200 text/plain`: `Crash log cleared`
 
 ```bash
-curl -X DELETE http://192.168.1.50/api/crash-log
+curl -X DELETE http://192.168.1.50/api/crash-log -H "X-OTA-Password: splitflap"
 ```
 
 ---
@@ -398,7 +399,7 @@ AsyncWebServer callback itself), so it can take a moment.
 wiring/address gap. Returns `503 text/plain` if another scan is already in progress.
 
 ```bash
-curl http://192.168.1.50/api/i2c-scan
+curl http://192.168.1.50/api/i2c-scan -H "X-OTA-Password: splitflap"
 ```
 
 ---
@@ -493,9 +494,9 @@ seconds."`. `400 text/plain` if `id`/`offset` are missing, non-numeric, or out o
 `400 text/plain` if `action` is missing or not one of the three values above.
 
 ```bash
-curl -X POST "http://192.168.1.50/api/units?action=rescan"
-curl -X POST "http://192.168.1.50/api/units?action=offset" --data "id=0&offset=100"
-curl -X POST "http://192.168.1.50/api/units?action=reset"
+curl -X POST "http://192.168.1.50/api/units?action=rescan" -H "X-OTA-Password: splitflap"
+curl -X POST "http://192.168.1.50/api/units?action=offset" -H "X-OTA-Password: splitflap" --data "id=0&offset=100"
+curl -X POST "http://192.168.1.50/api/units?action=reset" -H "X-OTA-Password: splitflap"
 ```
 
 ---
@@ -569,8 +570,8 @@ same-day change), so it - and the upload endpoint above - had to be **registered
 `/api/units` in source order, or ESPAsyncWebServer's "first matching handler wins" dispatch
 silently swallows requests to either into `/api/units`'s handler instead.
 
-**Auth:** `action=push` requires the `X-OTA-Password` header if a password is set; `action=probe`
-requires none (read-only, no write to flash).
+**Auth:** both actions require the `X-OTA-Password` header if a password is set - `probe` writes
+nothing to flash, but restarts the unit into its bootloader.
 
 **Body params:**
 
@@ -630,7 +631,7 @@ curl -X POST http://192.168.1.50/api/units/firmware-push \
   -H "X-OTA-Password: splitflap" \
   --data "action=push&id=0"
 
-curl -X POST http://192.168.1.50/api/units/firmware-push --data "action=probe&id=0"
+curl -X POST http://192.168.1.50/api/units/firmware-push -H "X-OTA-Password: splitflap" --data "action=probe&id=0"
 ```
 
 ---
@@ -739,7 +740,7 @@ Only present if `DEBUG_ENABLE` is compiled in (it is, by default). Replaces the 
 `GET /exit-debug-mode` / `GET /enable-debug-mode` - those were a CSRF-via-GET gap, since closed.
 
 ```bash
-curl -X POST http://192.168.1.50/api/debug-mode --data "enabled=true"
+curl -X POST http://192.168.1.50/api/debug-mode -H "X-OTA-Password: splitflap" --data "enabled=true"
 ```
 
 ---
@@ -791,7 +792,7 @@ Replace the whole list via [`POST /api/settings`](#post-apisettings)'s `rotation
 (full replace, not a merge/patch - send the complete list every time).
 
 ```bash
-curl http://192.168.1.50/api/rotation-items
+curl http://192.168.1.50/api/rotation-items -H "X-OTA-Password: splitflap"
 ```
 
 ---
@@ -813,7 +814,7 @@ Empty array if nothing is scheduled. `GET /api/settings`'s `scheduledMessageCoun
 whether it's worth calling this at all.
 
 ```bash
-curl http://192.168.1.50/api/scheduled-messages
+curl http://192.168.1.50/api/scheduled-messages -H "X-OTA-Password: splitflap"
 ```
 
 ---
@@ -836,7 +837,7 @@ Example: `DELETE /api/scheduled-messages?id=1755331200`
 - `400 text/plain` if `id` is missing, non-numeric, or doesn't match any scheduled message.
 
 ```bash
-curl -X DELETE "http://192.168.1.50/api/scheduled-messages?id=1755331200"
+curl -X DELETE "http://192.168.1.50/api/scheduled-messages?id=1755331200" -H "X-OTA-Password: splitflap"
 ```
 
 ---
@@ -880,9 +881,9 @@ missing/invalid.
 `400 text/plain` if `action` is missing or not one of the four values above.
 
 ```bash
-curl -X POST "http://192.168.1.50/api/wifi?action=reset"
-curl -X POST "http://192.168.1.50/api/wifi?action=scan"
-curl -X POST "http://192.168.1.50/api/wifi?action=connect" --data "ssid=MyNetwork&password=secret"
+curl -X POST "http://192.168.1.50/api/wifi?action=reset" -H "X-OTA-Password: splitflap"
+curl -X POST "http://192.168.1.50/api/wifi?action=scan" -H "X-OTA-Password: splitflap"
+curl -X POST "http://192.168.1.50/api/wifi?action=connect" -H "X-OTA-Password: splitflap" --data "ssid=MyNetwork&password=secret"
 curl -X POST "http://192.168.1.50/api/wifi?action=set-hostname" -H "X-OTA-Password: splitflap" --data "hostname=my-split-flap"
 ```
 
@@ -972,7 +973,7 @@ now disabled/no broker configured) on the next tick - no reboot needed.
 present but invalid. `401 text/plain` if a password is required and missing/wrong.
 
 ```bash
-curl http://192.168.1.50/api/mqtt
+curl http://192.168.1.50/api/mqtt -H "X-OTA-Password: splitflap"
 
 curl -X POST http://192.168.1.50/api/mqtt \
   -H "X-OTA-Password: splitflap" \
@@ -1033,7 +1034,7 @@ Returns the currently-configured timezone (TZ database name).
 ```
 
 ```bash
-curl http://192.168.1.50/api/timezone
+curl http://192.168.1.50/api/timezone -H "X-OTA-Password: splitflap"
 ```
 
 ---
@@ -1056,5 +1057,5 @@ Changes the timezone. Same resource as the `GET` above. `accessControlTimezone` 
   parse the string locally).
 
 ```bash
-curl -X POST http://192.168.1.50/api/timezone --data "timezone=Europe/Berlin"
+curl -X POST http://192.168.1.50/api/timezone -H "X-OTA-Password: splitflap" --data "timezone=Europe/Berlin"
 ```
