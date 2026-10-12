@@ -190,8 +190,12 @@ struct ExtensionDisplayState {
 ExtensionDisplayState extensionDisplay;
 
 //Ticked from loop() on every pass. Picks up a newly queued push (POST /api/extension-display),
-//replacing whatever was still animating - only the latest content matters.
+//replacing whatever was still animating - only the latest content matters. Only an extension
+//writes pushed content (cancelDisplayControllers() also drops it on a role change).
 void tickExtensionDisplay() {
+  if (deviceRole != DEVICE_ROLE_EXTENSION) {
+    return;
+  }
   if (pendingExtensionDisplayQueued) {
     pendingExtensionDisplayQueued = false;
     extensionDisplay.active = true;
@@ -236,6 +240,26 @@ void tickExtensionDisplay() {
     extensionDisplay.active = false;
     extensionDisplay.segment = String(); //release the buffer until the next push
   }
+}
+
+//The device role changed (POST /api/device-role, run from loop()): neither the local display job
+//nor a push received as an extension may keep writing for the old role - a staggered push from the
+//old primary or a local multi-line job would interleave with the new role's writes
+//(CODE_REVIEW_V8.md #6). The role handler bumped displayRenderGeneration, so the new role redraws
+//in full instead of trusting lastWrittenText.
+void cancelDisplayControllers() {
+  if (isDisplayJobBusy()) {
+    SerialPrintln(F("Device role changed - cancelling the running display job"));
+    displayJob.state = DISPLAY_JOB_IDLE;
+    displayJob.originalMessage = String();
+    displayJob.currentAlignedLine = String();
+  }
+  pendingExtensionDisplayQueued = false;
+  pendingExtensionDisplaySegment = String();
+  extensionDisplay.active = false;
+  extensionDisplay.segment = String();
+  extensionDisplay.writeFailed = false;
+  displayRenderGeneration++;
 }
 
 //Still has letters to send (or a push waiting to start) - GET /api/units reports this as

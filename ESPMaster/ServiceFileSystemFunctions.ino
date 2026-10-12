@@ -360,37 +360,57 @@ bool writeJsonArrayFile(const char *path, int count, void (*fillElement)(int ind
 //whole array as a JsonDocument plus an AsyncResponseStream buffer needed the full content in RAM
 //twice on top of the list itself; with 20 long scheduled messages that aborted the device on every
 //page load (operator new in AsyncResponseStream's cbuf). Only one serialized element is held at a
-//time now. An element that can't be built (out of memory) is skipped rather than sent truncated.
-void sendJsonArrayChunked(AsyncWebServerRequest *request, int count, void (*fillElement)(int index, JsonDocument &element)) {
+//time now.
+//
+//The response must never look like a complete list when it isn't one - a client (the rotation
+//editor) submits what it got back as the full replacement (CODE_REVIEW_V8.md #4/#5). So instead of
+//skipping an element that can't be built (out of memory), or mixing old and new entries when the
+//list changes between two chunks (*generation moved on), the response just ends there without the
+//closing "]": invalid JSON the client rejects.
+void sendJsonArrayChunked(AsyncWebServerRequest *request, int count, void (*fillElement)(int index, JsonDocument &element), uint32_t *generation) {
   struct ChunkState {
     int nextElement = 0;
     bool opened = false;
     bool closed = false;
+    bool aborted = false;
+    uint32_t generation = 0;
     String pending;
     size_t pendingOffset = 0;
   };
   std::shared_ptr<ChunkState> state = std::make_shared<ChunkState>();
+  state->generation = *generation;
   AsyncWebServerResponse *response = request->beginChunkedResponse("application/json",
-    [state, count, fillElement](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+    [state, count, fillElement, generation](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
       size_t written = 0;
       while (written < maxLen) {
         if (state->pendingOffset >= state->pending.length()) {
           //Produce the next piece: "[", then each element (comma-separated), then "]".
           state->pending = String();
           state->pendingOffset = 0;
-          if (!state->opened) {
+          if (state->aborted) {
+            break;
+          } else if (!state->opened) {
             state->opened = true;
             state->pending = "[";
           } else if (state->nextElement < count) {
+            if (*generation != state->generation) {
+              SerialPrintln(F("List changed while streaming it - ending the response incomplete"));
+              state->aborted = true;
+              break;
+            }
             JsonDocument element;
             fillElement(state->nextElement, element);
-            if (!element.overflowed()) {
-              //serializeJson() into a String replaces its content, it doesn't append - the
-              //separator is added afterwards.
-              serializeJson(element, state->pending);
-              if (state->nextElement > 0) {
-                state->pending = "," + state->pending;
-              }
+            if (element.overflowed()) {
+              SerialPrintln(F("List element ") + String(state->nextElement) + F(" incomplete (out of memory) - ending the response incomplete"));
+              state->aborted = true;
+              break;
+            }
+            //serializeJson() into a String replaces its content, it doesn't append - the
+            //separator is added afterwards. Every earlier element was emitted (an unbuildable one
+            //aborts above), so the index decides the comma.
+            serializeJson(element, state->pending);
+            if (state->nextElement > 0) {
+              state->pending = "," + state->pending;
             }
             state->nextElement++;
           } else if (!state->closed) {

@@ -112,6 +112,13 @@ bool isDisplayJobBusy() {
   return displayJob.state != DISPLAY_JOB_IDLE;
 }
 
+//A temporary message (/api/text with a duration, a scheduled message) is being shown or held -
+//only those jobs carry a hold time. Lets Rotation tell its own refresh jobs from a message
+//displacing it (CODE_REVIEW_V8.md #3).
+bool isTemporaryMessageJobBusy() {
+  return isDisplayJobBusy() && displayJob.finalPauseMs > 0;
+}
+
 void resetDisplayJobWaitSubstate() {
   unsigned long now = millis();
   displayJob.waitUnitsReadyMask = 0;

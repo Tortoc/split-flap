@@ -2446,6 +2446,12 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 						break;
 					case "rotation":
+						if (!rotationItemsLoaded && !localDevelopment) {
+							restoreSubmitButton(loadingIconContainer);
+							showBannerMessage("Rotation konnte nicht vollständig geladen werden. Bitte Seite neu laden.");
+							loadRotationItems();
+							return false;
+						}
 						rotationItemsJson = JSON.stringify(rotationItemsData);
 						break;
 				}
@@ -2917,6 +2923,10 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 		//overlapping fetches (e.g. the tab closed and reopened before the first one returned) could
 		//let the FIRST request's response land AFTER the second and silently stomp the fresher one.
 		var rotationItemsRequestGeneration = 0;
+		//Only a fully loaded list may be saved back - the device ends the response incomplete
+		//(invalid JSON) when its list changed mid-transfer or ran out of memory, and saving an
+		//empty/partial editor would replace the real list (CODE_REVIEW_V8.md #4/#5).
+		var rotationItemsLoaded = false;
 
 		//Fetches the current rotation sequence and renders it.
 		function loadRotationItems() {
@@ -2926,6 +2936,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 			rotationItemsRequestGeneration++;
 			var thisGeneration = rotationItemsRequestGeneration;
+			rotationItemsLoaded = false;
 
 			var xhrRequest = new XMLHttpRequest();
 			xhrRequest.onreadystatechange = function () {
@@ -2935,6 +2946,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					}
 					try {
 						setRotationItems(JSON.parse(this.responseText));
+						rotationItemsLoaded = true;
 					} catch (e) {
 						// Non-critical - the Rotation tab just stays empty/whatever it last showed.
 					}

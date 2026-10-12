@@ -143,6 +143,11 @@ const char* otaPasswordPath = "/otapassword.txt";
 //Only one delivery of the web page at a time - see GET "/"'s comment (BUILD_INFO Punkt 237).
 bool pageDeliveryActive = false;
 unsigned long pageDeliveryStartedAt = 0;
+//Which delivery owns pageDeliveryActive, and its connection - only that delivery's own disconnect
+//releases the guard, and an overdue one gets closed explicitly (CODE_REVIEW_V8.md #2). The client
+//stays valid until that disconnect callback runs, which also clears it.
+uint32_t pageDeliveryGeneration = 0;
+AsyncClient* pageDeliveryClient = nullptr;
 
 //POST /api/rotation-items body, collected into one buffer - see that handler's comment. 8000
 //matches the old form field limit; the text budget (STORED_TEXT_BUDGET) is checked afterwards.
@@ -443,6 +448,10 @@ int pendingBootloaderProbeUnitIndex = -1;
 //(GET /api/units) still sees the real state via displayBusy/displayWriteFailed.
 //A newer push replaces a still-queued older one - only the latest content matters.
 volatile bool pendingExtensionDisplayQueued = false;
+//Set by POST /api/device-role when the role actually changed - loop() then cancels both display
+//controllers (cancelDisplayControllers()) before either runs again (CODE_REVIEW_V8.md #6). Not
+//done in the handler itself: it can run while loop() is yielding in the middle of a display job.
+volatile bool pendingDisplayControllersCancel = false;
 String pendingExtensionDisplaySegment;
 String pendingExtensionDisplayAnimationMode;
 unsigned long pendingExtensionDisplayStaggerMs = 0;
@@ -635,6 +644,17 @@ bool rtcOscillatorStopFlag = false;
 bool showDebugPage = false; //defaults off - the startup debug page can render blank on fresh boots
 volatile bool webRequestActive = false; //skip display updates while a web request is in flight
 LList<ScheduledMessage> scheduledMessages;
+//False while an out-of-memory read left scheduledMessages incomplete - saving that partial list
+//would overwrite every entry never read (CODE_REVIEW_V8.md #1). writeScheduledMessagesToFile()
+//refuses while it's false; ensureScheduledMessagesComplete() retries the load first.
+bool scheduledMessagesComplete = true;
+//Bumped on every change to scheduledMessages / rotationItems - a chunked GET response aborts if
+//its list changes between two chunks instead of mixing old and new entries (CODE_REVIEW_V8.md #4).
+uint32_t scheduledMessagesGeneration = 0;
+uint32_t rotationItemsGeneration = 0;
+//Same as scheduledMessagesComplete, for the rotation list: an incomplete one isn't served by
+//GET /api/rotation-items, since the editor would save it back as the full list.
+bool rotationItemsComplete = true;
 //Fixed array, not LList<RotationItem>: LinkedList's operator[] can dereference a NULL node under
 //interleaved access - a real, reproduced crash. Direct indexing avoids it.
 #define ROTATION_ITEMS_MAX 20
@@ -691,6 +711,14 @@ unsigned long rotationItemAcceptedSeconds = 0;
 //below durationSeconds forever, permanently blocking every item behind it too. Reset alongside
 //rotationItemAcceptedSeconds, at every one of its own reset points.
 unsigned long rotationItemElapsedRealSeconds = 0;
+//rotationItemStarted: a render of the current item was accepted since it became current (or since
+//a temporary message displaced it). rotationItemSettled: that render has finished - from then on
+//every second counts toward the item's duration, even while a clock/date item refreshes its own
+//changing content (CODE_REVIEW_V8.md #3: with HH:mm:ss every tick started a new job, so no second
+//ever counted and the item only advanced via the stuck-item grace). Reset with
+//rotationItemAcceptedSeconds.
+bool rotationItemStarted = false;
+bool rotationItemSettled = false;
 //Set by checkRotation() from the current item's Alignment field ("" = inherit the default) and
 //threaded through to showText() as an override.
 String rotationCurrentAlignment = "";
@@ -1161,9 +1189,13 @@ void setup() {
       //watchdog reset after ~8s) or crashed it in lfs_mlist_isopen() (LittleFS's list of open
       //files corrupted) - sequential deliveries, parallel non-file requests and uploads alone were
       //all stable. A second visitor during a delivery gets a tiny page that reloads itself after a
-      //second. Released when the delivering connection ends; the time limit only guards against
-      //a release that somehow never happens.
-      if (pageDeliveryActive && millis() - pageDeliveryStartedAt < 30000) {
+      //second. Released only when the delivering connection itself ends. A delivery still running
+      //after 30s (very slow client) is closed for the next visitor - but that visitor waits for
+      //the actual disconnect too, so two file responses never overlap (CODE_REVIEW_V8.md #2).
+      if (pageDeliveryActive) {
+        if (millis() - pageDeliveryStartedAt >= 30000 && pageDeliveryClient != nullptr) {
+          pageDeliveryClient->close(); //deferred to its next poll; its onDisconnect then releases the guard and the file
+        }
         AsyncWebServerResponse *busyResponse = request->beginResponse(503, "text/html",
           String(F("<!DOCTYPE html><meta http-equiv=\"refresh\" content=\"1\"><p>Einen Moment ...</p>")));
         busyResponse->addHeader("Retry-After", "1");
@@ -1172,8 +1204,13 @@ void setup() {
       }
       pageDeliveryActive = true;
       pageDeliveryStartedAt = millis();
-      request->onDisconnect([]() {
-        pageDeliveryActive = false;
+      uint32_t deliveryGeneration = ++pageDeliveryGeneration;
+      pageDeliveryClient = request->client();
+      request->onDisconnect([deliveryGeneration]() {
+        if (deliveryGeneration == pageDeliveryGeneration) {
+          pageDeliveryActive = false;
+          pageDeliveryClient = nullptr;
+        }
       });
 
       //Actually stored gzip-compressed as "/index.html.gz" - AsyncFileResponse falls back to that
@@ -1708,6 +1745,8 @@ void setup() {
                 rotationCurrentIndex = 0;
                 rotationItemAcceptedSeconds = 0;
                 rotationItemElapsedRealSeconds = 0;
+                rotationItemStarted = false;
+                rotationItemSettled = false;
               }
 
               writeFile(LittleFS, deviceModePath, deviceMode.c_str());
@@ -1756,7 +1795,11 @@ void setup() {
     //way, BUILD_INFO Punkt 235). One registration for both methods, same reason as /api/wifi's.
     webServer.on("/api/rotation-items", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (request->method() == ASYNC_HTTP_GET) {
-        sendJsonArrayChunked(request, rotationItemCount, fillRotationItemJson);
+        if (!ensureRotationItemsComplete()) {
+          request->send(503, "text/plain", "Rotation items not fully loaded (low memory), try again shortly");
+          return;
+        }
+        sendJsonArrayChunked(request, rotationItemCount, fillRotationItemJson, &rotationItemsGeneration);
         return;
       }
       if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
@@ -2622,8 +2665,14 @@ void setup() {
     //previously overflowed the AsyncWebServer callback's small stack). Deliberately a separate
     //registration, not merged with DELETE below.
     webServer.on("/api/scheduled-messages", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
+      //An incomplete list (see scheduledMessagesComplete) isn't served as if it were the whole
+      //schedule - checkScheduledMessages() keeps retrying the load from loop().
+      if (!scheduledMessagesComplete) {
+        request->send(503, "text/plain", "Scheduled messages not fully loaded (low memory), try again shortly");
+        return;
+      }
       //Element by element - see sendJsonArrayChunked()'s comment for why.
-      sendJsonArrayChunked(request, scheduledMessages.size(), fillScheduledMessageJson);
+      sendJsonArrayChunked(request, scheduledMessages.size(), fillScheduledMessageJson, &scheduledMessagesGeneration);
     });
 
     webServer.on("/api/scheduled-messages", ASYNC_HTTP_DELETE, [](AsyncWebServerRequest * request) {
@@ -2856,6 +2905,7 @@ void setup() {
       if (deviceRole != newRole) {
         deviceRole = newRole;
         writeFile(LittleFS, deviceRolePath, deviceRole.c_str());
+        pendingDisplayControllersCancel = true;
         changed = true;
       }
       if (extensionLinkMode != newLinkMode) {
@@ -3471,14 +3521,27 @@ void performOneSecondDisplayTick() {
     //Mode Selection
     if (deviceMode == DEVICE_MODE_ROTATION) {
       //rotationCurrentAlignment ("" = inherit the default) is set every tick by checkRotation().
-      //Only count this second toward the current item's duration if it was actually accepted -
-      //see rotationItemAcceptedSeconds' own comment. Additionally requires the display to have
-      //actually SETTLED (!isDisplayJobBusy()) before counting: showText() already returns true
-      //the moment a job merely STARTS toward this item, well before the flaps have actually
-      //finished moving - counting from there would consume part of an item's configured duration
-      //with motor movement time rather than genuinely stationary, readable display time.
+      //Counts this second toward the current item's duration only once its first render has
+      //SETTLED - showText() already returns true the moment a job merely STARTS, well before the
+      //flaps have finished moving, and that movement time isn't readable display time. A
+      //temporary message (only those hold, finalPauseMs > 0) displaces the item: it has to be
+      //rendered and settle again afterwards. See rotationItemSettled's comment for why a running
+      //job alone doesn't stop the count once settled.
+      bool foreignJob = isTemporaryMessageJobBusy();
+      if (foreignJob) {
+        rotationItemStarted = false;
+        rotationItemSettled = false;
+      } else if (rotationItemStarted && !isDisplayJobBusy()) {
+        rotationItemSettled = true;
+      }
       bool rotationTextAccepted = showText(inputText, 0, rotationCurrentAlignment, rotationCurrentAnimationMode, rotationCurrentAnimationStaggerMs);
-      if (rotationTextAccepted && !isDisplayJobBusy()) {
+      if (rotationTextAccepted) {
+        rotationItemStarted = true;
+        if (!isDisplayJobBusy()) {
+          rotationItemSettled = true; //already showing exactly this - nothing to move
+        }
+      }
+      if (rotationItemSettled && !foreignJob) {
         rotationItemAcceptedSeconds++;
       }
     }
@@ -3517,6 +3580,11 @@ void loop() {
 #endif
 
   tickUnitReadiness();
+
+  if (pendingDisplayControllersCancel) {
+    pendingDisplayControllersCancel = false;
+    cancelDisplayControllers();
+  }
 
   //Advances the display-update state machine by at most one I2C op, unconditionally and before
   //any deferred-request handling below, so an in-progress display update can't block loop().

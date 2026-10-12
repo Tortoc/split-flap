@@ -73,6 +73,16 @@ RotationItemType stringToRotationItemType(const String &value) {
 //item's duration elapses. Mirrors checkCountdown()'s "recompute inputText every second" pattern -
 //called once per second from loop(), alongside checkCountdown()/checkScheduledMessages().
 void checkRotation() {
+  //Retry an incomplete load (see rotationItemsComplete) - before the checks below, since a load
+  //that failed at the first item leaves rotationItemCount at 0. At most every 10s.
+  if (!rotationItemsComplete) {
+    static unsigned long lastReloadAttemptAt = 0;
+    if (millis() - lastReloadAttemptAt >= 10000) {
+      lastReloadAttemptAt = millis();
+      ensureRotationItemsComplete();
+    }
+  }
+
   if (deviceMode != DEVICE_MODE_ROTATION || rotationItemCount == 0) {
     return;
   }
@@ -81,6 +91,8 @@ void checkRotation() {
     rotationCurrentIndex = 0; //list shrank since the last advance - fall back to the start
     rotationItemAcceptedSeconds = 0;
     rotationItemElapsedRealSeconds = 0;
+    rotationItemStarted = false;
+    rotationItemSettled = false;
   }
 
   //timezone.now() doesn't return real UTC - see getRealUtcNow()'s comment. Only used below for
@@ -108,10 +120,14 @@ void checkRotation() {
     rotationCurrentIndex = (rotationCurrentIndex + 1) % rotationItemCount;
     rotationItemAcceptedSeconds = 0;
     rotationItemElapsedRealSeconds = 0;
+    rotationItemStarted = false;
+    rotationItemSettled = false;
   } else if (rotationItemAcceptedSeconds >= (unsigned long)durationSeconds) {
     rotationCurrentIndex = (rotationCurrentIndex + 1) % rotationItemCount;
     rotationItemAcceptedSeconds = 0;
     rotationItemElapsedRealSeconds = 0;
+    rotationItemStarted = false;
+    rotationItemSettled = false;
   }
 
   RotationItem &currentItem = rotationItems[rotationCurrentIndex];
@@ -206,6 +222,7 @@ bool replaceRotationItemsFromJson(const char *rotationItemsJson) {
   }
 
   rotationItemCount = 0;
+  rotationItemsGeneration++; //see its own comment - an in-flight GET must not mix both lists
   for (JsonVariant value : jsonDocument.as<JsonArray>()) {
     if (rotationItemCount >= ROTATION_ITEMS_MAX) {
       SerialPrintln(F("Rotation items JSON has more than ROTATION_ITEMS_MAX entries - dropping the rest"));
@@ -221,15 +238,19 @@ bool replaceRotationItemsFromJson(const char *rotationItemsJson) {
   rotationCurrentIndex = 0;
   rotationItemAcceptedSeconds = 0;
   rotationItemElapsedRealSeconds = 0;
+  rotationItemStarted = false;
+  rotationItemSettled = false;
 
   //Couldn't be saved (e.g. out of memory): roll back to the untouched file instead of running a
   //list that would be gone after the next reboot (CODE_REVIEW_V7.md #1).
   if (!writeRotationItemsToFile()) {
     rotationItemCount = 0;
+    rotationItemsGeneration++;
     loadRotationItemsFromFile();
     releaseUnusedRotationItems();
     return false;
   }
+  rotationItemsComplete = true; //memory and file hold the same, complete list again
   return true;
 }
 
@@ -262,9 +283,24 @@ void releaseUnusedRotationItems() {
 
 //Appends the persisted rotation items (element by element, see readJsonArrayFile()) - at boot,
 //and to roll back after a failed save. Callers reset rotationItemCount first. A missing or broken
-//file just leaves the list empty, as before.
+//file just leaves the list empty, as before. Out of memory marks the list incomplete (see
+//rotationItemsComplete).
 void loadRotationItemsFromFile() {
-  readJsonArrayFile(rotationItemsPath, appendRotationItemFromJson);
+  rotationItemsComplete = (readJsonArrayFile(rotationItemsPath, appendRotationItemFromJson) != JSON_ARRAY_FILE_NO_MEMORY);
+  if (!rotationItemsComplete) {
+    SerialPrintln(F("Out of memory while loading rotation items - list incomplete until a reload succeeds"));
+  }
+}
+
+//Retries an incomplete load (see rotationItemsComplete). True once memory matches the file.
+bool ensureRotationItemsComplete() {
+  if (!rotationItemsComplete) {
+    rotationItemCount = 0;
+    rotationItemsGeneration++;
+    loadRotationItemsFromFile();
+    releaseUnusedRotationItems();
+  }
+  return rotationItemsComplete;
 }
 
 void fillRotationItemJson(int index, JsonDocument &element) {
