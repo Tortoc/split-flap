@@ -899,7 +899,125 @@
 		/* Only as wide as the selected entry (field-sizing); browsers without it fall back to the
 		   width of the longest entry. */
 		select.ls-rotation-type {
+			width: auto;
 			field-sizing: content;
+		}
+
+		/* Rotation item: collapsible - a one-line summary, the labelled fields when expanded. */
+		.ls-rot-item {
+			border: 1px solid var(--border);
+			border-radius: var(--radius-xl);
+		}
+
+		.ls-rot-item + .ls-rot-item {
+			margin-top: 8px;
+		}
+
+		.ls-rot-item summary {
+			list-style: none;
+			display: flex;
+			align-items: center;
+			gap: 10px;
+			padding: 10px 12px;
+			cursor: pointer;
+		}
+
+		.ls-rot-item summary::-webkit-details-marker {
+			display: none;
+		}
+
+		.ls-rot-item[open] summary {
+			border-bottom: 1px solid var(--border);
+		}
+
+		.ls-rot-num {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			flex: none;
+			width: 1.5rem;
+			height: 1.5rem;
+			border-radius: 9999px;
+			background: var(--muted);
+			font-size: var(--text-xs);
+			font-weight: 600;
+		}
+
+		.ls-rot-type {
+			flex: none;
+			padding: 1px 8px;
+			border: 1px solid var(--border);
+			border-radius: 9999px;
+			font-size: var(--text-xs);
+			font-weight: 500;
+		}
+
+		.ls-rot-sum {
+			flex: 1;
+			min-width: 0;
+			font-family: var(--font-mono);
+			white-space: nowrap;
+			overflow: hidden;
+			text-overflow: ellipsis;
+		}
+
+		.ls-rot-badge {
+			flex: none;
+			padding: 1px 8px;
+			border-radius: 9999px;
+			background: var(--muted);
+			font-size: var(--text-xs);
+			white-space: nowrap;
+		}
+
+		.ls-rot-dur {
+			flex: none;
+			font-size: var(--text-xs);
+			color: var(--muted-foreground);
+			white-space: nowrap;
+		}
+
+		.ls-rot-chev {
+			flex: none;
+			color: var(--muted-foreground);
+			transition: transform .15s;
+		}
+
+		.ls-rot-item[open] .ls-rot-chev {
+			transform: rotate(90deg);
+		}
+
+		.ls-rot-body {
+			display: flex;
+			flex-wrap: wrap;
+			align-items: flex-end;
+			gap: 14px 20px;
+			padding: 12px;
+		}
+
+		.ls-rot-field {
+			display: flex;
+			flex-direction: column;
+			gap: 6px;
+		}
+
+		/* Content takes the rest of the type's row, wrapping below it only when there's no room. */
+		.ls-rot-field-wide {
+			flex: 1 1 20rem;
+		}
+
+		.ls-rot-field-end {
+			margin-left: auto;
+		}
+
+		.ls-rot-field-end .ls-message-remove {
+			height: 2rem;
+		}
+
+		.ls-rot-label {
+			font-size: var(--text-xs);
+			font-weight: 500;
+			color: var(--muted-foreground);
 		}
 
 		.ls-rotation-item-content input {
@@ -964,13 +1082,6 @@
 		.ls-rotation-align-btn {
 			width: 2rem;
 			padding: 0;
-		}
-
-		/* Same hairline divider as between Ausrichtung/Geschwindigkeit/Animation at the top of the
-		   page - keeps the per-item alignment and animation button groups apart. */
-		.ls-rotation-item-animation {
-			border-left: 1px solid var(--border);
-			padding-left: 10px;
 		}
 
 		.ls-rotation-item-animation input[type=number] {
@@ -3180,7 +3291,9 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 		var rotationItemsData = [];
 
 		function addRotationItem() {
-			rotationItemsData.push({ type: "text", value: "", format: "", targetDateTimeUnix: 0, prefix: "", suffix: "", durationSeconds: 5, alignment: "", animationMode: "", animationStaggerMs: -1 });
+			var newItem = { type: "text", value: "", format: "", targetDateTimeUnix: 0, prefix: "", suffix: "", durationSeconds: 5, alignment: "", animationMode: "", animationStaggerMs: -1 };
+			rotationItemsData.push(newItem);
+			rotationItemOpen.set(newItem, true); //a new entry opens right away, ready to fill in
 			renderRotationItems();
 		}
 
@@ -3255,8 +3368,23 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 			for (var index = 0; index < rotationItemsData.length; index++) {
 				var item = rotationItemsData[index];
+
+				//Collapsed: a one-line summary. Expanded: the labelled fields. Open/closed survives the
+				//re-renders that type/alignment/animation changes trigger (rotationItemOpen).
+				var details = document.createElement("details");
+				details.className = "ls-rot-item";
+				details.open = rotationItemOpen.get(item) === true;
+				details.addEventListener("toggle", (function (it, d) { return function () { rotationItemOpen.set(it, d.open); }; })(item, details));
+				var summary = document.createElement("summary");
+				fillRotationSummary(summary, item, index);
+				details.appendChild(summary);
 				var row = document.createElement("div");
-				row.className = "ls-rotation-item";
+				row.className = "ls-rot-body";
+				details.appendChild(row);
+				//Typing in a field keeps the summary line current without a full re-render.
+				var refreshSummary = (function (sum, it, i) { return function () { fillRotationSummary(sum, it, i); }; })(summary, item, index);
+				row.addEventListener("input", refreshSummary);
+				row.addEventListener("change", refreshSummary);
 
 				var typeSelect = document.createElement("select");
 				typeSelect.className = "ls-rotation-type";
@@ -3268,7 +3396,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					typeSelect.appendChild(optionElement);
 				});
 				typeSelect.onchange = (function (i) { return function () { updateRotationItemType(i, this.value); }; })(index);
-				row.appendChild(typeSelect);
+				addRotationField(row, "Typ", typeSelect);
 
 				var contentWrapper = document.createElement("div");
 				contentWrapper.className = "ls-rotation-item-content";
@@ -3329,7 +3457,8 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					contentWrapper.appendChild(textInput);
 				}
 
-				row.appendChild(contentWrapper);
+				//A text field already has the display's exact width - only the other types' inputs may grow.
+				addRotationField(row, "Inhalt", contentWrapper, item.type === "text" ? "" : "ls-rot-field-wide");
 
 				var durationWrapper = document.createElement("div");
 				durationWrapper.className = "ls-rotation-item-duration";
@@ -3341,7 +3470,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				durationInput.oninput = (function (i) { return function () { updateRotationItemField(i, "durationSeconds", parseInt(this.value, 10) || 5); }; })(index);
 				durationWrapper.appendChild(durationInput);
 				durationWrapper.appendChild(document.createTextNode("Sek."));
-				row.appendChild(durationWrapper);
+				addRotationField(row, "Dauer", durationWrapper);
 
 				//Per-item alignment override - same 3 icons as the top-level Ausrichtung buttons.
 				//None active means "inherit the default alignment" (the top buttons' current setting).
@@ -3361,7 +3490,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					alignButton.onclick = (function (i, value) { return function () { updateRotationItemAlignment(i, value); }; })(index, option[0]);
 					alignWrapper.appendChild(alignButton);
 				});
-				row.appendChild(alignWrapper);
+				addRotationField(row, "Ausrichtung", alignWrapper);
 
 				//Per-item animation override - same 5 icons as the top-level Animation field (Punkt
 				//189), same "none active = inherit" toggle behavior as alignWrapper above (found
@@ -3401,17 +3530,68 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				animationStaggerInput.value = item.animationMode === "" ? globalStaggerMs : item.animationStaggerMs;
 				animationStaggerInput.oninput = (function (i) { return function () { updateRotationItemAnimationStaggerMs(i, this.value); }; })(index);
 				animationWrapper.appendChild(animationStaggerInput);
-				row.appendChild(animationWrapper);
+				addRotationField(row, "Animation", animationWrapper);
 
 				var removeButton = document.createElement("span");
 				removeButton.className = "ls-message-remove";
 				removeButton.innerText = "Entfernen";
 				removeButton.onclick = (function (i) { return function () { removeRotationItem(i); }; })(index);
-				row.appendChild(removeButton);
+				addRotationField(row, "", removeButton, "ls-rot-field-end");
 
-				container.appendChild(row);
+				container.appendChild(details);
 			}
 			sizeRotationTextInputs();
+		}
+
+		//Which rotation items are expanded - keyed by the item object itself, so it follows the item
+		//through re-renders and removals and is never sent to the device.
+		var rotationItemOpen = new WeakMap();
+
+		var ROTATION_TYPE_LABELS = { text: "Text", clock: "Uhrzeit", date: "Datum", countdown: "Countdown", countup: "Countup" };
+		var ROTATION_ALIGNMENT_LABELS = { left: "Links", center: "Mittig", right: "Rechts" };
+		var ROTATION_ANIMATION_LABELS = { "simultaneous": "Gleichzeitig", "left-to-right": "Links → Rechts", "right-to-left": "Rechts → Links", "outside-in": "Außen → Mitte", "inside-out": "Mitte → Außen" };
+
+		//A labelled field in an expanded rotation item.
+		function addRotationField(body, label, control, extraClass) {
+			var field = document.createElement("div");
+			field.className = "ls-rot-field" + (extraClass ? " " + extraClass : "");
+			if (label) {
+				var labelElement = document.createElement("span");
+				labelElement.className = "ls-rot-label";
+				labelElement.innerText = label;
+				field.appendChild(labelElement);
+			}
+			field.appendChild(control);
+			body.appendChild(field);
+		}
+
+		//One-line summary of a rotation item: number, type, what it shows, its own overrides, duration.
+		function fillRotationSummary(summary, item, index) {
+			var content;
+			if (item.type === "text") {
+				content = item.value ? "„" + item.value + "“" : "(kein Text)";
+			} else if (item.type === "clock" || item.type === "date") {
+				content = "Format " + (item.format || (item.type === "clock" ? "HH:mm:ss" : "dd.MM.yyyy"));
+			} else {
+				var date = "";
+				if (item.targetDateTimeUnix > 0) {
+					var parts = formatUnixSecondsForDeviceTimezone(item.targetDateTimeUnix, false).split("T")[0].split("-");
+					date = parts[2] + "." + parts[1] + "." + parts[0];
+				}
+				content = [item.prefix, date || "(kein Datum)", item.suffix].filter(function (part) { return part; }).join(" · ");
+			}
+			var badges = "";
+			if (item.alignment) {
+				badges += '<span class="ls-rot-badge">' + ROTATION_ALIGNMENT_LABELS[item.alignment] + "</span>";
+			}
+			if (item.animationMode) {
+				badges += '<span class="ls-rot-badge">' + ROTATION_ANIMATION_LABELS[item.animationMode] + " · " + item.animationStaggerMs + " ms</span>";
+			}
+			summary.innerHTML = '<span class="ls-rot-num">' + (index + 1) + "</span>" +
+				'<span class="ls-rot-type">' + ROTATION_TYPE_LABELS[item.type] + "</span>" +
+				'<span class="ls-rot-sum">' + escapeHtml(content) + "</span>" + badges +
+				'<span class="ls-rot-dur">' + item.durationSeconds + " s</span>" +
+				'<svg class="ls-rot-chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 6l6 6-6 6"></path></svg>';
 		}
 
 		//Makes every rotation text field exactly as wide as its maxLength in characters. Measured
