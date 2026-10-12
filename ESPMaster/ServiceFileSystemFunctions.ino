@@ -355,6 +355,59 @@ bool writeJsonArrayFile(const char *path, int count, void (*fillElement)(int ind
   return finishJsonFileWrite(writtenPath, path, ok && out.accepted() == expected, startedAt);
 }
 
+//Answers a request with a JSON array generated one element at a time as a chunked response - the
+//HTTP counterpart of writeJsonArrayFile(), using the same fillElement() functions. Building the
+//whole array as a JsonDocument plus an AsyncResponseStream buffer needed the full content in RAM
+//twice on top of the list itself; with 20 long scheduled messages that aborted the device on every
+//page load (operator new in AsyncResponseStream's cbuf). Only one serialized element is held at a
+//time now. An element that can't be built (out of memory) is skipped rather than sent truncated.
+void sendJsonArrayChunked(AsyncWebServerRequest *request, int count, void (*fillElement)(int index, JsonDocument &element)) {
+  struct ChunkState {
+    int nextElement = 0;
+    bool opened = false;
+    bool closed = false;
+    String pending;
+    size_t pendingOffset = 0;
+  };
+  std::shared_ptr<ChunkState> state = std::make_shared<ChunkState>();
+  AsyncWebServerResponse *response = request->beginChunkedResponse("application/json",
+    [state, count, fillElement](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+      size_t written = 0;
+      while (written < maxLen) {
+        if (state->pendingOffset >= state->pending.length()) {
+          //Produce the next piece: "[", then each element (comma-separated), then "]".
+          state->pending = String();
+          state->pendingOffset = 0;
+          if (!state->opened) {
+            state->opened = true;
+            state->pending = "[";
+          } else if (state->nextElement < count) {
+            JsonDocument element;
+            fillElement(state->nextElement, element);
+            if (!element.overflowed()) {
+              if (state->nextElement > 0) {
+                state->pending = ",";
+              }
+              serializeJson(element, state->pending);
+            }
+            state->nextElement++;
+          } else if (!state->closed) {
+            state->closed = true;
+            state->pending = "]";
+          } else {
+            break; //everything sent
+          }
+        }
+        size_t take = min(maxLen - written, state->pending.length() - state->pendingOffset);
+        memcpy(buffer + written, state->pending.c_str() + state->pendingOffset, take);
+        state->pendingOffset += take;
+        written += take;
+      }
+      return written;
+    });
+  request->send(response);
+}
+
 //Reads a JSON array file one element at a time, handing each to handleElement() - the read-side
 //counterpart of writeJsonArrayFile(): neither the whole file as a String nor a document holding
 //every element is ever in memory. Elements already handed over before an error stay handed over.

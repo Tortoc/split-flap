@@ -1676,35 +1676,8 @@ void setup() {
     //Own small handler, not sharing a stack frame with /api/settings - only fetched when the
     //Rotation tab is opened.
     webServer.on("/api/rotation-items", HTTP_GET, [](AsyncWebServerRequest * request) {
-      webRequestActive = true;
-
-      JsonDocument rotationDoc;
-      JsonArray rotationArray = rotationDoc.to<JsonArray>();
-      unsigned long rotationRequestStart = millis();
-
-      //No yield() here - pure in-memory struct->JSON copying, finishes in microseconds; a yield()
-      //here previously overflowed the AsyncWebServer callback's stack. Time budget below is a
-      //defensive fallback only.
-      for (int i = 0; i < rotationItemCount && (millis() - rotationRequestStart) < 1000; i++) {
-        RotationItem &item = rotationItems[i]; //plain array indexing, see rotationItems' declaration
-        JsonObject itemObject = rotationArray.add<JsonObject>();
-        itemObject["type"] = rotationItemTypeToString(item.Type);
-        itemObject["value"] = item.Value;
-        itemObject["format"] = item.Format;
-        itemObject["targetDateTimeUnix"] = item.TargetDateTimeUnix;
-        itemObject["prefix"] = item.Prefix;
-        itemObject["suffix"] = item.Suffix;
-        itemObject["durationSeconds"] = item.DurationSeconds;
-        itemObject["alignment"] = rotationAlignmentOverrideToString(item.Alignment);
-        itemObject["animationMode"] = rotationAnimationModeOverrideToString(item.AnimationMode);
-        itemObject["animationStaggerMs"] = item.AnimationStaggerMs;
-      }
-
-      AsyncResponseStream *response = request->beginResponseStream("application/json");
-      serializeJson(rotationDoc, *response);
-      request->send(response);
-
-      webRequestActive = false;
+      //Element by element - see sendJsonArrayChunked()'s comment for why.
+      sendJsonArrayChunked(request, rotationItemCount, fillRotationItemJson);
     });
 
     //Consolidates the four pure-diagnostic endpoints (former /api/health, /api/heap,
@@ -2503,21 +2476,8 @@ void setup() {
     //previously overflowed the AsyncWebServer callback's small stack). Deliberately a separate
     //registration, not merged with DELETE below.
     webServer.on("/api/scheduled-messages", HTTP_GET, [](AsyncWebServerRequest * request) {
-      JsonDocument scheduledDoc;
-      JsonArray scheduledArray = scheduledDoc.to<JsonArray>();
-      unsigned long scheduledRequestStart = millis();
-
-      for (int i = 0; i < scheduledMessages.size() && (millis() - scheduledRequestStart) < 1000; i++) {
-        ScheduledMessage msg = scheduledMessages.get(i);
-        JsonObject entry = scheduledArray.add<JsonObject>();
-        entry["scheduledDateTimeUnix"] = msg.ScheduledDateTimeUnix;
-        entry["message"] = msg.Message;
-        entry["showIndefinitely"] = msg.ShowIndefinitely;
-      }
-
-      AsyncResponseStream *response = request->beginResponseStream("application/json");
-      serializeJson(scheduledDoc, *response);
-      request->send(response);
+      //Element by element - see sendJsonArrayChunked()'s comment for why.
+      sendJsonArrayChunked(request, scheduledMessages.size(), fillScheduledMessageJson);
     });
 
     webServer.on("/api/scheduled-messages", HTTP_DELETE, [](AsyncWebServerRequest * request) {
