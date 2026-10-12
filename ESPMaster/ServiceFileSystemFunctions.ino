@@ -385,10 +385,12 @@ void sendJsonArrayChunked(AsyncWebServerRequest *request, int count, void (*fill
             JsonDocument element;
             fillElement(state->nextElement, element);
             if (!element.overflowed()) {
-              if (state->nextElement > 0) {
-                state->pending = ",";
-              }
+              //serializeJson() into a String replaces its content, it doesn't append - the
+              //separator is added afterwards.
               serializeJson(element, state->pending);
+              if (state->nextElement > 0) {
+                state->pending = "," + state->pending;
+              }
             }
             state->nextElement++;
           } else if (!state->closed) {
