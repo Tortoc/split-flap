@@ -3308,7 +3308,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					var alignButton = document.createElement("button");
 					alignButton.type = "button";
 					alignButton.className = "ls-rotation-align-btn" + (isActive ? " active" : "");
-					alignButton.title = isActive ? "Standard-Ausrichtung verwenden" : (option[1] + " (überschreibt Standard für diesen Eintrag)");
+					alignButton.title = option[1]; //same wording as the global alignment buttons
 					alignButton.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="' + option[2] + '"></path></svg>';
 					alignButton.onclick = (function (i, value) { return function () { updateRotationItemAlignment(i, value); }; })(index, option[0]);
 					alignWrapper.appendChild(alignButton);
@@ -3322,17 +3322,17 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				var animationWrapper = document.createElement("div");
 				animationWrapper.className = "ls-rotation-item-animation";
 				[
-					["simultaneous", "Gleichzeitig", "M6 5v14M12 5v14M18 5v14"],
-					["left-to-right", "Links → Rechts", "M4 12h12M11 6l6 6-6 6"],
-					["right-to-left", "Rechts → Links", "M20 12H8M13 6l-6 6 6 6"],
-					["outside-in", "Außen → Mitte", "M3 12h6M6 8l3 4-3 4M21 12h-6M18 8l-3 4 3 4"],
-					["inside-out", "Mitte → Außen", "M12 12H5M8 8l-3 4 3 4M12 12h7M16 8l3 4-3 4"]
+					["simultaneous", "Gleichzeitig - alle Units starten zusammen", "M6 5v14M12 5v14M18 5v14"],
+					["left-to-right", "Links → Rechts - Unit 0 zuerst, dann der Reihe nach", "M4 12h12M11 6l6 6-6 6"],
+					["right-to-left", "Rechts → Links - letzte Unit zuerst, dann der Reihe nach", "M20 12H8M13 6l-6 6 6 6"],
+					["outside-in", "Außen → Mitte - die beiden äußersten Units zuerst, dann paarweise nach innen", "M3 12h6M6 8l3 4-3 4M21 12h-6M18 8l-3 4 3 4"],
+					["inside-out", "Mitte → Außen - die mittleren Units zuerst, dann paarweise nach außen", "M12 12H5M8 8l-3 4 3 4M12 12h7M16 8l3 4-3 4"]
 				].forEach(function (option) {
 					var isActive = item.animationMode === option[0];
 					var animButton = document.createElement("button");
 					animButton.type = "button";
 					animButton.className = "ls-rotation-align-btn" + (isActive ? " active" : "");
-					animButton.title = isActive ? "Standard-Animation verwenden" : (option[1] + " (überschreibt Standard für diesen Eintrag)");
+					animButton.title = option[1]; //same wording as the global animation buttons
 					animButton.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="' + option[2] + '"></path></svg>';
 					animButton.onclick = (function (i, value) { return function () { updateRotationItemAnimation(i, value); }; })(index, option[0]);
 					animationWrapper.appendChild(animButton);
@@ -3351,7 +3351,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				var globalStaggerMs = document.getElementById("inputAnimationStaggerMs").value || 150;
 				animationStaggerInput.title = item.animationMode === ""
 					? "Erbt den globalen Versatz (aktuell " + globalStaggerMs + " ms) - erst ein Icon oben aktivieren, um das für diesen Eintrag zu überschreiben"
-					: "Versatz in ms für diesen Eintrag";
+					: "Versatz in ms zwischen aufeinanderfolgenden Units";
 				animationStaggerInput.value = item.animationMode === "" ? globalStaggerMs : item.animationStaggerMs;
 				animationStaggerInput.oninput = (function (i) { return function () { updateRotationItemAnimationStaggerMs(i, this.value); }; })(index);
 				animationWrapper.appendChild(animationStaggerInput);
