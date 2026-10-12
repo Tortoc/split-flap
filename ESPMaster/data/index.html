@@ -3328,11 +3328,15 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 		}
 
 		function updateRotationItemType(index, newType) {
+			var previousType = rotationItemsData[index].type;
 			rotationItemsData[index].type = newType;
 			//Sensible per-type default so switching type doesn't leave an obviously wrong value behind.
-			if (newType === "clock" && !rotationItemsData[index].format) {
+			//A clock format never fits a date and vice versa, so switching TO clock/date from any other
+			//type always starts with that type's default - previously only an empty format was
+			//replaced, and clock -> date kept "HH:mm:ss".
+			if (newType === "clock" && previousType !== "clock") {
 				rotationItemsData[index].format = "HH:mm:ss";
-			} else if (newType === "date" && !rotationItemsData[index].format) {
+			} else if (newType === "date" && previousType !== "date") {
 				rotationItemsData[index].format = "dd.MM.yyyy";
 			} else if ((newType === "countdown" || newType === "countup") && !rotationItemsData[index].suffix) {
 				rotationItemsData[index].suffix = "Tage";
