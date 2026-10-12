@@ -1745,7 +1745,10 @@ void setup() {
       if (index == 0) {
         //Only one body at a time, only for a caller that may change settings, and bounded - so an
         //unauthenticated or oversized request never makes the device allocate anything.
-        if (rotationBodyOwner != nullptr || request->method() != HTTP_POST ||
+        //Compared against HTTP_GET, never HTTP_POST: WiFiManager pulls in ESP8266WebServer, whose
+        //HTTPMethod enum (HTTP_POST = 3) replaces ESPAsyncWebSrv's own bit values (HTTP_POST =
+        //0b10) project-wide - only HTTP_GET (1) happens to match in both.
+        if (rotationBodyOwner != nullptr || request->method() == HTTP_GET ||
             !(isRequestAllowedWithoutPassword(accessControlSettingsPublic) || requestIsAuthenticated(request))) {
           return;
         }
