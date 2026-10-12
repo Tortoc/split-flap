@@ -1012,10 +1012,48 @@
 
 		.ls-rot-body {
 			display: flex;
+			flex-direction: column;
+			gap: 14px;
+			padding: 12px;
+		}
+
+		.ls-rot-row1 {
+			display: flex;
 			flex-wrap: wrap;
 			align-items: flex-end;
 			gap: 14px 20px;
-			padding: 12px;
+		}
+
+		/* Three columns so the animation group sits in the middle of the item, not just between its
+		   neighbours. */
+		.ls-rot-row2 {
+			display: grid;
+			grid-template-columns: 1fr auto 1fr;
+			align-items: end;
+			gap: 14px 20px;
+		}
+
+		.ls-rot-cell-start {
+			justify-self: start;
+		}
+
+		.ls-rot-cell-center {
+			justify-self: center;
+		}
+
+		.ls-rot-cell-end {
+			justify-self: end;
+		}
+
+		@media (max-width: 700px) {
+			.ls-rot-row2 {
+				display: flex;
+				flex-wrap: wrap;
+			}
+
+			.ls-rot-cell-end {
+				margin-left: auto;
+			}
 		}
 
 		.ls-rot-field {
@@ -1024,16 +1062,12 @@
 			gap: 6px;
 		}
 
-		/* Content takes the rest of the type's row, wrapping below it only when there's no room. */
-		.ls-rot-field-wide {
-			flex: 1 1 20rem;
-		}
 
 		.ls-rot-field-end {
 			margin-left: auto;
 		}
 
-		.ls-rot-field-end .ls-message-remove {
+		.ls-rot-cell-end .ls-message-remove {
 			height: 2rem;
 		}
 
@@ -1055,17 +1089,11 @@
 			flex: 1;
 		}
 
-		/* Enough room for prefix + date + suffix side by side - if the row is too narrow, the
-		   controls after it wrap to the next line instead of the three fields stacking up. */
-		.ls-rotation-item-content:has(.ls-rotation-item-countfields) {
-			min-width: 24rem;
-		}
 
-		/* Prefix, date and suffix share the row instead of each taking the standard full field width. */
+		/* Prefix and suffix are 15 characters wide (sizeRotationTextInputs()), the date its natural width. */
 		.ls-rotation-item-countfields input {
-			flex: 1;
+			flex: none;
 			width: auto;
-			min-width: 70px;
 		}
 
 		.ls-rotation-item-countfields input[type="datetime-local"] {
@@ -3410,6 +3438,14 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				var row = document.createElement("div");
 				row.className = "ls-rot-body";
 				details.appendChild(row);
+				//Same layout for every type: row 1 type + content (left) and duration (right), row 2
+				//alignment (left), animation (centred) and remove (right).
+				var rowContent = document.createElement("div");
+				rowContent.className = "ls-rot-row1";
+				var rowSettings = document.createElement("div");
+				rowSettings.className = "ls-rot-row2";
+				row.appendChild(rowContent);
+				row.appendChild(rowSettings);
 				//Typing in a field keeps the summary line current without a full re-render.
 				var refreshSummary = (function (sum, it, i) { return function () { fillRotationSummary(sum, it, i); }; })(summary, item, index);
 				row.addEventListener("input", refreshSummary);
@@ -3425,7 +3461,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					typeSelect.appendChild(optionElement);
 				});
 				typeSelect.onchange = (function (i) { return function () { updateRotationItemType(i, this.value); }; })(index);
-				addRotationField(row, "Typ", typeSelect);
+				addRotationField(rowContent, "Typ", typeSelect);
 
 				var contentWrapper = document.createElement("div");
 				contentWrapper.className = "ls-rotation-item-content";
@@ -3433,6 +3469,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				if (item.type === "clock" || item.type === "date") {
 					var formatInput = document.createElement("input");
 					formatInput.type = "text";
+					formatInput.className = "ls-rotation-text ls-rotation-text-15"; //same 15-character width as prefix/suffix
 					formatInput.placeholder = item.type === "clock" ? "HH:mm:ss" : "dd.MM.yyyy";
 					formatInput.maxLength = 40;
 					formatInput.value = item.format;
@@ -3444,6 +3481,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 					var prefixInput = document.createElement("input");
 					prefixInput.type = "text";
+					prefixInput.className = "ls-rotation-text ls-rotation-text-15";
 					prefixInput.placeholder = "Präfix";
 					prefixInput.maxLength = 40;
 					prefixInput.value = item.prefix;
@@ -3463,6 +3501,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 					var suffixInput = document.createElement("input");
 					suffixInput.type = "text";
+					suffixInput.className = "ls-rotation-text ls-rotation-text-15";
 					suffixInput.placeholder = "Suffix";
 					suffixInput.maxLength = 40;
 					suffixInput.value = item.suffix;
@@ -3486,8 +3525,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					contentWrapper.appendChild(textInput);
 				}
 
-				//A text field already has the display's exact width - only the other types' inputs may grow.
-				addRotationField(row, "Inhalt", contentWrapper, item.type === "text" ? "" : "ls-rot-field-wide");
+				addRotationField(rowContent, "Inhalt", contentWrapper);
 
 				var durationWrapper = document.createElement("div");
 				durationWrapper.className = "ls-rotation-item-duration";
@@ -3499,7 +3537,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				durationInput.oninput = (function (i) { return function () { updateRotationItemField(i, "durationSeconds", parseInt(this.value, 10) || 5); }; })(index);
 				durationWrapper.appendChild(durationInput);
 				durationWrapper.appendChild(document.createTextNode("Sek."));
-				addRotationField(row, "Dauer", durationWrapper);
+				addRotationField(rowContent, "Dauer", durationWrapper, "ls-rot-field-end");
 
 				//Per-item alignment override - same 3 icons as the top-level Ausrichtung buttons.
 				//None active means "inherit the default alignment" (the top buttons' current setting).
@@ -3519,7 +3557,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					alignButton.onclick = (function (i, value) { return function () { updateRotationItemAlignment(i, value); }; })(index, option[0]);
 					alignWrapper.appendChild(alignButton);
 				});
-				addRotationField(row, "Ausrichtung", alignWrapper);
+				addRotationField(rowSettings, "Ausrichtung", alignWrapper, "ls-rot-cell-start");
 
 				//Per-item animation override - same 5 icons as the top-level Animation field (Punkt
 				//189), same "none active = inherit" toggle behavior as alignWrapper above (found
@@ -3559,13 +3597,13 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				animationStaggerInput.value = item.animationMode === "" ? globalStaggerMs : item.animationStaggerMs;
 				animationStaggerInput.oninput = (function (i) { return function () { updateRotationItemAnimationStaggerMs(i, this.value); }; })(index);
 				animationWrapper.appendChild(animationStaggerInput);
-				addRotationField(row, "Animation", animationWrapper);
+				addRotationField(rowSettings, "Animation", animationWrapper, "ls-rot-cell-center");
 
 				var removeButton = document.createElement("span");
 				removeButton.className = "ls-message-remove";
 				removeButton.innerText = "Entfernen";
 				removeButton.onclick = (function (i) { return function () { removeRotationItem(i); }; })(index);
-				addRotationField(row, "", removeButton, "ls-rot-field-end");
+				addRotationField(rowSettings, "", removeButton, "ls-rot-cell-end");
 
 				container.appendChild(details);
 			}
@@ -3710,7 +3748,9 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			document.querySelectorAll("input.ls-rotation-text").forEach(function (input) {
 				var style = getComputedStyle(input);
 				context.font = style.fontWeight + " " + style.fontSize + " " + style.fontFamily;
-				var textWidth = context.measureText("W".repeat(Math.max(input.maxLength, 15))).width;
+				//Prefix/suffix/format: always 15 characters wide; text: its maxLength, at least 15.
+				var characters = input.classList.contains("ls-rotation-text-15") ? 15 : Math.max(input.maxLength, 15);
+				var textWidth = context.measureText("W".repeat(characters)).width;
 				var chrome = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight) +
 					parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth);
 				input.style.width = Math.ceil(textWidth + chrome + 2) + "px"; //+2: room for the caret
