@@ -112,6 +112,18 @@
 #include "ServiceMemoryReserveFunctions.h"
 #include "LittleFS.h"
 
+//Request method values for webServer.on() and request->method() - ESPAsyncWebSrv's own bit flags.
+//The library's HTTP_POST/HTTP_DELETE names can't be used in this sketch: WiFiManager includes
+//ESP8266WebServer, and ESPAsyncWebSrv.h only defines its own WebRequestMethod enum
+//#ifndef WEBSERVER_H - so here HTTP_POST/HTTP_DELETE are ESP8266WebServer's HTTPMethod values (3/6)
+//while the separately compiled library still sets and checks its bit values (2/4). An "HTTP_POST"
+//registration therefore also accepted GET (3 = GET|POST bits), "HTTP_DELETE" also POST, and
+//comparisons against HTTP_POST were never true. Only HTTP_GET (1) happened to match
+//(BUILD_INFO Punkt 236).
+const WebRequestMethodComposite ASYNC_HTTP_GET = 0b00000001;
+const WebRequestMethodComposite ASYNC_HTTP_POST = 0b00000010;
+const WebRequestMethodComposite ASYNC_HTTP_DELETE = 0b00000100;
+
 //--- User-facing settings ---
 //Hostname broadcast via mDNS when USE_MULTICAST is enabled - reachable as "<mdnsHostname>.local"
 //on networks whose clients support mDNS. Persisted, not a compile-time constant - see POST
@@ -1011,7 +1023,7 @@ void setup() {
     //root unauthenticated, including the OTA password itself in plaintext.
 
     //All API routes below live under a single "/api/" prefix - full endpoint reference in API.md.
-    webServer.on("/", HTTP_GET, [](AsyncWebServerRequest * request) {
+    webServer.on("/", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
       unsigned long pageRequestStart = millis();
       SerialPrintln(F("DEBUG: Request Home Page Received"));
       
@@ -1147,7 +1159,7 @@ void setup() {
       SerialPrintln(F("DEBUG: index.html sent (total: ") + String(millis() - pageRequestStart) + F("ms)"));
     });
 
-    webServer.on("/api/settings", HTTP_GET, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/settings", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
       unsigned long settingsStart = millis();
       SerialPrintln(F("DEBUG: Request for Settings Received at ") + String(settingsStart) + F("ms"));
       
@@ -1239,7 +1251,7 @@ void setup() {
     //pattern as /api/wifi etc.) was reproducibly broken on real hardware: a genuine POST request
     //received the GET handler's JSON response instead of "OK", and invalid POST bodies got 200
     //instead of 400. Reverted to two separate registrations, verified working again.
-    webServer.on("/api/settings", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/settings", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
 
       SerialPrintln(F("DEBUG: Request Post of Form Received"));
@@ -1714,8 +1726,8 @@ void setup() {
     //collected into ONE buffer allocated at its final size, unlike a form field, which the web
     //server library grows character by character and copies twice (lists of a few KB got lost that
     //way, BUILD_INFO Punkt 235). One registration for both methods, same reason as /api/wifi's.
-    webServer.on("/api/rotation-items", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
-      if (request->method() == HTTP_GET) {
+    webServer.on("/api/rotation-items", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (request->method() == ASYNC_HTTP_GET) {
         sendJsonArrayChunked(request, rotationItemCount, fillRotationItemJson);
         return;
       }
@@ -1745,10 +1757,7 @@ void setup() {
       if (index == 0) {
         //Only one body at a time, only for a caller that may change settings, and bounded - so an
         //unauthenticated or oversized request never makes the device allocate anything.
-        //Compared against HTTP_GET, never HTTP_POST: WiFiManager pulls in ESP8266WebServer, whose
-        //HTTPMethod enum (HTTP_POST = 3) replaces ESPAsyncWebSrv's own bit values (HTTP_POST =
-        //0b10) project-wide - only HTTP_GET (1) happens to match in both.
-        if (rotationBodyOwner != nullptr || request->method() == HTTP_GET ||
+        if (rotationBodyOwner != nullptr || request->method() != ASYNC_HTTP_POST ||
             !(isRequestAllowedWithoutPassword(accessControlSettingsPublic) || requestIsAuthenticated(request))) {
           return;
         }
@@ -1785,7 +1794,7 @@ void setup() {
     ///api/tcp-status, /api/test) into one registered route, dispatched by ?type= - each
     //registered handler costs a small permanent heap allocation that's never freed, and this
     //device has very little room to spare.
-    webServer.on("/api/diag", HTTP_GET, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/diag", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
       String type = request->hasParam("type") ? request->getParam("type")->value() : "";
 
       if (type == "health") {
@@ -1855,8 +1864,8 @@ void setup() {
     // serial connection at the moment of a crash. One JSON object per line, oldest first.
     // GET+DELETE merged into one registration (heap-saving pattern established for /api/wifi).
     // DELETE (not GET) clears it, to avoid a CSRF-via-GET state change.
-    webServer.on("/api/crash-log", HTTP_GET | HTTP_DELETE, [](AsyncWebServerRequest * request) {
-      if (request->method() == HTTP_GET) {
+    webServer.on("/api/crash-log", ASYNC_HTTP_GET | ASYNC_HTTP_DELETE, [](AsyncWebServerRequest * request) {
+      if (request->method() == ASYNC_HTTP_GET) {
         if (!LittleFS.exists(CRASH_LOG_PATH)) {
           request->send(200, "application/jsonl", "");
           return;
@@ -1875,7 +1884,7 @@ void setup() {
     });
 
     // I2C bus scanner endpoint for diagnostics
-    webServer.on("/api/i2c-scan", HTTP_GET, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/i2c-scan", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
       SerialPrintln(F("DEBUG: I2C scan requested"));
       //Deferred to loop().
       if (pendingLegacyI2CScanSlot.request != nullptr) {
@@ -1893,7 +1902,7 @@ void setup() {
 
     // Admin: upload a compiled Unit.ino firmware image (raw AVR .bin, NOT ESPMaster's own) to be
     // pushed to a unit via /api/units/firmware-push. Requires X-OTA-Password, same as /api/firmware.
-    webServer.on("/api/units/firmware", HTTP_POST,
+    webServer.on("/api/units/firmware", ASYNC_HTTP_POST,
       [](AsyncWebServerRequest * request) {
         //Capture ownership BEFORE releasing it - the one reliable, request-scoped (pointer
         //comparison) way to know whether THIS request's body ever won the shared static file
@@ -2025,7 +2034,7 @@ void setup() {
     //pattern established for /api/wifi etc.). Deliberately its own path, not merged into
     //"/api/units/firmware" - that's a multipart upload registration (different ESPAsyncWebServer
     //callback signature), and that upload route would otherwise intercept a sub-path anyway.
-    webServer.on("/api/units/firmware-push", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/units/firmware-push", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       String action = request->hasParam("action", true) ? request->getParam("action", true)->value() : "";
 
       if (!request->hasParam(PARAM_ID, true)) {
@@ -2110,8 +2119,8 @@ void setup() {
     // (heap-saving pattern established for /api/wifi etc.) - the two branches stay structurally
     // small and independent (unlike the failed /api/settings merge attempt), so the same
     // size-related risk doesn't apply here.
-    webServer.on("/api/units", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
-      if (request->method() == HTTP_GET) {
+    webServer.on("/api/units", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (request->method() == ASYNC_HTTP_GET) {
         SerialPrintln(F("DEBUG: Admin units request received"));
         if (pendingUnitsInfoSlot.request != nullptr) {
           request->send(503, "text/plain", "Another units request is already in progress, try again shortly");
@@ -2201,7 +2210,7 @@ void setup() {
 
     //Replaces a single static web UI file in place, without a full littlefs.bin reflash (which
     //would wipe runtime settings files). Filename allowlisted, not an arbitrary path.
-    webServer.on("/api/web-file", HTTP_POST,
+    webServer.on("/api/web-file", ASYNC_HTTP_POST,
       [](AsyncWebServerRequest * request) {
         //Capture ownership BEFORE releasing it - same request-scoped derivation as
         ///api/units/firmware above.
@@ -2374,7 +2383,7 @@ void setup() {
 
     // Step 1: tell the ESP how big the firmware is and let it erase/prepare the flash region.
     // Body: size=<bytes> (form-encoded).
-    webServer.on("/api/firmware-start", HTTP_POST, [checkOtaPassword](AsyncWebServerRequest * request) {
+    webServer.on("/api/firmware-start", ASYNC_HTTP_POST, [checkOtaPassword](AsyncWebServerRequest * request) {
       if (!checkOtaPassword(request)) {
         request->send(401, "text/plain", "Invalid password");
         return;
@@ -2403,7 +2412,7 @@ void setup() {
 
     //Step 2: one chunk of firmware data - the browser waits for this to return before sending
     //the next one, giving natural backpressure.
-    webServer.on("/api/firmware-chunk", HTTP_POST,
+    webServer.on("/api/firmware-chunk", ASYNC_HTTP_POST,
       [checkOtaPassword](AsyncWebServerRequest * request) {
         //Capture ownership BEFORE releasing it - this reliably tells THIS specific outer-handler
         //invocation whether its own body ever got to claim the shared buffer, independent of
@@ -2505,7 +2514,7 @@ void setup() {
     );
 
     // Step 3: no body needed - finalizes the update (Update.end()) and reboots on success.
-    webServer.on("/api/firmware-finish", HTTP_POST, [checkOtaPassword](AsyncWebServerRequest * request) {
+    webServer.on("/api/firmware-finish", ASYNC_HTTP_POST, [checkOtaPassword](AsyncWebServerRequest * request) {
       if (!checkOtaPassword(request)) {
         request->send(401, "text/plain", "Invalid password");
         return;
@@ -2526,7 +2535,7 @@ void setup() {
 #endif
 
 #if DEBUG_ENABLE == true
-    webServer.on("/api/debug-mode", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/debug-mode", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return;
 
       if (!request->hasParam("enabled", true)) {
@@ -2550,7 +2559,7 @@ void setup() {
     
     //This and reset-units/ota/reset-wifi below are POST, not GET - a GET link is triggerable
     //cross-site (e.g. an <img> tag on any page) without user interaction (CSRF-via-GET).
-    webServer.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/reboot", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return;
 
       SerialPrintln(F("Request to Reboot Received"));
@@ -2576,12 +2585,12 @@ void setup() {
     //.to<JsonArray>()+.add<JsonObject>(), deliberately no yield() in the loop - a yield() here
     //previously overflowed the AsyncWebServer callback's small stack). Deliberately a separate
     //registration, not merged with DELETE below.
-    webServer.on("/api/scheduled-messages", HTTP_GET, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/scheduled-messages", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
       //Element by element - see sendJsonArrayChunked()'s comment for why.
       sendJsonArrayChunked(request, scheduledMessages.size(), fillScheduledMessageJson);
     });
 
-    webServer.on("/api/scheduled-messages", HTTP_DELETE, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/scheduled-messages", ASYNC_HTTP_DELETE, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
 
       SerialPrintln(F("Request to Remove Scheduled Message Received"));
@@ -2618,7 +2627,7 @@ void setup() {
     //Lightweight text-push endpoint for automations (webhooks, Home Assistant, shortcuts, etc.) -
     //just a message and an optional hold time, instead of the full /api/settings form. Same
     //unauthenticated design as /api/settings (this device has no separate login system).
-    webServer.on("/api/text", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/text", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlTextPublic)) return;
 
       String newText = "";
@@ -2694,7 +2703,7 @@ void setup() {
     //animation context - see multiple-units.md and ServiceExtensionFunctions.ino's own comments
     //(pushSegmentToExtension()/applyExtensionDisplaySegment()). Plain form-urlencoded POST, same
     //as every other endpoint in this file.
-    webServer.on("/api/extension-display", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/extension-display", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (String(otaPassword) != "") {
         String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
         if (!constantTimeEquals(providedPassword, String(otaPassword))) {
@@ -2756,10 +2765,10 @@ void setup() {
     //Primary-side extension host list (multiple-units.md) - GET returns the configured hosts plus
     //their last-known health-check status, POST replaces the whole list (same "client always
     //submits the complete list" convention as /api/rotation-items).
-    webServer.on("/api/extension-devices", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/extension-devices", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
 
-      if (request->method() == HTTP_GET) {
+      if (request->method() == ASYNC_HTTP_GET) {
         JsonDocument doc;
         JsonArray arr = doc.to<JsonArray>();
         for (int i = 0; i < extensionDeviceCount; i++) {
@@ -2790,7 +2799,7 @@ void setup() {
     //Device role (multiple-units.md) - own small endpoint, same pattern as mDNS hostname/quiet
     //hours/MQTT rather than folding a fourth, independent concern into the already-large
     ///api/settings handler.
-    webServer.on("/api/device-role", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/device-role", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return;
       if (!request->hasParam("role", true)) {
         request->send(400, "text/plain", "'role' is required");
@@ -2835,8 +2844,8 @@ void setup() {
     //rather than two separate GET/POST registrations on the same path (tried that first; GET
     //requests were reproducibly routed to the POST handler instead - not chasing that library
     //quirk down, this single-registration form sidesteps it and saves even more).
-    webServer.on("/api/wifi", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
-      if (request->method() == HTTP_GET) {
+    webServer.on("/api/wifi", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (request->method() == ASYNC_HTTP_GET) {
         //Gated same as every POST action on this endpoint - these GET polling reads would
         //otherwise leak nearby-network scan results and the device's own currently-connected
         //SSID/IP to anyone unauthenticated on the LAN. The same browser/session that started a
@@ -3040,13 +3049,13 @@ void setup() {
     //category including firmware/flash through this same endpoint.
     //Web UI login (see ServiceAccessControlFunctions.ino's session comment). GET /api/session is
     //public: it only says whether the page should show its login dialog.
-    webServer.on("/api/session", HTTP_GET, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/session", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
       String json = String(F("{\"loginRequired\":")) + (isLoginRequired() ? F("true") : F("false")) +
         F(",\"loggedIn\":") + (String(otaPassword) != "" && requestIsAuthenticated(request) ? F("true") : F("false")) + F("}");
       request->send(200, "application/json", json);
     });
 
-    webServer.on("/api/login", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/login", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       //Same CSRF reasoning as requestIsAuthenticated(): only the web UI itself logs in this way.
       if (!request->hasHeader("X-Requested-With") || request->getHeader("X-Requested-With")->value() != "splitflap") {
         request->send(403, "text/plain", "Missing X-Requested-With header");
@@ -3074,14 +3083,14 @@ void setup() {
       request->send(response);
     });
 
-    webServer.on("/api/logout", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/logout", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       endLoginSession(request);
       AsyncWebServerResponse *response = request->beginResponse(200, "text/plain", "OK");
       response->addHeader("Set-Cookie", F(LOGIN_SESSION_COOKIE "=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict"));
       request->send(response);
     });
 
-    webServer.on("/api/ota-password", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/ota-password", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (!request->hasParam("currentPassword", true)) {
         request->send(400, "text/plain", "'currentPassword' is required");
         return;
@@ -3127,8 +3136,8 @@ void setup() {
       request->send(200, "text/plain", "Security settings updated");
     });
 
-    webServer.on("/api/timezone", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
-      if (request->method() == HTTP_GET) {
+    webServer.on("/api/timezone", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (request->method() == ASYNC_HTTP_GET) {
         JsonDocument doc;
         doc["timezone"] = timezoneSetting;
         AsyncResponseStream *response = request->beginResponseStream("application/json");
@@ -3172,8 +3181,8 @@ void setup() {
     //Own registration, like /api/timezone above - a genuinely new settings category, no existing
     //route it naturally shares with (each registered handler costs a small permanent heap
     //allocation that's never freed, see /api/quiet-hours below - a deliberate, not-free choice).
-    webServer.on("/api/mqtt", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest * request) {
-      if (request->method() == HTTP_GET) {
+    webServer.on("/api/mqtt", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
+      if (request->method() == ASYNC_HTTP_GET) {
         JsonDocument doc;
         doc["mqttEnabled"] = mqttEnabled;
         doc["mqttBrokerHost"] = mqttBrokerHost;
@@ -3240,7 +3249,7 @@ void setup() {
     //broke /api/settings' own response handling on this heap-constrained device - every registered
     //handler costs a small permanent heap allocation that's never freed, and there's very little
     //room to spare.
-    webServer.on("/api/quiet-hours", HTTP_POST, [](AsyncWebServerRequest * request) {
+    webServer.on("/api/quiet-hours", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
 
       if (!request->hasParam("enabled", true) || !request->hasParam("start", true) || !request->hasParam("end", true)) {
