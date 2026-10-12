@@ -194,6 +194,66 @@ bool isReservedI2CAddress(int address) {
   return address == RTC_I2C_ADDRESS;
 }
 
+//Registered as the very first web handler: claims - and answers with 400 - every request the
+//handlers behind it must never see. Since it's a "trivial" handler (no onRequest), the library
+//doesn't even parse such a request's body.
+//
+//1. Multipart boundary outside RFC 2046's 1-70 characters: ESPAsyncWebSrv's multipart parser
+//   loops over the boundary with a uint8_t counter - 256+ characters never end that loop and the
+//   watchdog resets the device, before any handler or password check runs (same bug as
+//   CVE-2026-54571; security review 2026-10-12, OW-01). Mirrors the library's own boundary
+//   extraction (WebRequest.cpp).
+//2. Unknown Host header (DNS rebinding, OW-07): a web page from elsewhere that re-points its own
+//   domain to this device's IP would otherwise read and call everything not behind the password.
+//   Accepted: an IPv4 address, or this device's mDNS/DHCP name - alone, as "<name>.local" or with
+//   any router domain ("<name>.fritz.box"). An extension device configured under a different DNS
+//   alias isn't reachable that way any more.
+class RequestGuard : public AsyncWebHandler {
+  public:
+    bool canHandle(AsyncWebServerRequest *request) override {
+      return hasInvalidMultipartBoundary(request) || !isKnownHost(request->host());
+    }
+    void handleRequest(AsyncWebServerRequest *request) override {
+      request->send(400, "text/plain", F("Bad request (unknown host name or multipart boundary)"));
+    }
+
+  private:
+    static bool hasInvalidMultipartBoundary(AsyncWebServerRequest *request) {
+      if (!request->hasHeader("Content-Type")) {
+        return false;
+      }
+      String value = request->getHeader("Content-Type")->value();
+      if (!value.startsWith("multipart/")) {
+        return false;
+      }
+      String boundary = value.substring(value.indexOf('=') + 1);
+      boundary.replace("\"", "");
+      return value.indexOf('=') == -1 || boundary.length() == 0 || boundary.length() > 70;
+    }
+
+    //True for "<name>", "<name>.local", "<name>.<anything>" (case-insensitive).
+    static bool isOwnName(const String &host, const String &name) {
+      if (name.length() == 0 || host.length() < name.length() || !host.substring(0, name.length()).equalsIgnoreCase(name)) {
+        return false;
+      }
+      return host.length() == name.length() || host.charAt(name.length()) == '.';
+    }
+
+    static bool isIpv4Address(const String &host) {
+      IPAddress address;
+      return host.length() > 0 && isDigit(host.charAt(0)) && address.fromString(host);
+    }
+
+    static bool isKnownHost(String host) {
+      int colon = host.indexOf(':');
+      if (colon != -1) {
+        host = host.substring(0, colon);
+      }
+      //No Host header at all (HTTP/1.0 tools) - no browser sends that, so rebinding can't either.
+      return host.length() == 0 || isIpv4Address(host) || isOwnName(host, mdnsHostname) || isOwnName(host, WiFi.hostname());
+    }
+};
+
 #if MQTT_ENABLE == true
 //WiFiClient/PubSubClient objects declared here, not in ServiceMqttFunctions.ino - the Arduino
 //build concatenates .ino files in filename order (ESPMaster.ino before ServiceMqttFunctions.ino),
@@ -619,6 +679,9 @@ unsigned long displayRenderGeneration = 0;
 unsigned long lastRenderedGeneration = 0;
 bool isPendingReboot = false;
 bool isPendingUnitsReset = false;
+//True while WiFiManager's setup hotspot is open - its password is on the display then, and Quiet
+//Hours must not blank it (see initWiFi(), ServiceWifiFunctions.ino).
+bool wifiSetupPortalOpen = false;
 bool isWifiConfigured = false;
 //Background offline-recovery retry (loop()'s `if (!isWifiConfigured)` block) - see that block's
 //own comment (Code_REVIEW_V5.md #02) for why this exists at all.
@@ -1059,6 +1122,9 @@ void setup() {
     //served no legitimate purpose beyond that and exposed every runtime config file in LittleFS
     //root unauthenticated, including the OTA password itself in plaintext.
 
+    //Must stay the first handler - see RequestGuard.
+    webServer.addHandler(new RequestGuard());
+
     //All API routes below live under a single "/api/" prefix - full endpoint reference in API.md.
     webServer.on("/", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
       unsigned long pageRequestStart = millis();
@@ -1123,6 +1189,8 @@ void setup() {
         html += F("    document.getElementById('crashLogSection').innerHTML = '<div class=\"error\">Network error loading crash log</div>';");
         html += F("  };");
         html += F("  xhrCrash.open('GET', '/api/crash-log', true);");
+        //Both reads need a login since OW-08 - the header lets the session cookie count.
+        html += F("  xhrCrash.setRequestHeader('X-Requested-With', 'splitflap');");
         html += F("  var xhrHeap = new XMLHttpRequest();");
         html += F("  xhrHeap.onreadystatechange = function() {");
         html += F("    if (this.readyState != 4) return;");
@@ -1135,6 +1203,7 @@ void setup() {
         html += F("    document.getElementById('heapSection').innerHTML = '<div class=\"error\">Network error loading heap diagnostics</div>';");
         html += F("  };");
         html += F("  xhrHeap.open('GET', '/api/diag?type=heap', true);");
+        html += F("  xhrHeap.setRequestHeader('X-Requested-With', 'splitflap');");
         html += F("  container.innerHTML = '<div id=\"heapSection\">Loading...</div><div id=\"crashLogSection\"></div>';");
         html += F("  xhrCrash.send();");
         html += F("  xhrHeap.send();");
@@ -1226,6 +1295,8 @@ void setup() {
     });
 
     webServer.on("/api/settings", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
+      //Reading needs the password too (security review 2026-10-12, OW-08), unless this category is public.
+      if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
       unsigned long settingsStart = millis();
       SerialPrintln(F("DEBUG: Request for Settings Received at ") + String(settingsStart) + F("ms"));
       
@@ -1799,6 +1870,7 @@ void setup() {
     //way, BUILD_INFO Punkt 235). One registration for both methods, same reason as /api/wifi's.
     webServer.on("/api/rotation-items", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (request->method() == ASYNC_HTTP_GET) {
+        if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return; //OW-08
         if (!ensureRotationItemsComplete()) {
           request->send(503, "text/plain", "Rotation items not fully loaded (low memory), try again shortly");
           return;
@@ -1876,6 +1948,8 @@ void setup() {
         request->send(200, "text/plain", "Healthy");
         return;
       }
+      //Everything but the health check needs the password (OW-08) - chip IDs, versions, network state.
+      if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return;
 
       if (type == "heap") {
         char buf[540]; //worst-case length checked by hand incl. the longest wifiDisconnectReason string, +100 for the temporary diag fields, +20 for iramFree
@@ -1949,6 +2023,7 @@ void setup() {
     // DELETE (not GET) clears it, to avoid a CSRF-via-GET state change.
     webServer.on("/api/crash-log", ASYNC_HTTP_GET | ASYNC_HTTP_DELETE, [](AsyncWebServerRequest * request) {
       if (request->method() == ASYNC_HTTP_GET) {
+        if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return; //OW-08
         if (!LittleFS.exists(CRASH_LOG_PATH)) {
           request->send(200, "application/jsonl", "");
           return;
@@ -1958,7 +2033,6 @@ void setup() {
       }
 
       // request->method() == HTTP_DELETE
-      //Reading (GET, above) deliberately stays open regardless - only clearing needs protecting.
       if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return;
       if (LittleFS.exists(CRASH_LOG_PATH)) {
         LittleFS.remove(CRASH_LOG_PATH);
@@ -1968,6 +2042,7 @@ void setup() {
 
     // I2C bus scanner endpoint for diagnostics
     webServer.on("/api/i2c-scan", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
+      if (rejectIfPasswordRequired(request, accessControlUnitsPublic)) return; //OW-08 - drives the I2C bus
       SerialPrintln(F("DEBUG: I2C scan requested"));
       //Deferred to loop().
       if (pendingLegacyI2CScanSlot.request != nullptr) {
@@ -2210,6 +2285,8 @@ void setup() {
     // size-related risk doesn't apply here.
     webServer.on("/api/units", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (request->method() == ASYNC_HTTP_GET) {
+        //Stays readable without the password (OW-08 exception): a primary polls its extensions'
+        //unit count here and sends no credentials for that.
         SerialPrintln(F("DEBUG: Admin units request received"));
         if (pendingUnitsInfoSlot.request != nullptr) {
           request->send(503, "text/plain", "Another units request is already in progress, try again shortly");
@@ -2225,6 +2302,7 @@ void setup() {
       String action = request->hasParam("action") ? request->getParam("action")->value() : "";
 
       if (action == "rescan") {
+        if (rejectIfPasswordRequired(request, accessControlUnitsPublic)) return; //OW-08 - drives the I2C bus
         SerialPrintln(F("DEBUG: Admin rescan-units request received"));
         if (pendingRescanSlot.request != nullptr) {
           request->send(503, "text/plain", "Another rescan is already in progress, try again shortly");
@@ -2680,6 +2758,7 @@ void setup() {
     //previously overflowed the AsyncWebServer callback's small stack). Deliberately a separate
     //registration, not merged with DELETE below.
     webServer.on("/api/scheduled-messages", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
+      if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return; //OW-08
       //An incomplete list (see scheduledMessagesComplete) isn't served as if it were the whole
       //schedule - checkScheduledMessages() keeps retrying the load from loop().
       if (!scheduledMessagesComplete) {
@@ -2894,7 +2973,7 @@ void setup() {
         return;
       }
       if (!replaceExtensionDevicesFromJson(request->getParam("hosts", true)->value())) {
-        request->send(400, "text/plain", "'hosts' must be a JSON array");
+        request->send(400, "text/plain", F("'hosts' must be a JSON array of IP addresses or hostnames, optionally with :port"));
         return;
       }
       request->send(200, "text/plain", "OK");
@@ -3220,6 +3299,13 @@ void setup() {
       //Omitting the param entirely (not present at all) leaves the password unchanged, so a
       //request that only wants to update the access-control toggles doesn't have to resend it.
       if (request->hasParam("newPassword", true)) {
+        //Empty still switches protection off; anything else needs 8+ characters (security review
+        //2026-10-12, OW-04). Checked before any session is revoked.
+        size_t newPasswordLength = request->getParam("newPassword", true)->value().length();
+        if (newPasswordLength > 0 && newPasswordLength < 8) {
+          request->send(400, "text/plain", F("New password must be at least 8 characters (or empty to switch protection off)"));
+          return;
+        }
         //No session may outlive the password it was created with - revoked and saved BEFORE the
         //new password is, so a power cut or failed write can't leave old sessions on flash that
         //a reboot would accept again (security review 2026-10-12, CR-02).
@@ -3257,6 +3343,7 @@ void setup() {
 
     webServer.on("/api/timezone", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (request->method() == ASYNC_HTTP_GET) {
+        if (rejectIfPasswordRequired(request, accessControlTimezonePublic)) return; //OW-08
         JsonDocument doc;
         doc["timezone"] = timezoneSetting;
         AsyncResponseStream *response = request->beginResponseStream("application/json");
@@ -3302,6 +3389,7 @@ void setup() {
     //allocation that's never freed, see /api/quiet-hours below - a deliberate, not-free choice).
     webServer.on("/api/mqtt", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (request->method() == ASYNC_HTTP_GET) {
+        if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return; //OW-08
         JsonDocument doc;
         doc["mqttEnabled"] = mqttEnabled;
         doc["mqttBrokerHost"] = mqttBrokerHost;

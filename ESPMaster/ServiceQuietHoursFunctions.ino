@@ -11,7 +11,7 @@ void recomputeQuietHoursMinutes() {
 //True if the current local time falls inside the configured Quiet Hours window - handles a window
 //spanning midnight (22:00-07:00) same as one that doesn't (13:00-15:00).
 bool isQuietHoursActive() {
-  if (!quietHoursEnabled) {
+  if (!quietHoursEnabled || wifiSetupPortalOpen) {
     return false;
   }
 

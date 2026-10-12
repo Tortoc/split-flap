@@ -281,6 +281,14 @@ bool replaceExtensionDevicesFromJson(String json) {
   if (deserializeJson(doc, json) || !doc.is<JsonArray>()) {
     return false;
   }
+  //Checked up front, so a list with one bad entry changes nothing.
+  for (JsonVariant value : doc.as<JsonArray>()) {
+    String host = String((const char*)(value | ""));
+    host.trim();
+    if (host != "" && !isValidExtensionHost(host)) {
+      return false;
+    }
+  }
 
   extensionDeviceCount = 0;
   for (JsonVariant value : doc.as<JsonArray>()) {

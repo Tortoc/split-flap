@@ -143,8 +143,40 @@ void initWiFi() {
   std::vector<const char *> menu = { "wifi", "info" ,"param", "sep", "restart", "exit" };
   wifiManager.setMenu(menu);
 
+  //The setup hotspot used to be open - anyone in range could point the device at their own network
+  //(security review 2026-10-12, OW-06). It now gets a fresh random WPA2 password every time,
+  //shown on the flaps once the hotspot is up: only someone standing in front of the display can
+  //use it. Uppercase letters and digits only (the flaps have no lowercase), without the
+  //look-alikes 0/O, 1/I, 2/Z, 5/S and 8/B.
+  static const char apPasswordAlphabet[] = "ACDEFGHJKLMNPQRTUVWXY34679";
+  char apPassword[9];
+  for (int i = 0; i < 8; i++) {
+    apPassword[i] = apPasswordAlphabet[ESP.random() % (sizeof(apPasswordAlphabet) - 1)];
+  }
+  apPassword[8] = '\0';
+  wifiManager.setAPCallback([&apPassword](WiFiManager*) {
+    SerialPrintln(F("Setup hotspot \"Split-Flap-AP\" open - password: ") + String(apPassword));
+    wifiSetupPortalOpen = true;
+    displayRenderGeneration++; //redraw even if the display coincidentally already shows it
+    //loop() doesn't run yet - pump the jobs here, same as setup()'s pre-WiFi display. The first
+    //pass finishes a job that may still be running from there (a busy display refuses new text).
+    for (int pass = 0; pass < 2; pass++) {
+      if (pass == 1 && !showText(apPassword)) {
+        break; //no units - the password is only on the serial log then
+      }
+      unsigned long pumpStart = millis();
+      while (isDisplayJobBusy() && !millisReached(pumpStart + 20000)) {
+        updateDisplayJob();
+        delay(5);
+        yield();
+      }
+    }
+  });
+
   SerialPrintln(F("Attempting to connect to WiFi... Will fallback to AP mode to allow configuring of WiFi if fails..."));
-  if(wifiManager.autoConnect("Split-Flap-AP")) {
+  bool wifiConnected = wifiManager.autoConnect("Split-Flap-AP", apPassword);
+  wifiSetupPortalOpen = false;
+  if(wifiConnected) {
     SerialPrint(F("Successfully Connected to WiFi. IP Address: "));
     SerialPrintln(WiFi.localIP());
 

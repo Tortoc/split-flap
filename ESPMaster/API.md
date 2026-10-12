@@ -66,11 +66,11 @@ a newly-added category always starts protected):
 | Toggle param | Covers |
 | --- | --- |
 | `accessControlText` | `POST /api/text` |
-| `accessControlSettings` | `POST /api/settings`, `POST /api/quiet-hours`, `DELETE /api/scheduled-messages` |
-| `accessControlUnits` | `POST /api/units` with `action=offset` or `action=reset` (`action=rescan` never needs a password) |
-| `accessControlWifi` | `POST /api/wifi` (all actions), plus `GET /api/wifi?type=scan-result\|connect-status` (added 2026-09-10, see below) |
-| `accessControlTimezone` | `POST /api/timezone` |
-| `accessControlSystem` | `POST /api/reboot`, `POST /api/debug-mode` |
+| `accessControlSettings` | `GET`/`POST /api/settings`, `GET /api/rotation-items`, `GET`/`DELETE /api/scheduled-messages`, `POST /api/quiet-hours`, `GET /api/extension-devices`, `GET`/`POST /api/mqtt` |
+| `accessControlUnits` | `POST /api/units` (all actions), `GET /api/i2c-scan` |
+| `accessControlWifi` | `POST /api/wifi` (all actions), plus `GET /api/wifi?type=scan-result\|connect-status` |
+| `accessControlTimezone` | `GET`/`POST /api/timezone` |
+| `accessControlSystem` | `POST /api/reboot`, `POST /api/debug-mode`, `GET /api/diag` (except `type=health`), `GET`/`DELETE /api/crash-log` |
 
 **Never toggleable - always protected whenever a password is set**, no matter what any category
 toggle says: `POST /api/web-file`, `POST /api/units/firmware`, `POST /api/units/firmware-push`
@@ -79,12 +79,16 @@ with `action=push` (`action=probe` needs no password), `POST /api/firmware-start
 (changing the password or any toggle always requires the *current* password - otherwise a
 category opened via one toggle could reopen every other one through this same endpoint).
 
-Every other plain `GET`, plus `GET /api/i2c-scan`, has no auth check at all - none of them reveal
-a secret or change device state. **Two exceptions**: `GET /api/wifi?type=scan-result` and
-`GET /api/wifi?type=connect-status` *do* require the password (gated by `accessControlWifi`, same
-toggle as the WiFi `POST`s) - added 2026-09-10 after a locally-cached WiFi scan result was found
-to leak previously-seen network names/signal strength without auth. This statement used to claim
-all plain `GET`s were exempt; that was true until this fix and is corrected here to match.
+**Reading needs the password too** (since ESPMaster 4.10.14, security review OW-08), gated by the
+category toggles above. Only these stay open: `GET /`, `GET /api/session`,
+`GET /api/diag?type=health`, and `GET /api/units` (a primary polls its extensions' unit count
+there without credentials).
+
+**Host header** (since 4.10.14, OW-07, against DNS rebinding): requests are only answered (400
+otherwise) if `Host` is an IPv4 address or the device's mDNS/DHCP name - alone, as
+`<name>.local` or with a router domain (`<name>.fritz.box`). Address extension devices the same way.
+
+**Password length**: a new non-empty password needs at least 8 characters (4.10.14, OW-04).
 
 ## Endpoint index
 
@@ -188,8 +192,8 @@ submitted for Text mode" while `deviceMode` is actually `"text"`; ignore it othe
 `otaPasswordSet`/`accessControl*Public` are the access-control state (CODE_REVIEW.md #29, see
 [Authentication](#authentication)) - `otaPasswordSet` is whether a password is currently
 configured at all (the password itself is never sent back, unlike the field this replaced), and
-each `accessControl*Public` is that category's own toggle. Both are safe to expose
-unauthenticated - neither is a secret. `wifiSettingsResettable` reflects `WIFI_USE_DIRECT` being
+each `accessControl*Public` is that category's own toggle. The whole response needs the password
+unless `accessControlSettings` is public (since 4.10.14). `wifiSettingsResettable` reflects `WIFI_USE_DIRECT` being
 off (AP-config mode). `mdnsHostname` is the current `http://<hostname>.local/` name - user-
 changeable via [`POST /api/wifi?action=set-hostname`](#post-apiwifi), see that entry. The
 `mqtt*` fields only appear if `MQTT_ENABLE` is compiled in (the default) - see
@@ -460,9 +464,8 @@ curl "http://192.168.1.50/api/units?detail=1"
 
 Three unit write-actions sharing one registered route, picked via `?action=` (same
 route-registration-costs-heap reasoning as `GET /api/diag`). `offset`/`reset` are the
-`accessControlUnits` category; `rescan` never needs a password - see
-[Authentication](#authentication). `401 text/plain` on `offset`/`reset` if a password is required
-and missing/wrong.
+`accessControlUnits` category (`rescan` too, since 4.10.14) - see
+[Authentication](#authentication). `401 text/plain` if a password is required and missing/wrong.
 
 **Query param** `action` (required): `rescan` | `offset` | `reset`.
 
@@ -850,7 +853,8 @@ rather than hardcoded credentials).
 **Query param** `action` (required): `reset` | `scan` | `connect` | `set-hostname`.
 
 **`action=reset`** - erases the stored WiFi configuration and reboots into AP setup mode (connect
-to the device's own `Split-Flap-AP` network to reconfigure).
+to the device's own `Split-Flap-AP` network to reconfigure). Since 4.10.14 that hotspot is
+protected by a fresh random 8-character password, shown on the flaps while it is open (OW-06).
 **Response** `200 text/html` - an explanatory page (meant for real navigation).
 
 **`action=scan`** - starts an async network scan (the actual `WiFi.scanNetworksAsync()` call
@@ -935,8 +939,7 @@ mode, no buttons, no per-mode entities - the richer alternative
 (`Jerrys-modz/split-flap`) is intentionally *not* replicated, to keep the heap cost down on
 this device given its own crash history.
 
-**Auth:** `GET` is unauthenticated (no secret - the password itself is never included, only
-whether one is set). `POST` requires `X-OTA-Password` if a password is set and
+**Auth:** `GET` and `POST` require `X-OTA-Password` if a password is set and
 `accessControlSettings` isn't public (same category as the rest of `/api/settings`, no dedicated
 MQTT toggle).
 

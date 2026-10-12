@@ -386,3 +386,39 @@ bool isValidMdnsHostname(String hostname) {
   }
   return true;
 }
+
+//An extension device address: an IPv4 address or a hostname (dot-separated DNS labels), optionally
+//followed by ":port". Rejects paths, queries, credentials and spaces - the value is pasted straight
+//into "http://<host>/api/..." (security review 2026-10-12, OW-11).
+bool isValidExtensionHost(String host) {
+  int colon = host.indexOf(':');
+  if (colon != -1) {
+    String port = host.substring(colon + 1);
+    if (port.length() == 0 || port.length() > 5) {
+      return false;
+    }
+    for (unsigned int i = 0; i < port.length(); i++) {
+      if (port.charAt(i) < '0' || port.charAt(i) > '9') {
+        return false; //digits only - isNumber() would also let a sign or leading space through
+      }
+    }
+    if (port.toInt() < 1 || port.toInt() > 65535) {
+      return false;
+    }
+    host = host.substring(0, colon);
+  }
+  if (host.length() == 0 || host.length() > 253) {
+    return false;
+  }
+  int labelStart = 0;
+  while (true) {
+    int dot = host.indexOf('.', labelStart);
+    if (!isValidMdnsHostname(host.substring(labelStart, dot == -1 ? host.length() : dot))) {
+      return false;
+    }
+    if (dot == -1) {
+      return true;
+    }
+    labelStart = dot + 1;
+  }
+}
