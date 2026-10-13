@@ -81,6 +81,7 @@
 
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
 #include <Updater.h>
+#include <bearssl/bearssl_hmac.h> //admin password hash (PBKDF2) and signed primary->extension pushes
 #endif
 
 #include <Arduino.h>
@@ -147,11 +148,33 @@ const char* setupApFixedPasswordPath = "/setupappassword.txt";
 const char* wifiDirectSsid = "";
 const char* wifiDirectPassword = "";
 
-//Runtime-changeable OTA password, persisted to LittleFS (see /api/ota-password). Default "splitflap".
-//Empty string = password protection globally OFF - every endpoint below (including firmware/
-//flash ones) is then unauthenticated, no exceptions, regardless of the toggles below.
-String otaPassword = "";
-const char* otaPasswordPath = "/otapassword.txt";
+//Runtime-changeable admin password (see /api/ota-password), persisted to LittleFS only as a salted
+//PBKDF2-SHA256 hash since 5.0.0 (security review 2026-10-12, OW-10) - see hashAdminPassword().
+//Default "splitflap". Empty string = password protection globally OFF - every endpoint below
+//(including firmware/flash ones) is then unauthenticated, no exceptions, regardless of the toggles
+//below.
+String adminPasswordHash = "";
+const char* adminPasswordHashPath = "/adminpasswordhash.txt";
+//Where firmware before 5.0.0 kept the password in plaintext - read once to migrate, then deleted.
+//An older firmware flashed afterwards finds no password and falls back to "splitflap" (user
+//decision 2026-10-13).
+const char* legacyOtaPasswordPath = "/otapassword.txt";
+bool adminPasswordMigrated = false; //set while loading, persisted by loadValuesFromFileSystem()
+
+//Primary<->extension link (OW-10/OW-02): the primary signs every display push with HMAC-SHA256
+//instead of sending its admin password along, which used to hand that password to anyone reading
+//the WiFi traffic. primaryLinkSecret is this device's own key as a primary (created on the first
+//pairing), pairedPrimaryLinkSecret the key it accepts as an extension (set by its primary's
+//pairing request). 64 hex characters each, "" = none. See ServiceExtensionFunctions.ino.
+String primaryLinkSecret = "";
+const char* primaryLinkSecretPath = "/linksecret.txt";
+String pairedPrimaryLinkSecret = "";
+const char* pairedPrimaryLinkSecretPath = "/pairedlinksecret.txt";
+//Pairing runs from loop() (blocking HTTPClient call) - POST /api/extension-devices?action=pair only
+//queues it. The extension's admin password is held here just until that one request is sent.
+volatile bool pendingExtensionPairing = false;
+int pendingExtensionPairingIndex = -1;
+String pendingExtensionPairingPassword;
 //Only one delivery of the web page at a time - see GET "/"'s comment (BUILD_INFO Punkt 237).
 bool pageDeliveryActive = false;
 unsigned long pageDeliveryStartedAt = 0;
@@ -298,14 +321,14 @@ WiFiClient mqttWifiClient;
 PubSubClient mqttClient(mqttWifiClient);
 
 //MQTT broker settings - all persisted, all runtime-changeable via POST /api/mqtt (System ->
-//MQTT tab in the UI), same pattern as mdnsHostname/otaPassword above. mqttEnabled defaults to
+//MQTT tab in the UI), same pattern as mdnsHostname/adminPasswordHash above. mqttEnabled defaults to
 //off - MQTT_ENABLE (the compile-time flag above) only controls whether the feature EXISTS in
 //this firmware at all, not whether it's actively connecting.
 bool mqttEnabled = false;
 String mqttBrokerHost = "";
 int mqttBrokerPort = 1883;
 String mqttUsername = "";
-//Same never-sent-back-over-GET convention as otaPassword - see that comment.
+//Same never-sent-back-over-GET convention as the admin password - see adminPasswordHash.
 String mqttPassword = "";
 const char* mqttEnabledPath = "/mqttenabled.txt";
 const char* mqttBrokerHostPath = "/mqttbrokerhost.txt";
@@ -314,7 +337,7 @@ const char* mqttUsernamePath = "/mqttusername.txt";
 const char* mqttPasswordPath = "/mqttpassword.txt";
 #endif
 
-//Per-category "reachable without the password" toggles - only consulted when otaPassword is
+//Per-category "reachable without the password" toggles - only consulted when adminPasswordHash is
 //non-empty. Each gates a specific, named group of state-changing endpoints - see
 //isRequestAllowedWithoutPassword() (ServiceAccessControlFunctions.ino) for exactly which.
 //Firmware/flash endpoints and this access-control configuration itself deliberately have NO
@@ -1382,7 +1405,8 @@ void setup() {
       //timezone included so Administration can populate from this one fetch, given this device's
       //hard 5-connection TCP limit. The password itself is NEVER sent back - only whether one is
       //currently set, plus the (non-secret) per-category toggle states.
-      minimalDoc["otaPasswordSet"] = otaPassword != "";
+      minimalDoc["otaPasswordSet"] = isAdminPasswordSet();
+      minimalDoc["linkPaired"] = pairedPrimaryLinkSecret != ""; //as an extension - never the secret itself
       minimalDoc["accessControlTextPublic"] = accessControlTextPublic;
       minimalDoc["accessControlSettingsPublic"] = accessControlSettingsPublic;
       minimalDoc["accessControlUnitsPublic"] = accessControlUnitsPublic;
@@ -2109,7 +2133,7 @@ void setup() {
         //Password is stateless and independently re-checked here, same as checkOtaPassword() for
         //the ESPMaster OTA endpoints above - never gated behind a shared flag another request's
         //callback could set or clear.
-        if (String(otaPassword) != "") {
+        if (isAdminPasswordSet()) {
           if (!requestIsAuthenticated(request)) { //password header or web UI login session
             request->send(401, "text/plain", "Invalid password");
             return;
@@ -2135,7 +2159,7 @@ void setup() {
           //different, still-legitimately-in-progress upload just by arriving first. On failure,
           //just return WITHOUT touching any shared state - the outer handler re-checks the
           //password itself and never trusts a shared flag for it.
-          if (String(otaPassword) != "") {
+          if (isAdminPasswordSet()) {
             if (!requestIsAuthenticated(request)) { //password header or web UI login session
               SerialPrintln(F("Unit firmware upload rejected: invalid password"));
               return;
@@ -2212,7 +2236,7 @@ void setup() {
           }
           //Authorized again right before the file replaces the stored one - a password change or
           //revoked session during the transfer must not still let it through (CR-03).
-          if (!unitFirmwareUploadWriteFailed && String(otaPassword) != "" && !requestIsAuthenticated(request)) {
+          if (!unitFirmwareUploadWriteFailed && isAdminPasswordSet() && !requestIsAuthenticated(request)) {
             SerialPrintln(F("Unit firmware upload: no longer authorized at the end - discarding it"));
             unitFirmwareUploadWriteFailed = true;
           }
@@ -2262,7 +2286,7 @@ void setup() {
       }
 
       if (action == "push") {
-        if (String(otaPassword) != "") {
+        if (isAdminPasswordSet()) {
           if (!requestIsAuthenticated(request)) { //password header or web UI login session
             SerialPrintln(F("Unit firmware push rejected: invalid password"));
             request->send(401, "text/plain", "Invalid password");
@@ -2292,7 +2316,7 @@ void setup() {
         //accessControlUnitsPublic - this calls requestUnitEnterBootloader(), which genuinely
         //reboots the unit's running app exactly like "push" does. A read-only-sounding "probe"
         //name doesn't make it a safe, unauthenticated diagnostic.
-        if (String(otaPassword) != "") {
+        if (isAdminPasswordSet()) {
           if (!requestIsAuthenticated(request)) { //password header or web UI login session
             SerialPrintln(F("Unit bootloader probe rejected: invalid password"));
             request->send(401, "text/plain", "Invalid password");
@@ -2424,7 +2448,7 @@ void setup() {
         }
         //Password is stateless and independently re-checked here - never gated behind a shared
         //flag another request's callback could set or clear.
-        if (String(otaPassword) != "") {
+        if (isAdminPasswordSet()) {
           if (!requestIsAuthenticated(request)) { //password header or web UI login session
             request->send(401, "text/plain", "Invalid password");
             return;
@@ -2468,7 +2492,7 @@ void setup() {
           //not be able to close/delete a different, still-legitimately-in-progress upload's file
           //just by arriving first. On failure, just return - no shared flag to set, the outer
           //handler re-checks the password itself.
-          if (String(otaPassword) != "") {
+          if (isAdminPasswordSet()) {
             if (!requestIsAuthenticated(request)) { //password header or web UI login session
               SerialPrintln(F("Web file upload rejected: invalid password"));
               return;
@@ -2552,7 +2576,7 @@ void setup() {
             webUploadFile.close();
           }
           //Authorized again right before the swap - see /api/units/firmware (CR-03).
-          if (!webFileUploadWriteFailed && String(otaPassword) != "" && !requestIsAuthenticated(request)) {
+          if (!webFileUploadWriteFailed && isAdminPasswordSet() && !requestIsAuthenticated(request)) {
             SerialPrintln(F("Web file upload: no longer authorized at the end - discarding it"));
             webFileUploadWriteFailed = true;
           }
@@ -2584,7 +2608,7 @@ void setup() {
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
     //Browser-based firmware upload in three chunked steps. Shared password check for all three.
     auto checkOtaPassword = [](AsyncWebServerRequest * request) -> bool {
-      if (String(otaPassword) == "") {
+      if (!isAdminPasswordSet()) {
         return true; //no password configured, nothing to check
       }
       return requestIsAuthenticated(request); //password header or web UI login session
@@ -2920,13 +2944,41 @@ void setup() {
     //(pushSegmentToExtension()/applyExtensionDisplaySegment()). Plain form-urlencoded POST, same
     //as every other endpoint in this file.
     webServer.on("/api/extension-display", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
-      if (String(otaPassword) != "") {
-        String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
-        int passwordCheck = checkAdminPassword(request, providedPassword);
-        if (passwordCheck != PASSWORD_OK) {
-          request->send(passwordCheck == PASSWORD_THROTTLED ? 429 : 401, "text/plain", "Invalid password");
+      //Pairing request from a primary (runPendingExtensionPairing()) - shares this route, each
+      //registered handler costs permanent heap. Needs this device's own admin password, never
+      //public; accepted in any role, so pairing can come before the role switch.
+      if (request->hasParam("pairSecret", true)) {
+        if (isAdminPasswordSet()) {
+          String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
+          int passwordCheck = checkAdminPassword(request, providedPassword);
+          if (passwordCheck != PASSWORD_OK) {
+            request->send(passwordCheck == PASSWORD_THROTTLED ? 429 : 401, "text/plain", "Invalid password");
+            return;
+          }
+        }
+        String secret = request->getParam("pairSecret", true)->value();
+        uint8_t secretBytes[32];
+        if (!hexToBytes(secret, secretBytes, sizeof(secretBytes))) {
+          request->send(400, "text/plain", F("'pairSecret' must be 64 hex characters"));
           return;
         }
+        pairedPrimaryLinkSecret = secret;
+        writeFile(LittleFS, pairedPrimaryLinkSecretPath, pairedPrimaryLinkSecret.c_str());
+        resetLinkReplayState();
+        checkBootSnapshotFreshness();
+        SerialPrintln(F("Paired with a primary device"));
+        request->send(200, "text/plain", F("Paired"));
+        return;
+      }
+      //Display push: signed with the pairing secret, never the admin password (OW-10/OW-02).
+      int linkCheck = checkExtensionLinkSignature(request);
+      if (linkCheck == 409) {
+        request->send(409, "text/plain", currentLinkNonce());
+        return;
+      }
+      if (linkCheck != 200) {
+        request->send(linkCheck, "text/plain", linkCheck == 403 ? F("Not paired with a primary device") : F("Invalid signature"));
+        return;
       }
       if (deviceRole != DEVICE_ROLE_EXTENSION) {
         request->send(400, "text/plain", "This device is not configured as an extension (System -> deviceRole)");
@@ -2976,16 +3028,16 @@ void setup() {
       pendingExtensionDisplayCombinedWidth = combinedWidth;
       pendingExtensionDisplayStartOffsetMs = startOffsetMs;
       pendingExtensionDisplayQueued = true;
-      request->send(200, "text/plain", "OK");
+      request->send(200, "text/plain", currentLinkNonce()); //the nonce the next push has to name
     });
 
     //Primary-side extension host list (multiple-units.md) - GET returns the configured hosts plus
     //their last-known health-check status, POST replaces the whole list (same "client always
     //submits the complete list" convention as /api/rotation-items).
     webServer.on("/api/extension-devices", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
-      //Changing the list always needs the password, whatever "settings public" says: a primary
-      //sends its admin password to every listed host, so a public write would hand it to any
-      //host an outsider adds (security review 2026-10-12, CR-01).
+      //Changing the list always needs the password, whatever "settings public" says: pairing sends
+      //the link secret to a listed host, and a host an outsider adds would receive the display
+      //content (security review 2026-10-12, CR-01).
       if (rejectIfPasswordRequired(request, request->method() == ASYNC_HTTP_GET && accessControlSettingsPublic)) return;
 
       if (request->method() == ASYNC_HTTP_GET) {
@@ -2997,6 +3049,16 @@ void setup() {
           entry["reachable"] = extensionDevices[i].Reachable;
           entry["unitsAmount"] = extensionDevices[i].UnitsAmount;
           entry["lastCheckedSecAgo"] = extensionDevices[i].LastCheckedAt == 0 ? -1 : (long)((millis() - extensionDevices[i].LastCheckedAt) / 1000);
+          //Pairing outcome and whether the last push was refused as unsigned/unknown (not paired).
+          switch (extensionDevices[i].PairState) {
+            case EXTENSION_PAIR_PENDING: entry["pairing"] = F("pending"); break;
+            case EXTENSION_PAIR_OK: entry["pairing"] = F("ok"); break;
+            case EXTENSION_PAIR_WRONG_PASSWORD: entry["pairing"] = F("wrongPassword"); break;
+            case EXTENSION_PAIR_THROTTLED: entry["pairing"] = F("throttled"); break;
+            case EXTENSION_PAIR_FAILED: entry["pairing"] = F("failed"); break;
+            default: entry["pairing"] = ""; break;
+          }
+          entry["linkRejected"] = extensionDevices[i].LinkRejected;
         }
         AsyncResponseStream *response = request->beginResponseStream("application/json");
         serializeJson(doc, *response);
@@ -3005,6 +3067,27 @@ void setup() {
       }
 
       // HTTP_POST
+      if (request->hasParam("action") && request->getParam("action")->value() == "pair") {
+        //Queued for loop() (runPendingExtensionPairing()) - a blocking HTTP request doesn't
+        //belong in this callback. 'password' is the extension's own admin password, held in RAM
+        //only until that one request is sent; empty if the extension has none.
+        String indexRaw = request->hasParam("index", true) ? request->getParam("index", true)->value() : "";
+        int index = isNumber(indexRaw) ? indexRaw.toInt() : -1;
+        if (index < 0 || index >= extensionDeviceCount) {
+          request->send(400, "text/plain", F("'index' must name a configured extension device"));
+          return;
+        }
+        if (pendingExtensionPairing) {
+          request->send(409, "text/plain", F("A pairing is already in progress"));
+          return;
+        }
+        pendingExtensionPairingIndex = index;
+        pendingExtensionPairingPassword = request->hasParam("password", true) ? request->getParam("password", true)->value() : "";
+        extensionDevices[index].PairState = EXTENSION_PAIR_PENDING;
+        pendingExtensionPairing = true;
+        request->send(202, "text/plain", F("Pairing started"));
+        return;
+      }
       if (!request->hasParam("hosts", true)) {
         request->send(400, "text/plain", "'hosts' (JSON array of hostnames/IPs) is required");
         return;
@@ -3308,7 +3391,7 @@ void setup() {
     //public: it only says whether the page should show its login dialog.
     webServer.on("/api/session", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
       String json = String(F("{\"loginRequired\":")) + (isLoginRequired() ? F("true") : F("false")) +
-        F(",\"loggedIn\":") + (String(otaPassword) != "" && requestIsAuthenticated(request) ? F("true") : F("false")) + F("}");
+        F(",\"loggedIn\":") + (isAdminPasswordSet() && requestIsAuthenticated(request) ? F("true") : F("false")) + F("}");
       request->send(200, "application/json", json);
     });
 
@@ -3318,7 +3401,7 @@ void setup() {
         request->send(403, "text/plain", "Missing X-Requested-With header");
         return;
       }
-      if (String(otaPassword) == "") {
+      if (!isAdminPasswordSet()) {
         request->send(200, "text/plain", "No password set");
         return;
       }
@@ -3387,9 +3470,8 @@ void setup() {
           request->send(500, "text/plain", "Could not revoke existing sessions - password not changed");
           return;
         }
-        otaPassword = request->getParam("newPassword", true)->value();
-        writeFile(LittleFS, otaPasswordPath, otaPassword.c_str());
-        SerialPrintln(otaPassword == "" ? F("OTA password cleared - protection now globally OFF") : F("OTA password changed"));
+        setAdminPassword(request->getParam("newPassword", true)->value());
+        SerialPrintln(!isAdminPasswordSet() ? F("OTA password cleared - protection now globally OFF") : F("OTA password changed"));
       }
 
       //Every accessControl* toggle is optional per-request (a plain checkbox form only submits
@@ -3468,7 +3550,7 @@ void setup() {
         doc["mqttBrokerHost"] = mqttBrokerHost;
         doc["mqttBrokerPort"] = mqttBrokerPort;
         doc["mqttUsername"] = mqttUsername;
-        //Password itself never sent back, same convention as otaPassword - only whether one is
+        //Password itself never sent back, same convention as the admin password - only whether one is
         //set at all is exposed, not the value.
         doc["mqttPasswordSet"] = mqttPassword != "";
         doc["mqttConnected"] = mqttEnabled && mqttClient.connected();
@@ -3824,6 +3906,7 @@ void loop() {
   //Extension-side display push (see pendingExtensionDisplayQueued's comment) - writes whichever
   //units are due this pass, never blocks.
   tickExtensionDisplay();
+  runPendingExtensionPairing();
 
   //Login sessions created/renewed/ended by web requests - persisted here, not in the callbacks.
   saveLoginSessionsIfDirty();

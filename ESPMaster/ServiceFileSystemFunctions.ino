@@ -12,9 +12,22 @@ void initialiseFileSystem() {
 //~30-individual-file path when the snapshot is missing or unparseable, which also (re)writes a
 //fresh snapshot for later boots.
 void loadValuesFromFileSystem() {
+  bool snapshotNeedsWrite = false;
   if (!loadValuesFromBootSnapshot()) {
     SerialPrintln(F("Boot snapshot missing/invalid - loading individual setting files instead (slower, one-time until the snapshot is (re)written)"));
     loadValuesFromIndividualFiles();
+    snapshotNeedsWrite = true;
+  }
+  //A plaintext password from a firmware before 5.0.0 (or none at all) was just hashed - store the
+  //hash and remove every plaintext copy: its own file, and the snapshot rewritten below.
+  if (adminPasswordMigrated) {
+    SerialPrintln(F("Admin password: now stored as a hash, plaintext copy removed"));
+    writeFile(LittleFS, adminPasswordHashPath, adminPasswordHash.c_str());
+    LittleFS.remove(legacyOtaPasswordPath);
+    adminPasswordMigrated = false;
+    snapshotNeedsWrite = true;
+  }
+  if (snapshotNeedsWrite) {
     saveBootSnapshot();
   }
 
@@ -91,7 +104,16 @@ bool loadValuesFromBootSnapshot() {
   deviceMode = String((const char*)(doc["deviceMode"] | DEVICE_MODE_TEXT));
   deviceRole = String((const char*)(doc["deviceRole"] | DEVICE_ROLE_STANDALONE));
   extensionLinkMode = String((const char*)(doc["extensionLinkMode"] | EXTENSION_LINK_MODE_EXTEND));
-  otaPassword = String((const char*)(doc["otaPassword"] | "splitflap"));
+  //"otaPassword" is only ever written by a firmware before 5.0.0 (plaintext, also after a
+  //downgrade and back) - it wins over a hash from earlier and gets migrated.
+  if (doc["adminPasswordHash"].is<const char*>() && !doc["otaPassword"].is<const char*>()) {
+    adminPasswordHash = doc["adminPasswordHash"].as<String>();
+  } else {
+    adminPasswordHash = hashAdminPassword(String((const char*)(doc["otaPassword"] | "splitflap")));
+    adminPasswordMigrated = true;
+  }
+  primaryLinkSecret = String((const char*)(doc["primaryLinkSecret"] | ""));
+  pairedPrimaryLinkSecret = String((const char*)(doc["pairedPrimaryLinkSecret"] | ""));
   mdnsHostname = String((const char*)(doc["mdnsHostname"] | "split-flap"));
   routerHostname = String((const char*)(doc["routerHostname"] | ""));
   setupApFixedPassword = String((const char*)(doc["setupApFixedPassword"] | ""));
@@ -140,7 +162,18 @@ void loadValuesFromIndividualFiles() {
   deviceMode = readFile(LittleFS, deviceModePath, DEVICE_MODE_TEXT);
   deviceRole = readFile(LittleFS, deviceRolePath, DEVICE_ROLE_STANDALONE);
   extensionLinkMode = readFile(LittleFS, extensionLinkModePath, EXTENSION_LINK_MODE_EXTEND);
-  otaPassword = readFile(LittleFS, otaPasswordPath, "splitflap"); //persisted, not a compile-time constant
+  //Same precedence as the snapshot path: a plaintext file only exists if a firmware before 5.0.0
+  //wrote it, so it is newer than any hash file. exists() costs a file open each, but this path
+  //only runs without a usable snapshot.
+  bool legacyPasswordExists = LittleFS.exists(legacyOtaPasswordPath);
+  if (legacyPasswordExists || !LittleFS.exists(adminPasswordHashPath)) {
+    adminPasswordHash = hashAdminPassword(legacyPasswordExists ? readFile(LittleFS, legacyOtaPasswordPath, "") : String(F("splitflap")));
+    adminPasswordMigrated = true;
+  } else {
+    adminPasswordHash = readFile(LittleFS, adminPasswordHashPath, "");
+  }
+  primaryLinkSecret = readFile(LittleFS, primaryLinkSecretPath, "");
+  pairedPrimaryLinkSecret = readFile(LittleFS, pairedPrimaryLinkSecretPath, "");
   mdnsHostname = readFile(LittleFS, mdnsHostnamePath, "split-flap"); //persisted, not a compile-time constant
   routerHostname = readFile(LittleFS, routerHostnamePath, "");
   setupApFixedPassword = readFile(LittleFS, setupApFixedPasswordPath, "");
@@ -195,7 +228,9 @@ bool saveBootSnapshot() {
   doc["deviceMode"] = deviceMode;
   doc["deviceRole"] = deviceRole;
   doc["extensionLinkMode"] = extensionLinkMode;
-  doc["otaPassword"] = otaPassword;
+  doc["adminPasswordHash"] = adminPasswordHash;
+  doc["primaryLinkSecret"] = primaryLinkSecret;
+  doc["pairedPrimaryLinkSecret"] = pairedPrimaryLinkSecret;
   doc["mdnsHostname"] = mdnsHostname;
   doc["routerHostname"] = routerHostname;
   doc["setupApFixedPassword"] = setupApFixedPassword;
@@ -251,7 +286,9 @@ String computeSettingsSignature() {
   sig += deviceMode; sig += '|';
   sig += deviceRole; sig += '|';
   sig += extensionLinkMode; sig += '|';
-  sig += otaPassword; sig += '|';
+  sig += adminPasswordHash; sig += '|';
+  sig += primaryLinkSecret; sig += '|';
+  sig += pairedPrimaryLinkSecret; sig += '|';
   sig += mdnsHostname; sig += '|';
   sig += routerHostname; sig += '|';
   sig += setupApFixedPassword; sig += '|';

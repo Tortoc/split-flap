@@ -108,7 +108,19 @@ struct ExtensionDevice {
   //Round trip of the last successful display push - half of it estimates how long the next push
   //takes to arrive, see pushSegmentToExtension()'s startOffsetMs.
   unsigned long LastPushRoundTripMs = 0;
+  //Signed-push state (ServiceExtensionFunctions.ino): the extension's current replay nonce, as
+  //its last answer named it, and whether its last answer refused the signature (not paired).
+  String LinkNonce = "";
+  bool LinkRejected = false;
+  //Outcome of the last pairing attempt, one of the EXTENSION_PAIR_* values.
+  uint8_t PairState = 0;
 };
+#define EXTENSION_PAIR_NONE 0
+#define EXTENSION_PAIR_PENDING 1
+#define EXTENSION_PAIR_OK 2
+#define EXTENSION_PAIR_WRONG_PASSWORD 3
+#define EXTENSION_PAIR_THROTTLED 4
+#define EXTENSION_PAIR_FAILED 5
 
 //Workaround for LinkedList conflicting with other libraries.
 //From https://github.com/vortigont/LinkedList/commit/39c2628a7794fc6e88e024d7fc82d52bc833c332

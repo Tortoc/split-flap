@@ -78,10 +78,106 @@ void checkExtensionHealth() {
   }
 }
 
+//Signed pushes (security review 2026-10-12, OW-10/OW-02). A push used to carry the primary's admin
+//password in plaintext. Now the primary signs it with HMAC-SHA256 under the secret both devices
+//share since pairing, and only the signature travels. Replays: the extension hands out a random
+//nonce (in every answer, and a 409 when the push used a stale one) that each push has to name,
+//plus the primary's per-boot id and a counter - a seen counter is refused, and the extension
+//picks a new nonce whenever a new primary boot shows up, so nothing captured earlier matches.
+uint32_t linkBootId = 0; //primary side, random per boot
+uint32_t linkSeq = 0;
+char linkNonce[17] = ""; //extension side, 16 hex chars
+bool linkPrimarySeen = false;
+uint32_t linkLastBootId = 0;
+uint32_t linkLastSeq = 0;
+
+void rotateLinkNonce() {
+  uint8_t randomBytes[8];
+  ESP.random(randomBytes, sizeof(randomBytes));
+  strlcpy(linkNonce, bytesToHex(randomBytes, sizeof(randomBytes)).c_str(), sizeof(linkNonce));
+}
+
+const char* currentLinkNonce() {
+  if (linkNonce[0] == '\0') {
+    rotateLinkNonce();
+  }
+  return linkNonce;
+}
+
+//A new pairing starts a fresh replay history.
+void resetLinkReplayState() {
+  linkPrimarySeen = false;
+  rotateLinkNonce();
+}
+
+//Signed in this order, by both sides. Index 6-8 are the replay fields.
+const char* const linkSignedFields[] = { "segment", "animationMode", "staggerMs", "globalOffset",
+  "combinedWidth", "startOffsetMs", "nonce", "boot", "seq" };
+#define LINK_SIGNED_FIELD_COUNT 9
+
+//Length-prefixed, so no field value can shift its bytes into another field.
+void appendLinkField(String &message, const String &value) {
+  message += value.length();
+  message += ':';
+  message += value;
+  message += '\n';
+}
+
+//Hex HMAC-SHA256 under a 64-hex-char secret, "" if the secret is malformed.
+String linkSignature(const String &secretHex, const String &message) {
+  uint8_t key[32];
+  if (!hexToBytes(secretHex, key, sizeof(key))) {
+    return "";
+  }
+  uint8_t mac[32];
+  hmacSha256(key, sizeof(key), (const uint8_t*)message.c_str(), message.length(), mac);
+  return bytesToHex(mac, sizeof(mac));
+}
+
+//Extension side: checks a POST /api/extension-display push and advances the replay state.
+//Returns the HTTP status to answer with: 200, 401 (bad signature), 403 (not paired) or 409 (stale
+//nonce/counter - the answer names the current nonce, the primary retries with it).
+int checkExtensionLinkSignature(AsyncWebServerRequest *request) {
+  if (pairedPrimaryLinkSecret == "") {
+    //Unpaired: only a device without an admin password still takes unsigned pushes, as before.
+    return isAdminPasswordSet() ? 403 : 200;
+  }
+  String values[LINK_SIGNED_FIELD_COUNT];
+  String message;
+  for (int i = 0; i < LINK_SIGNED_FIELD_COUNT; i++) {
+    const char* field = linkSignedFields[i];
+    values[i] = request->hasParam(field, true) ? request->getParam(field, true)->value() : String();
+    appendLinkField(message, values[i]);
+  }
+  String provided = request->hasParam("sig", true) ? request->getParam("sig", true)->value() : String();
+  String expected = linkSignature(pairedPrimaryLinkSecret, message);
+  if (expected == "" || !constantTimeEquals(provided, expected)) {
+    return 401;
+  }
+  if (values[6] != currentLinkNonce()) {
+    return 409;
+  }
+  uint32_t bootId = strtoul(values[7].c_str(), nullptr, 10);
+  uint32_t seq = strtoul(values[8].c_str(), nullptr, 10);
+  if (linkPrimarySeen && bootId == linkLastBootId) {
+    if (seq <= linkLastSeq) {
+      return 409;
+    }
+  } else if (linkPrimarySeen) {
+    rotateLinkNonce(); //the primary restarted - pushes captured before can never match again
+  }
+  linkPrimarySeen = true;
+  linkLastBootId = bootId;
+  linkLastSeq = seq;
+  return 200;
+}
+
 //Sends one already-sliced, already-aligned segment to one configured extension's POST
 ///api/extension-display, along with animation context (globalOffset/combinedWidth) so the
 //extension can compute its own units' stagger delay with the same formula the primary uses
-//locally. Best-effort, no retry - a failed push is lost, the next showText() call simply retries.
+//locally. Best-effort - a failed push is lost, the next showText() call simply retries. The one
+//exception is a 409 (stale nonce, e.g. right after either device restarted): retried once at once
+//with the nonce that answer named.
 //Does NOT re-check reachability itself - callers only invoke this for extensions the last
 //checkExtensionHealth() sweep found reachable.
 bool pushSegmentToExtension(ExtensionDevice &ext, const String &segment, int globalOffset, int combinedWidth) {
@@ -91,27 +187,100 @@ bool pushSegmentToExtension(ExtensionDevice &ext, const String &segment, int glo
   //of whenever the push happened to arrive (CODE_REVIEW_V7.md, common start time). Capped, since a
   //round trip that included a slow TCP connect would otherwise skew the estimate.
   unsigned long startOffsetMs = (millis() - displayJob.lineWriteStartMillis) + min(ext.LastPushRoundTripMs / 2, 250UL);
+  while (linkBootId == 0) {
+    linkBootId = ESP.random();
+  }
+  for (int attempt = 0; attempt < 2; attempt++) {
+    String fields[LINK_SIGNED_FIELD_COUNT] = { segment, displayJob.animationModeValue, String(displayJob.animationStaggerMsValue),
+      String(globalOffset), String(combinedWidth), String(startOffsetMs), ext.LinkNonce, String(linkBootId), String(++linkSeq) };
+    String body;
+    String message;
+    for (int i = 0; i < LINK_SIGNED_FIELD_COUNT; i++) {
+      body += i == 0 ? "" : "&";
+      body += linkSignedFields[i];
+      body += '=';
+      body += urlEncodeForFormBody(fields[i]);
+      appendLinkField(message, fields[i]);
+    }
+    if (primaryLinkSecret != "") {
+      body += F("&sig=");
+      body += linkSignature(primaryLinkSecret, message);
+    }
+
+    WiFiClient client;
+    HTTPClient http;
+    http.setTimeout(EXTENSION_HTTP_TIMEOUT_MS);
+    if (!http.begin(client, "http://" + ext.Host + "/api/extension-display")) {
+      return false;
+    }
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    unsigned long sentAt = millis();
+    int httpCode = http.POST(body);
+    //200 and 409 both answer with the extension's current nonce (16 hex chars).
+    String answer = (httpCode == 200 || httpCode == 409) ? http.getString() : String();
+    http.end();
+    ext.LinkRejected = httpCode == 401 || httpCode == 403;
+    if (answer.length() == 16) {
+      ext.LinkNonce = answer;
+    }
+    if (httpCode == 200) {
+      ext.LastPushRoundTripMs = millis() - sentAt;
+      return true;
+    }
+    if (httpCode != 409) {
+      return false;
+    }
+  }
+  return false;
+}
+
+//Primary side, ticked from loop(): runs a pairing queued by POST /api/extension-devices?action=pair.
+//Sends this device's link secret (created here on the first pairing) to the extension, authorized
+//by the extension's own admin password the user typed in. Both travel over the network this one
+//time, like any login; afterwards neither password is ever sent between the devices again.
+void runPendingExtensionPairing() {
+  if (!pendingExtensionPairing || webFirmwareUpdateInProgress()) {
+    return;
+  }
+  int index = pendingExtensionPairingIndex;
+  String password = pendingExtensionPairingPassword;
+  pendingExtensionPairingPassword = String();
+  pendingExtensionPairing = false;
+  if (index < 0 || index >= extensionDeviceCount) {
+    return;
+  }
+  ExtensionDevice &ext = extensionDevices[index];
+  if (primaryLinkSecret == "") {
+    uint8_t secret[32];
+    ESP.random(secret, sizeof(secret));
+    primaryLinkSecret = bytesToHex(secret, sizeof(secret));
+    writeFile(LittleFS, primaryLinkSecretPath, primaryLinkSecret.c_str());
+    checkBootSnapshotFreshness();
+  }
+
+  int httpCode = -1;
   WiFiClient client;
   HTTPClient http;
   http.setTimeout(EXTENSION_HTTP_TIMEOUT_MS);
-  if (!http.begin(client, "http://" + ext.Host + "/api/extension-display")) {
-    return false;
+  if (http.begin(client, "http://" + ext.Host + "/api/extension-display")) {
+    if (password != "") {
+      http.addHeader("X-OTA-Password", password);
+    }
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    httpCode = http.POST(String(F("pairSecret=")) + primaryLinkSecret);
+    http.end();
   }
-  http.addHeader("X-OTA-Password", otaPassword);
-  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-  String body = "segment=" + urlEncodeForFormBody(segment) +
-    "&animationMode=" + urlEncodeForFormBody(displayJob.animationModeValue) +
-    "&staggerMs=" + String(displayJob.animationStaggerMsValue) +
-    "&globalOffset=" + String(globalOffset) +
-    "&combinedWidth=" + String(combinedWidth) +
-    "&startOffsetMs=" + String(startOffsetMs);
-  unsigned long sentAt = millis();
-  int httpCode = http.POST(body);
-  http.end();
+  password = String();
+  ext.PairState = httpCode == 200 ? EXTENSION_PAIR_OK
+    : httpCode == 401 ? EXTENSION_PAIR_WRONG_PASSWORD
+    : httpCode == 429 ? EXTENSION_PAIR_THROTTLED
+    : EXTENSION_PAIR_FAILED;
+  ext.LinkNonce = "";
+  ext.LinkRejected = false;
+  SerialPrintln(F("Pairing with extension \"") + ext.Host + F("\": HTTP ") + String(httpCode));
   if (httpCode == 200) {
-    ext.LastPushRoundTripMs = millis() - sentAt;
+    displayRenderGeneration++; //re-send the current line - the extension may have refused it before
   }
-  return httpCode == 200;
 }
 
 //Called once per newly-written display line - slices displayJob.currentAlignedLine into one
@@ -290,6 +459,7 @@ bool replaceExtensionDevicesFromJson(String json) {
     }
   }
 
+  pendingExtensionPairing = false; //its index would name a different device now
   extensionDeviceCount = 0;
   for (JsonVariant value : doc.as<JsonArray>()) {
     if (extensionDeviceCount >= EXTENSION_DEVICES_MAX) {

@@ -1931,6 +1931,7 @@
 								<option value="extension">Erweiterungsgerät</option>
 							</select>
 						</p>
+						<p id="extensionLinkPairedInfo" class="note hidden"></p>
 						<div id="extensionLinkModeSection" class="hidden">
 							<p>
 								<label for="extensionLinkModeSelect">Art des Verbunds</label>
@@ -1952,7 +1953,7 @@
 						<div id="extensionDevicesSection" class="hidden">
 							<hr>
 							<p class="note">
-								Bis zu 4 Erweiterungsgeräte, per Hostname (z.B. <code>split-flap.local</code>) oder IP-Adresse. Dort muss nur die Rolle "Erweiterungsgerät" eingestellt sein.
+								Bis zu 4 Erweiterungsgeräte, per Hostname (z.B. <code>split-flap.local</code>) oder IP-Adresse. Dort muss die Rolle "Erweiterungsgerät" eingestellt sein; danach jedes Gerät einmal koppeln (unten).
 							</p>
 							<p>
 								<label for="extensionHost0">Erweiterungsgerät 1</label>
@@ -1985,6 +1986,21 @@
 								</span>
 							</p>
 							<div id="extensionDevicesStatus">wird geladen...</div>
+							<p>
+								<label for="extensionPairSelect">Erweiterungsgerät koppeln</label>
+								<br>
+								<select id="extensionPairSelect"></select>
+							</p>
+							<p>
+								<label for="extensionPairPassword">Administrator-Passwort des Erweiterungsgeräts</label>
+								<br>
+								<input type="password" id="extensionPairPassword" autocomplete="off" />
+								<button class="btn-primary" onclick="pairExtensionDevice()">Koppeln</button>
+							</p>
+							<p class="note">
+								Einmal pro Erweiterungsgerät nötig (leer lassen, wenn es kein Passwort hat). Danach unterschreibt dieses Gerät jede Anzeige mit einem gemeinsamen Schlüssel; Passwörter gehen zwischen den Geräten nicht mehr übers Netz, und sie dürfen sich unterscheiden.
+							</p>
+							<p id="extensionPairStatus"></p>
 						</div>
 					</div>
 				</div>
@@ -4115,6 +4131,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						setupApPasswordFixed = !!responseObject.setupApPasswordFixed;
 						document.getElementById("setupApPasswordMode").value = setupApPasswordFixed ? "fixed" : "random";
 						showSetupApPasswordField();
+						linkPaired = !!responseObject.linkPaired;
 						document.getElementById("deviceRoleSelect").value = responseObject.deviceRole || "standalone";
 						document.getElementById("extensionLinkModeSelect").value = responseObject.extensionLinkMode || "extend";
 						showDeviceRoleSections(responseObject.deviceRole);
@@ -4987,10 +5004,17 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			});
 		}
 
-		//Link mode and extension host list only mean anything on a primary.
+		//Link mode and extension host list only mean anything on a primary; the pairing state only
+		//on an extension (linkPaired from GET /api/settings).
+		var linkPaired = false;
 		function showDeviceRoleSections(role) {
 			document.getElementById("extensionLinkModeSection").classList.toggle("hidden", role !== "primary");
 			document.getElementById("extensionDevicesSection").classList.toggle("hidden", role !== "primary");
+			var pairedInfo = document.getElementById("extensionLinkPairedInfo");
+			pairedInfo.classList.toggle("hidden", role !== "extension");
+			pairedInfo.innerText = linkPaired
+				? "Mit einem Primärgerät gekoppelt."
+				: "Noch nicht gekoppelt - im Primärgerät unter Mehrgeräte-Verbund koppeln.";
 		}
 
 		//Multi-device role (multiple-units.md) - own small endpoint, see POST /api/device-role.
@@ -5107,11 +5131,85 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				} else {
 					statusElement.innerHTML = '<span class="status-offline">Nicht erreichbar</span> <span class="note">(' + age + ')</span>';
 				}
+				statusElement.innerHTML += " " + extensionPairingStatusHtml(d);
 
 				row.appendChild(labelElement);
 				row.appendChild(statusElement);
 				statusEl.appendChild(row);
 			});
+		}
+
+		//Pairing state of one extension (GET /api/extension-devices): a refused push means it isn't
+		//paired (any more), otherwise the outcome of the last pairing attempt, if any.
+		function extensionPairingStatusHtml(d) {
+			if (d.pairing === "pending") return '<span class="status-online-busy">Kopplung läuft...</span>';
+			if (d.linkRejected) return '<span class="status-offline">nicht gekoppelt</span>';
+			if (d.pairing === "ok") return '<span class="status-online-ready">gekoppelt</span>';
+			if (d.pairing === "wrongPassword") return '<span class="status-offline">Kopplung: falsches Passwort</span>';
+			if (d.pairing === "throttled") return '<span class="status-offline">Kopplung: zu viele Versuche, kurz warten</span>';
+			if (d.pairing === "failed") return '<span class="status-offline">Kopplung fehlgeschlagen</span>';
+			return "";
+		}
+
+		//POST /api/extension-devices?action=pair - the primary runs the pairing itself (loop()), so
+		//this polls the device list until the attempt is no longer pending.
+		function pairExtensionDevice() {
+			var statusEl = document.getElementById("extensionPairStatus");
+			var select = document.getElementById("extensionPairSelect");
+			var passwordInput = document.getElementById("extensionPairPassword");
+			if (select.value === "") {
+				statusEl.innerHTML = '<span class="status-offline">Erst ein Erweiterungsgerät eintragen und speichern.</span>';
+				return;
+			}
+			if (localDevelopment) {
+				statusEl.innerHTML = '<span class="status-online-ready">Gekoppelt (simuliert).</span>';
+				return;
+			}
+			var index = parseInt(select.value, 10);
+			statusEl.innerHTML = '<span class="status-online-busy">Kopplung läuft...</span>';
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 202) {
+						passwordInput.value = "";
+						pollExtensionPairing(index, 0);
+					} else if (this.status == 401) {
+						clearAdminPassword();
+						statusEl.innerHTML = '<span class="status-offline">Falsches Administrator-Passwort (dieses Gerät).</span>';
+					} else {
+						statusEl.innerHTML = '<span class="status-offline">Fehlgeschlagen: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
+					}
+				}
+			};
+			xhrRequest.onerror = function () {
+				statusEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
+			};
+			xhrRequest.open("POST", "/api/extension-devices?action=pair", true);
+			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
+			xhrRequest.send("index=" + index + "&password=" + encodeURIComponent(passwordInput.value));
+		}
+
+		function pollExtensionPairing(index, attempt) {
+			var statusEl = document.getElementById("extensionPairStatus");
+			setTimeout(function () {
+				var xhrRequest = new XMLHttpRequest();
+				xhrRequest.onreadystatechange = function () {
+					if (this.readyState != 4) return;
+					var devices = null;
+					try { devices = this.status == 200 ? JSON.parse(this.responseText) : null; } catch (e) {}
+					var d = devices ? devices[index] : null;
+					if (d && d.pairing === "pending" && attempt < 8) {
+						pollExtensionPairing(index, attempt + 1);
+						return;
+					}
+					if (devices) renderExtensionDevicesStatus(devices);
+					statusEl.innerHTML = d && d.pairing !== "pending" ? extensionPairingStatusHtml(d) : '<span class="status-offline">Keine Antwort - Status oben prüfen.</span>';
+				};
+				xhrRequest.open("GET", "/api/extension-devices", true);
+				xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
+				xhrRequest.send();
+			}, 1500);
 		}
 
 		//populateInputs: also (re-)fill the 4 editable host input fields from the server response -
@@ -5134,6 +5232,14 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 							for (var i = 0; i < 4; i++) {
 								document.getElementById("extensionHost" + i).value = devices[i] ? devices[i].host : "";
 							}
+							var pairSelect = document.getElementById("extensionPairSelect");
+							pairSelect.innerHTML = "";
+							devices.forEach(function (d, i) {
+								var option = document.createElement("option");
+								option.value = i;
+								option.innerText = d.host;
+								pairSelect.appendChild(option);
+							});
 						}
 						renderExtensionDevicesStatus(devices);
 					} catch (e) {

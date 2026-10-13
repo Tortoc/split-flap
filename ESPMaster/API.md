@@ -49,10 +49,21 @@ to 8 sessions per device, persisted across reboots. Changing the password ends a
 `POST /api/extension-display` (primary -> extension) and `POST /api/ota-password` (needs the
 current password itself) don't take sessions.
 
+**Stored as a hash** (since 5.0.0, OWASP OW-10): the device keeps the password only as a salted
+PBKDF2-HMAC-SHA256 hash (1000 iterations) in `/adminpasswordhash.txt` and the boot snapshot. The
+first boot of 5.0.0 hashes the old plaintext password and deletes the plaintext copies. A
+firmware before 5.0.0 flashed afterwards finds no password and falls back to `splitflap`.
+
+**Multi-device link** (since 5.0.0, OWASP OW-10/OW-02): a primary no longer sends its admin
+password with each display push - the devices' admin passwords may now differ. Each extension is
+paired once: [`POST /api/extension-devices?action=pair`](#multi-device-link) on the primary, with
+the extension's own admin password. The primary then hands its link secret to the extension
+(`POST /api/extension-display` with `pairSecret`) and signs every push with HMAC-SHA256 under it.
+
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/session` | Public. `{"loginRequired": bool, "loggedIn": bool}` - `loginRequired` is true while a password is set and at least one category is still protected. |
-| `POST /api/login` | Form param `password`, header `X-Requested-With: splitflap`. 200 + `Set-Cookie` on success, 401 wrong password, 429 for 2 s after a wrong attempt from the same address (since 4.10.16 per sender IP; every password check - login, `X-OTA-Password`, extension push, password change - shares it; if 8 senders are paused at once, new ones wait too). |
+| `POST /api/login` | Form param `password`, header `X-Requested-With: splitflap`. 200 + `Set-Cookie` on success, 401 wrong password, 429 for 2 s after a wrong attempt from the same address (since 4.10.16 per sender IP; every password check - login, `X-OTA-Password`, extension pairing, password change - shares it; if 8 senders are paused at once, new ones wait too). |
 | `POST /api/logout` | Ends the request's own session and clears the cookie. |
 
 **Global on/off switch**: an empty password (the default before you set one) means every endpoint
@@ -194,6 +205,7 @@ can populate its display from this one already-fetched response instead of a sep
 `inputText` is a shared internal variable every mode's per-second update (clock/date/countdown/
 countup/rotation) also writes its own rendered content into - only meaningful as "what was last
 submitted for Text mode" while `deviceMode` is actually `"text"`; ignore it otherwise.
+`linkPaired` (since 5.0.0) says whether this device, as an extension, is paired with a primary.
 `otaPasswordSet`/`accessControl*Public` are the access-control state (CODE_REVIEW.md #29, see
 [Authentication](#authentication)) - `otaPasswordSet` is whether a password is currently
 configured at all (the password itself is never sent back, unlike the field this replaced), and
@@ -1005,6 +1017,33 @@ curl -X POST http://192.168.1.50/api/mqtt \
 
 ---
 
+### Multi-device link
+
+Primary -> extension communication (since 5.0.0 signed, see [Authentication](#authentication)).
+
+**`GET /api/extension-devices`** (primary) - the configured extensions:
+`[{"host", "reachable", "unitsAmount", "lastCheckedSecAgo", "pairing", "linkRejected"}]`.
+`pairing` is the last pairing attempt's outcome (`""`, `pending`, `ok`, `wrongPassword`,
+`throttled`, `failed`); `linkRejected` is true while the extension refuses this primary's pushes
+(not paired, or paired with another primary). `accessControlSettings` category.
+
+**`POST /api/extension-devices`** (primary, always needs the password) - `hosts`: JSON array,
+replaces the list. With `?action=pair`: body `index` (0-based position in the list) and
+`password` (the extension's admin password, empty if it has none) - `202` once queued, `409` while
+another pairing runs, `400` for an unknown index. The primary creates its link secret on the
+first pairing and sends it to that extension; poll `GET` for the outcome.
+
+**`POST /api/extension-display`** (extension) - two uses:
+- Pairing: body `pairSecret` (64 hex characters) plus the `X-OTA-Password` header with this
+  device's admin password. `200`, `401`/`429` for a wrong/paused password, `400` if malformed.
+- Display push: body `segment`, `animationMode`, `staggerMs`, `globalOffset`, `combinedWidth`,
+  `startOffsetMs`, `nonce`, `boot`, `seq` and `sig` = hex HMAC-SHA256 under the link secret over
+  every field above, each as `<length>:<value>\n` in that order. `nonce` is the value from the
+  extension's last answer; `boot` a random id per primary boot, `seq` a counter. Answers `200` with
+  the nonce for the next push, `409` with the current nonce if `nonce` or `seq` is stale (the
+  primary retries once), `401` for a bad signature, `403` if this device has an admin password but
+  isn't paired. An unpaired device without an admin password still accepts unsigned pushes.
+
 ### `POST /api/ota-password`
 
 Changes the password and/or the per-category access-control toggles (see
@@ -1023,7 +1062,7 @@ endpoint) through here.
 | Param | Notes |
 | --- | --- |
 | `currentPassword` | Required. Must match the current password (empty string matches if none is set yet). |
-| `newPassword` | Optional. Omit entirely to leave the password unchanged. An **empty value** (`newPassword=`) deliberately disables password protection globally - every endpoint in this API, including firmware/flash, becomes unauthenticated. Not the same as omitting the param. |
+| `newPassword` | Optional, stored only as a hash (since 5.0.0). Omit entirely to leave the password unchanged. An **empty value** (`newPassword=`) deliberately disables password protection globally - every endpoint in this API, including firmware/flash, becomes unauthenticated. Not the same as omitting the param. |
 | `accessControlText`, `accessControlSettings`, `accessControlUnits`, `accessControlWifi`, `accessControlTimezone`, `accessControlSystem` | Optional, standard HTML checkbox semantics: present (any value, e.g. `on`) = that category is public; **absent = that category is protected**. Send the full set you want every time - an absent one is not "leave unchanged", it's "turn off". |
 
 **Response:**

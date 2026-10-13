@@ -1,11 +1,161 @@
 //A single password, globally disable-able (empty string), plus per-category toggles deciding
 //which endpoints stay reachable without it even while set.
 
+//The password is kept only as a salted PBKDF2-HMAC-SHA256 hash, "<iterations>$<salt hex>$<hash
+//hex>" (security review 2026-10-12, OW-10) - a flash dump no longer shows it in plaintext. The
+//iteration count is stored with it, so it can change later without invalidating old hashes.
+//Every wrong guess costs one full hash; checkAdminPassword()'s per-sender pause bounds that.
+#define ADMIN_PASSWORD_HASH_ITERATIONS 1000
+#define ADMIN_PASSWORD_SALT_BYTES 16
+
+String bytesToHex(const uint8_t *bytes, size_t length) {
+  static const char hexDigits[] = "0123456789abcdef";
+  String hex;
+  hex.reserve(length * 2);
+  for (size_t i = 0; i < length; i++) {
+    hex += hexDigits[bytes[i] >> 4];
+    hex += hexDigits[bytes[i] & 0x0F];
+  }
+  return hex;
+}
+
+//False unless `hex` is exactly 2 * length lowercase/uppercase hex digits.
+bool hexToBytes(const String &hex, uint8_t *bytes, size_t length) {
+  if (hex.length() != length * 2) {
+    return false;
+  }
+  for (size_t i = 0; i < length * 2; i++) {
+    char c = hex[i];
+    uint8_t nibble;
+    if (c >= '0' && c <= '9') nibble = c - '0';
+    else if (c >= 'a' && c <= 'f') nibble = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') nibble = c - 'A' + 10;
+    else return false;
+    bytes[i / 2] = (i % 2 == 0) ? (nibble << 4) : (bytes[i / 2] | nibble);
+  }
+  return true;
+}
+
+//HMAC-SHA256 of `message` - shared by the password cache below and the primary->extension link.
+void hmacSha256(const uint8_t *key, size_t keyLength, const uint8_t *message, size_t messageLength, uint8_t out[32]) {
+  br_hmac_key_context keyContext;
+  br_hmac_key_init(&keyContext, &br_sha256_vtable, key, keyLength);
+  br_hmac_context context;
+  br_hmac_init(&context, &keyContext, 0);
+  br_hmac_update(&context, message, messageLength);
+  br_hmac_out(&context, out);
+}
+
+//PBKDF2-HMAC-SHA256, one 32-byte block (RFC 8018). The key context is set up once, so every
+//iteration costs just two SHA-256 compressions.
+void pbkdf2Sha256(const String &password, const uint8_t *salt, size_t saltLength, uint32_t iterations, uint8_t out[32]) {
+  br_hmac_key_context keyContext;
+  br_hmac_key_init(&keyContext, &br_sha256_vtable, password.c_str(), password.length());
+  br_hmac_context context;
+  uint8_t block[32];
+  static const uint8_t blockIndex[4] = { 0, 0, 0, 1 };
+  br_hmac_init(&context, &keyContext, 0);
+  br_hmac_update(&context, salt, saltLength);
+  br_hmac_update(&context, blockIndex, sizeof(blockIndex));
+  br_hmac_out(&context, block);
+  memcpy(out, block, 32);
+  for (uint32_t i = 1; i < iterations; i++) {
+    br_hmac_init(&context, &keyContext, 0);
+    br_hmac_update(&context, block, sizeof(block));
+    br_hmac_out(&context, block);
+    for (int j = 0; j < 32; j++) {
+      out[j] ^= block[j];
+    }
+  }
+}
+
+//"" for an empty password (= protection off), otherwise a fresh salt and its hash.
+String hashAdminPassword(const String &password) {
+  if (password == "") {
+    return "";
+  }
+  uint8_t salt[ADMIN_PASSWORD_SALT_BYTES];
+  ESP.random(salt, sizeof(salt));
+  uint8_t hash[32];
+  pbkdf2Sha256(password, salt, sizeof(salt), ADMIN_PASSWORD_HASH_ITERATIONS, hash);
+  return String(ADMIN_PASSWORD_HASH_ITERATIONS) + '$' + bytesToHex(salt, sizeof(salt)) + '$' + bytesToHex(hash, sizeof(hash));
+}
+
+bool isAdminPasswordSet() {
+  return adminPasswordHash != "";
+}
+
+//Scripts and uploads send the password as a header on every request - an OTA upload alone is
+//~150 chunk requests. The last password that checked out is remembered as an HMAC under a key
+//that only lives in RAM for this boot, so a repeat costs one HMAC instead of a full PBKDF2.
+uint8_t verifiedPasswordCacheKey[32];
+bool verifiedPasswordCacheKeyReady = false;
+uint8_t verifiedPasswordDigest[32];
+bool verifiedPasswordCached = false;
+
+void verifiedPasswordCacheDigest(const String &password, uint8_t out[32]) {
+  if (!verifiedPasswordCacheKeyReady) {
+    ESP.random(verifiedPasswordCacheKey, sizeof(verifiedPasswordCacheKey));
+    verifiedPasswordCacheKeyReady = true;
+  }
+  hmacSha256(verifiedPasswordCacheKey, sizeof(verifiedPasswordCacheKey), (const uint8_t*)password.c_str(), password.length(), out);
+}
+
+bool constantTimeEqualBytes(const uint8_t *a, const uint8_t *b, size_t length) {
+  uint8_t diff = 0;
+  for (size_t i = 0; i < length; i++) {
+    diff |= a[i] ^ b[i];
+  }
+  return diff == 0;
+}
+
+//Compares against the stored hash. Without a password only "" matches - the password change
+//accepts an empty currentPassword then, as it always has.
+bool verifyAdminPassword(const String &provided) {
+  if (!isAdminPasswordSet()) {
+    return provided == "";
+  }
+  uint8_t digest[32];
+  verifiedPasswordCacheDigest(provided, digest);
+  if (verifiedPasswordCached && constantTimeEqualBytes(digest, verifiedPasswordDigest, sizeof(digest))) {
+    return true;
+  }
+  int firstSeparator = adminPasswordHash.indexOf('$');
+  int secondSeparator = adminPasswordHash.indexOf('$', firstSeparator + 1);
+  if (firstSeparator <= 0 || secondSeparator <= firstSeparator) {
+    return false;
+  }
+  long iterations = adminPasswordHash.substring(0, firstSeparator).toInt();
+  uint8_t salt[ADMIN_PASSWORD_SALT_BYTES];
+  uint8_t expected[32];
+  //Bounded so a damaged file can't make every check take minutes.
+  if (iterations < 1 || iterations > 100000 ||
+      !hexToBytes(adminPasswordHash.substring(firstSeparator + 1, secondSeparator), salt, sizeof(salt)) ||
+      !hexToBytes(adminPasswordHash.substring(secondSeparator + 1), expected, sizeof(expected))) {
+    return false;
+  }
+  uint8_t actual[32];
+  pbkdf2Sha256(provided, salt, sizeof(salt), (uint32_t)iterations, actual);
+  if (!constantTimeEqualBytes(actual, expected, sizeof(actual))) {
+    return false;
+  }
+  memcpy(verifiedPasswordDigest, digest, sizeof(digest));
+  verifiedPasswordCached = true;
+  return true;
+}
+
+//New admin password ("" = protection off): hashed, persisted, and the cache forgets the old one.
+void setAdminPassword(const String &password) {
+  adminPasswordHash = hashAdminPassword(password);
+  verifiedPasswordCached = false;
+  writeFile(LittleFS, adminPasswordHashPath, adminPasswordHash.c_str());
+}
+
 //True if no password is required for this category - either the global off-switch, or the admin
 //opted this category into the public allowlist. Pass `false` for categoryPublicToggle to mean
 //"always protected while a password is set" (firmware/flash endpoints, access-control itself).
 bool isRequestAllowedWithoutPassword(bool categoryPublicToggle) {
-  return String(otaPassword) == "" || categoryPublicToggle;
+  return !isAdminPasswordSet() || categoryPublicToggle;
 }
 
 //Login sessions for the web UI: POST /api/login checks the password once and hands the browser a
@@ -137,8 +287,8 @@ int findValidLoginSession(AsyncWebServerRequest* request) {
   return -1;
 }
 
-//Every admin-password comparison goes through here - login form, X-OTA-Password header,
-///api/extension-display and the password change - so a wrong guess on any of them pauses all of
+//Every admin-password comparison goes through here - login form, X-OTA-Password header, an
+//extension's pairing request and the password change - so a wrong guess on any of them pauses all of
 //them for 2 seconds (security review 2026-10-12, Live-02), but only for the sender that guessed
 //wrong (OW-09). While paused nothing is compared, not even a correct password. If
 //FAILED_LOGIN_SLOTS senders are paused at once, any further sender waits too - so more addresses
@@ -159,7 +309,7 @@ int checkAdminPassword(AsyncWebServerRequest* request, const String &provided) {
   if (freeSlot == -1) {
     return PASSWORD_THROTTLED;
   }
-  if (constantTimeEquals(provided, String(otaPassword))) {
+  if (verifyAdminPassword(provided)) {
     return PASSWORD_OK;
   }
   failedLogins[freeSlot].ip = ip;
@@ -170,7 +320,7 @@ int checkAdminPassword(AsyncWebServerRequest* request, const String &provided) {
 //Password header, or a session cookie sent by the web UI itself (see the CSRF note above).
 //Always true while no password is set.
 bool requestIsAuthenticated(AsyncWebServerRequest* request) {
-  if (String(otaPassword) == "") {
+  if (!isAdminPasswordSet()) {
     return true;
   }
   String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
@@ -225,7 +375,7 @@ void endAllLoginSessions() {
 //Whether the web UI should ask for the password right when it opens: one is set, and at least
 //one category still needs it.
 bool isLoginRequired() {
-  return String(otaPassword) != "" && !(accessControlTextPublic && accessControlSettingsPublic &&
+  return isAdminPasswordSet() && !(accessControlTextPublic && accessControlSettingsPublic &&
     accessControlUnitsPublic && accessControlWifiPublic && accessControlTimezonePublic && accessControlSystemPublic);
 }
 
