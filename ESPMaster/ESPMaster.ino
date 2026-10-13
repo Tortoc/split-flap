@@ -109,7 +109,7 @@
 #include <atomic> //std::atomic<bool> - same reason
 #include <user_interface.h> //struct rst_info, for the crash reporter
 #include <Schedule.h> //schedule_recurrent_function_us() - setup hotspot password display, see initWiFi()
-#include <umm_malloc/umm_heap_select.h> //HeapSelectIram - OTA buffers in the second heap (mmu=4816H)
+#include <umm_malloc/umm_heap_select.h> //HeapSelectIram - OTA buffers in a second heap, if the build has one
 #include <lwip/priv/tcp_priv.h> //exposes tcp_active_pcbs/etc. for /api/tcp-status
 #include "Classes.h"
 #include "ServiceMemoryReserveFunctions.h"
@@ -2027,7 +2027,7 @@ void setup() {
         //ASSOC_EXPIRE disconnects observable over HTTP without a live serial capture.
         const char* lastDisconnectReasonForDiag = wifiDisconnectCount > 0 ? lastWifiDisconnectReason.c_str() : "none";
         long lastDisconnectSecAgo = wifiDisconnectCount > 0 ? (long)((millis() - lastWifiDisconnectAt) / 1000) : -1;
-        //iramFree: second heap in IRAM (mmu=4816H, OTA buffers), 0 if the build has none.
+        //iramFree: second heap in IRAM (OTA buffers), 0 if the build has none (mmu=3232 since 5.0.1).
         uint32_t iramFree = 0;
 #ifdef UMM_HEAP_IRAM
         {
@@ -4094,10 +4094,11 @@ void loop() {
     uint32_t updateSize = (rounded > 0 && rounded < maxSketchSpace) ? rounded : maxSketchSpace;
 
     //Both 4KB OTA buffers (Update's internal sector buffer, allocated inside begin(), and
-    //otaChunkBuffer) go to the second heap in IRAM (mmu=4816H, code-review-V7 Punkt C) - an upload
+    //otaChunkBuffer) go to a second heap in IRAM if the build has one (code-review-V7 Punkt C) - an upload
     //is started from the open web UI, exactly when DRAM is tightest. The heap selection is global,
     //so these scopes stay yield-free and allocate nothing else. Falls back to DRAM if IRAM has no
-    //room (or the build lacks mmu=4816H, where HeapSelectIram is a no-op). free()/delete[] find the
+    //room, or without one: mmu=3232 since 5.0.1, as 4816H's half-size flash cache stalled outgoing
+    //connections (BUILD_INFO Punkt 260) - HeapSelectIram is a no-op there. free()/delete[] find the
     //right heap by address, so nothing else changes.
     bool ok;
     {

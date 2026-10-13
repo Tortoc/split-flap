@@ -221,7 +221,7 @@ To upload sketches to the ESP8266 you can either use an [Arduino Uno](https://cr
 #### Building the ESPMaster Sketch
 
 The sketch needs board options and linker flags the Arduino IDE can't set on its own: flash
-layout `eesz=4M1M` (4 MB, 1 MB LittleFS), `mmu=4816H`, and `-Wl,--wrap=_Znwj -Wl,--wrap=tcp_accept`.
+layout `eesz=4M1M` (4 MB, 1 MB LittleFS), `mmu=3232`, and `-Wl,--wrap=_Znwj -Wl,--wrap=tcp_accept`.
 Build it with [`firmware/compile-espmaster.sh`](./firmware/compile-espmaster.sh) (`arduino-cli`),
 or flash the prebuilt binaries in [`firmware/`](./firmware) - [`firmware/README.md`](./firmware/README.md)
 explains the options and the flash addresses (sketch at `0x0`, `littlefs.bin` at `0x300000`).

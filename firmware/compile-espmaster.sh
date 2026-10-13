@@ -14,10 +14,11 @@
 #      __real__Znwj/__real_tcp_accept, which only exist as linkable symbols when the linker is
 #      actually invoked with these --wrap flags. The build fails loudly without it - intentional,
 #      see README.md.
-#   3. ,mmu=4816H - 16KB flash cache + 48KB IRAM, the IRAM not used by code becoming a second heap
-#      (~19KB). Only allocations made under HeapSelectIram land there - currently just the two 4KB
-#      OTA buffers (code-review-V7 Punkt C). Without it the build still works, the OTA buffers just
-#      fall back to DRAM (the old behavior).
+#   3. ,mmu=3232 - the full 32KB flash cache. mmu=4816H (4.10.11-5.0.0) halved the cache for a
+#      second heap in IRAM (OTA buffers); with 5.0.0's code size that made outgoing TCP connections
+#      stall for 2-4 s (first data segment only sent on retransmit), so the primary never reached
+#      its extensions (firmware/BUILD_INFO.md Punkt 260). The OTA buffers (HeapSelectIram) fall back
+#      to DRAM.
 #
 # Usage: ./compile-espmaster.sh [extra arduino-cli args...]
 # Run from anywhere - always compiles the ESPMaster/ directory next to this script.
@@ -28,7 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ESPMASTER_DIR="$(cd "$SCRIPT_DIR/../ESPMaster" && pwd)"
 
 exec arduino-cli compile \
-  --fqbn "esp8266:esp8266:generic:eesz=4M1M,mmu=4816H" \
+  --fqbn "esp8266:esp8266:generic:eesz=4M1M,mmu=3232" \
   --build-property "compiler.c.elf.extra_flags=-Wl,--wrap=_Znwj -Wl,--wrap=tcp_accept" \
   "$@" \
   "$ESPMASTER_DIR"

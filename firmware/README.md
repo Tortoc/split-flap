@@ -31,7 +31,7 @@ firmware/
 ## Build-Konfiguration (wie diese Dateien entstanden sind)
 
 ⚠️ **Immer `./compile-espmaster.sh` benutzen, nicht `arduino-cli compile` von Hand tippen.**
-Dieses Skript (in diesem Ordner) verdrahtet `:eesz=4M1M,mmu=4816H` und die `-Wl,--wrap=...`-Flags fest -
+Dieses Skript (in diesem Ordner) verdrahtet `:eesz=4M1M,mmu=3232` und die `-Wl,--wrap=...`-Flags fest -
 beide wurden in der Vergangenheit schon mehrfach vergessen (zuletzt 2026-09-16), mit stundenlanger Fehlsuche in
 die falsche Richtung (WLAN-Flakiness) als Folge. Die Befehle unten sind nur zur Dokumentation,
 was das Skript intern tut - nicht zum Abtippen.
@@ -51,9 +51,9 @@ oben) - Recovery nur per seriellem `arduino-cli upload`/`esptool.py`, das
 unabhängig vom aktuell laufenden (falschen) Partitionsschema an absoluten
 Flash-Adressen schreibt.
 
-**ESPMaster** (`esp8266:esp8266:generic`, Flash-Layout `eesz=4M1M`, MMU `4816H`):
+**ESPMaster** (`esp8266:esp8266:generic`, Flash-Layout `eesz=4M1M`, MMU `3232`):
 ```bash
-arduino-cli compile --fqbn "esp8266:esp8266:generic:eesz=4M1M,mmu=4816H" \
+arduino-cli compile --fqbn "esp8266:esp8266:generic:eesz=4M1M,mmu=3232" \
   --build-property "compiler.c.elf.extra_flags=-Wl,--wrap=_Znwj -Wl,--wrap=tcp_accept" \
   ESPMaster
 ```
@@ -69,12 +69,13 @@ dasselbe `-Wl,-wrap,...`-Muster bereits selbst für zwei andere Symbole
 (`compiler.c.elf.flags` in `platform.txt`: `-Wl,-wrap,system_restart_local
 -Wl,-wrap,spi_flash_read`).
 
-**`mmu=4816H` (seit ESPMaster 4.10.11):** 16 KB Flash-Cache statt 32 KB, dafür 48 KB IRAM; was
-der Code davon nicht belegt (~19 KB), wird ein zweiter Heap. Dort landet nur, was gezielt unter
-`HeapSelectIram` allokiert wird - derzeit die beiden 4-KB-OTA-Puffer, damit ein Upload bei
-offener Weboberfläche nicht am knappen DRAM scheitert (Code-Review V7, Punkt C). Fehlt die
-Option, baut der Sketch trotzdem; die Puffer liegen dann wie früher im DRAM. Freier IRAM-Heap:
-`iramFree` in `GET /api/diag?type=heap`.
+**`mmu=3232` (wieder seit ESPMaster 5.0.1):** voller 32-KB-Flash-Cache. Von 4.10.11 bis 5.0.0
+lief der Build mit `mmu=4816H` (16 KB Cache, dafür ein zweiter Heap im IRAM für die beiden
+4-KB-OTA-Puffer). Mit dem Code von 5.0.0 kamen ausgehende TCP-Verbindungen damit erst nach
+2-4 s an (erstes Datenpaket erst per Retransmit), das Primärgerät erreichte keine
+Erweiterungsgeräte mehr (Punkt 260). Die OTA-Puffer (`HeapSelectIram`) liegen jetzt wieder im DRAM;
+ein Upload bei sehr knappem Heap kann scheitern, die alte Firmware bleibt dann aktiv. `iramFree` in
+`GET /api/diag?type=heap` ist 0.
 
 **Änderung 2026-08-21:** vorher `eesz=1M128`
 (~438KB OTA-Slot). Per neuem `/api/heap`-Diagnosefeld

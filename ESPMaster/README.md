@@ -13,9 +13,10 @@ the units. Current version: `espVersion` in `ESPMaster.ino` (git tags `esp-vX.Y.
 Always build with [`../firmware/compile-espmaster.sh`](../firmware/compile-espmaster.sh). It sets
 the three options this firmware depends on:
 
-- FQBN `esp8266:esp8266:generic:eesz=4M1M,mmu=4816H` - 4 MB flash with 1 MB LittleFS at `0x300000`.
+- FQBN `esp8266:esp8266:generic:eesz=4M1M,mmu=3232` - 4 MB flash with 1 MB LittleFS at `0x300000`.
   A build without `eesz=4M1M` compiles but can't find its settings and breaks OTA updates.
-  `mmu=4816H` adds a second ~19 KB heap in IRAM, used for the OTA buffers.
+  `mmu=3232` keeps the full 32 KB flash cache; `4816H` (16 KB cache) stalled outgoing
+  connections and broke the multi-device link.
 - `-Wl,--wrap=_Znwj -Wl,--wrap=tcp_accept` - the TCP connection gate and memory reserve
   (`ServiceConnectionGateFunctions.cpp`, `ServiceMemoryReserveFunctions.cpp`). The link fails
   without them, on purpose.

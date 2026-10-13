@@ -54,19 +54,27 @@ void checkExtensionHealth() {
     HTTPClient http;
     http.setTimeout(EXTENSION_HTTP_TIMEOUT_MS);
     bool ok = false;
+    int httpCode = 0;
+    String failure;
     if (http.begin(client, "http://" + ext.Host + "/api/units")) {
-      if (http.GET() == 200) {
+      httpCode = http.GET();
+      if (httpCode == 200) {
+        String body = http.getString();
         JsonDocument doc;
-        if (!deserializeJson(doc, http.getString())) {
+        DeserializationError error = deserializeJson(doc, body);
+        if (!error) {
           ext.UnitsAmount = doc["unitsAmount"] | 0;
           ok = ext.UnitsAmount > 0;
+        } else {
+          failure = String(error.c_str()) + F(", ") + String(body.length()) + F(" bytes");
         }
       }
       http.end();
     }
     ext.Reachable = ok;
     ext.LastCheckedAt = millis();
-    SerialPrintln(F("Extension device \"") + ext.Host + F("\": ") + (ok ? (F("reachable, ") + String(ext.UnitsAmount) + F(" units")) : F("unreachable")));
+    SerialPrintln(F("Extension device \"") + ext.Host + F("\": ") + (ok ? (F("reachable, ") + String(ext.UnitsAmount) + F(" units"))
+      : (F("unreachable (HTTP ") + String(httpCode) + (failure != "" ? F(", ") + failure : String()) + F(")"))));
 
     //combinedUnitsAmount() only reflects THIS extension's units while Reachable - a transition
     //either way, or a changed unit count while already reachable, changes the effective combined
