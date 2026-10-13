@@ -15,6 +15,7 @@ This project has built on the original project to add extra features such as:
   - Countdown in days to a specified date
 - Added ability to setup WiFi connection on device
   - The device will set itself up as a Access Point (AP) on first start. You will be able to connect to this network and a web portal will be provided where you can setup the WiFi network you want to connect to. The network (`Split-Flap-AP`) is protected by a random 8-character password that the display shows while the setup portal is open (a display with fewer than 8 units shows it in parts, over and over, each round starting after a row of dashes)
+  - Alternatively a fixed hotspot password (8-63 characters) can be set in the web UI (**⋮ menu > System > Netzwerk**); the display then stays blank while the portal is open. If it is forgotten, the serial log prints it when the hotspot opens
   - If the device was to lose connection, it should retry and if all else fails, it will open up the web portal again to change the WiFi settings if necessary
   - Option to be able use direct mode is also possible as previously implemented
 - Reworked UI
@@ -32,8 +33,15 @@ This project has built on the original project to add extra features such as:
   - Options for when a scheduled message being shown
     - If the clock was in another mode, such as `Clock` mode, it will show the message for a duration (changable via updating `scheduledMessageDisplayTimeMillis` in `ESPMaster.ino`), then return to that mode afterwards
     - A checkbox on the UI is presented ("Show Indefinitely") that when checked, will show a message and leave it on the display
-- Arduino OTA
-  - Over the Air updates to the display
+- Over the Air updates
+  - ESPMaster firmware upload from the browser (**⋮ menu > Firmware Update**), and `Unit.ino` updates pushed to each unit over I2C (see [Update Unit Firmware over I2C](#update-unit-firmware-over-i2c-optional))
+- Further modes and features added since
+  - Clock, Date and Count-up modes, plus a Rotation mode cycling through texts and the other modes
+  - Quiet hours, crash log, time zone and network settings in the web UI
+  - Multiple displays working as one (extend or mirror), see [Multiple Displays](#multiple-displays)
+  - Login and per-category access control, see [Security](#security)
+  - Optional MQTT / Home Assistant integration (`MQTT_ENABLE`, off by default)
+  - Every HTTP endpoint is documented in [`ESPMaster/API.md`](./ESPMaster/API.md)
 - Updated `README.md` to add scenarios of problems encountered
 
 Also the code has been refactored to try facilitate easier development:
@@ -47,7 +55,7 @@ Also the code has been refactored to try facilitate easier development:
 
 ## General
 
-The display's electronics use 1 x ESP01 (ESP8266) as the main hub and up to 16 Arduinos as receivers. The ESP handles the web interface and communicates to the units via I2C. Each unit is resposible for setting the zero position of the drum on startup and displaying any letter the main hub send its way.
+The display's electronics use 1 x ESP01 (ESP8266) as the main hub and up to 64 Arduinos as receivers (`UNITS_AMOUNT_MAX`). The ESP handles the web interface and communicates to the units via I2C. Each unit is resposible for setting the zero position of the drum on startup and displaying any letter the main hub send its way.
 
 Assemble everything according to the instruction manual which you can find on [GitHub](./Instructions/SplitFlapInstructions.pdf).
 
@@ -124,6 +132,8 @@ Unit 3 (Address 2):  [DOWN] [DOWN] [UP] [DOWN]     = 0010
 | Unit 9 | 8 | **ON (up)** | OFF (down) | OFF (down) | OFF (down) | 1000 | Leftmost switch up |
 | Unit 10 | 9 | **ON (up)** | OFF (down) | OFF (down) | **ON (up)** | 1001 | |
 
+**More than 16 units:** `Unit.ino` reads 6 address bits (0-63): bits 0-3 are the four switches above (pins A0-A3), D3 is bit 4 and D4 is bit 5. On the fae-pcb these are the address jumpers J4 (bottom pin pair = bit 0); no jumper means 0. See the comment above `addressPins` in `Unit.ino`.
+
 **Important Notes:**
 - Each unit must have a **unique address** (0, 1, 2, 3, etc.)
 - Addresses must be **sequential starting from 0**
@@ -135,7 +145,7 @@ Unit 3 (Address 2):  [DOWN] [DOWN] [UP] [DOWN]     = 0010
 #### Automatic Unit Detection
 
 ESPMaster no longer needs to be told how many units are connected. On every startup it scans I2C
-addresses 0-15 and counts how many respond **sequentially starting from address 0**, stopping at
+addresses 0-63 and counts how many respond **sequentially starting from address 0**, stopping at
 the first gap - matching the DIP switch requirement above. That count becomes the number of units
 the rest of the system (display width, message splitting/alignment, the Units page's unit list,
 etc.) uses.
@@ -200,13 +210,22 @@ To upload the sketch to the ESP you need to install a few things to your arduino
   - [LinkedList](https://github.com/ivanseidel/LinkedList) - Version: 1.3.3
   - [WiFiManager](https://github.com/tzapu/WiFiManager) - Version: 2.0.17
   - [PubSubClient](https://github.com/knolleary/pubsubclient) - Version: 2.8.0 (MQTT support -
-    only linked in if `MQTT_ENABLE` in `ESPMaster.ino` is `true`, the default)
+    only linked in if `MQTT_ENABLE` in `ESPMaster.ino` is `true`; off by default)
 
 To upload sketches to the ESP8266 you can either use an [Arduino Uno](https://create.arduino.cc/projecthub/pratikdesai/how-to-program-esp8266-esp-01-module-with-arduino-uno-598166) or you can buy a dedicated programmer. It is highly recommend getting a programmer as it makes uploading programs onto the ESP8266 much faster.
 
 > Note: Be wary of ESP8266 programmers that are available which allow USB connection to your PC which may not have programming abilities. Typically extra switches are available so that the ESP8266 can be put in programming mode, although you can modify the programmer through a simple solder job to allow it to enter programming mode. Examples can be found in the customer reviews of [Amazon](https://www.amazon.co.uk/gp/product/B078J7LDLY/ref=ppx_yo_dt_b_search_asin_title?ie=UTF8&th=1).
 
 > Alternatively, you can get a dedicated programmer from Amazon such as [this one](https://www.amazon.co.uk/dp/B083QHJW21). This is also available on [AliExpress](https://www.aliexpress.com/item/1005001793822720.html?spm=a2g0o.detail.0.0.48622aefV0Zv89&mp=1) if you are willing to wait a while for it.
+
+#### Building the ESPMaster Sketch
+
+The sketch needs board options and linker flags the Arduino IDE can't set on its own: flash
+layout `eesz=4M1M` (4 MB, 1 MB LittleFS), `mmu=4816H`, and `-Wl,--wrap=_Znwj -Wl,--wrap=tcp_accept`.
+Build it with [`firmware/compile-espmaster.sh`](./firmware/compile-espmaster.sh) (`arduino-cli`),
+or flash the prebuilt binaries in [`firmware/`](./firmware) - [`firmware/README.md`](./firmware/README.md)
+explains the options and the flash addresses (sketch at `0x0`, `littlefs.bin` at `0x300000`).
+A build without `eesz=4M1M` compiles fine but can't find its settings and breaks OTA updates.
 
 #### Uploading the Static Assets via LittleFS
 
@@ -216,7 +235,7 @@ Open the sketch `ESPMaster.ino` in the `ESPMaster` folder, change your board to 
 
 > Tools -> ESP8266 LittleFS Data Upload
 
-This uploads the website onto the ESP8266's file system.
+This uploads the website onto the ESP8266's file system. Choose the flash size "4MB (FS:1MB OTA:~1019KB)" first, otherwise the files land where the firmware doesn't look. Instead of the plugin you can also flash the prebuilt `firmware/ESPMaster/littlefs.bin` at address `0x300000` (see [`firmware/README.md`](./firmware/README.md)).
 
 **NOTE:** No sketch has been uploaded yet! Only the static files. At the time of writing, this will also only work on an older version of Arduino IDE < version 2. The latest Arduino IDE broke support for Plugins such as the LittleFS plugin.
 
@@ -242,7 +261,7 @@ You will also need to change the WiFi Mode in the code via changing this variabl
 #define WIFI_USE_DIRECT false
 ```
 
-You will also want to change the `timezoneString` to your time zone. You can find the TZ database names here: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+The time zone is set in the web UI (**⋮ menu > System > Zeitzone**, default `Europe/Berlin`), using the TZ database names: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
 
 You can also modify the date and clock format easily by using this table: https://github.com/ropg/ezTime#datetime
 
@@ -252,9 +271,9 @@ There are several helper `define` variables to help during debugging/running:
   - Use this to enable Serial output lines for tracking executing code
 - **WEB_FIRMWARE_UPDATE_ENABLE**
   - Enabled by default. Adds a browser-based firmware upload to the web UI's **⋮ menu > Firmware Update** page - no Arduino IDE or USB cable required
-  - To use it: in the Arduino IDE, `Sketch > Export compiled Binary` to produce a `.bin` file for `ESPMaster.ino`, then upload that file via the ESPMaster tab on the Firmware Update page
-  - If `otaPassword` is set, the same password is required for the browser upload
-  - Only updates the sketch itself, not the static web files - use the normal `ESP8266 LittleFS Data Upload` step (over USB) whenever `ESPMaster/data/` changes
+  - To use it: build the `.bin` (see [Building the ESPMaster Sketch](#building-the-espmaster-sketch)) or take `firmware/ESPMaster/ESPMaster.bin`, then upload that file via the ESPMaster tab on the Firmware Update page
+  - Needs the admin password (see [Security](#security))
+  - Only updates the sketch itself, not the static web files - the web UI is replaced with `POST /api/web-file` (`index.html.gz`, see [`ESPMaster/API.md`](./ESPMaster/API.md)) or over USB with `littlefs.bin`
   - If the upload fails partway through, the currently running firmware stays active - the device only reboots into the new firmware once the upload has fully succeeded
 - **UNIT_CALLS_DISABLE**
   - Use this to disable the communication with the Arduino Nano Units. This will mean you can check code over function for the ESP module.
@@ -285,7 +304,24 @@ Code has been added to be able to set a Static IP Address on device. To do this:
 
 #### Sketch Upload
 
-So far we've only uploaded static files to the ESP8266. You now need to `Upload` the sketch to the ESP8266. Click on Upload and the ESP8266 will be upadted with the sketch and you are done. Stick the ESP8266 onto the first unit's PCB and navigate to the IP-address the ESP8266 is getting assigned from your router.
+So far we've only uploaded static files to the ESP8266. You now need to upload the sketch: build it as described in [Building the ESPMaster Sketch](#building-the-espmaster-sketch) and flash it with `arduino-cli upload` or `esptool.py` (or flash the prebuilt `firmware/ESPMaster/ESPMaster.bin` at `0x0`), and you are done. Later updates can go through the browser instead. Stick the ESP8266 onto the first unit's PCB and navigate to the IP-address the ESP8266 is getting assigned from your router.
+
+### Security
+
+- The web UI asks for the admin password; scripts send it as the `X-OTA-Password` header. The factory default is `splitflap` - change it in **⋮ menu > System > Zugriffskontrolle** (8 characters minimum). Individual categories can be opened up without a password there, and an empty password switches protection off entirely.
+- Since ESPMaster 5.0.0 the password is stored only as a salted PBKDF2-SHA256 hash. Flashing a firmware older than 5.0.0 afterwards falls back to `splitflap`.
+- The ESP8266 can't do TLS: the password and session cookie travel unencrypted over your network. Keep the display in a network you trust.
+- The device only answers requests addressed to its IP address, its mDNS name (with or without `.local`) or the router DNS name entered in **⋮ menu > System > Netzwerk**.
+
+### Multiple Displays
+
+Several displays in the same network can work as one (**⋮ menu > System > Mehrgeräte-Verbund**): one is the **primary**, the others **extensions**. The primary either spreads its text across all of them (Extend) or has each show the same characters (Mirror).
+
+1. On each extension, set the role to "Erweiterungsgerät".
+2. On the primary, set the role to "Primärgerät", enter the extensions' IP addresses or host names and save.
+3. Pair each extension once from the primary, with that extension's admin password. From then on the primary signs every update instead of sending a password; the devices' passwords may differ. Since 5.0.0 a primary older than 5.0.0 can't drive a password-protected extension any more.
+
+Give every display its own mDNS name (**⋮ menu > System > Netzwerk**) so the `.local` names stay unique.
 
 ### Common Problems
 

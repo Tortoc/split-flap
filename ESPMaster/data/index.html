@@ -2065,6 +2065,14 @@ curl -X POST http://192.168.1.50/api/text -H "X-OTA-Password: splitflap" --data 
 								<pre class="api-code">curl -X DELETE "http://192.168.1.50/api/scheduled-messages?id=1755331200" -H "X-OTA-Password: splitflap"</pre>
 							</div>
 						</details>
+						<details class="api-endpoint">
+							<summary>POST /api/quiet-hours</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Ruhezeiten ein-/ausschalten, Zeiten als <code>HH:mm</code> (darf über Mitternacht gehen). Im Verbund gelten die des Primärgeräts.</p>
+								<pre class="api-code">curl -X POST http://192.168.1.50/api/quiet-hours \
+  -H "X-OTA-Password: splitflap" --data "enabled=true&amp;start=22:00&amp;end=07:00"</pre>
+							</div>
+						</details>
 
 						<p class="api-group-title">Einheiten (Units)</p>
 						<details class="api-endpoint">
@@ -2157,7 +2165,7 @@ curl -X POST "http://192.168.1.50/api/wifi?action=set-router-hostname" \
 						<details class="api-endpoint">
 							<summary>GET/POST /api/mqtt</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">MQTT-Broker und Home-Assistant-Auto-Discovery (nur mit <code>MQTT_ENABLE</code>, Standard). Ohne Passwort-Feld bleibt das Passwort unverändert.</p>
+								<p class="api-endpoint-desc">MQTT-Broker und Home-Assistant-Auto-Discovery (nur mit <code>MQTT_ENABLE</code>, standardmäßig aus). Ohne Passwort-Feld bleibt das Passwort unverändert.</p>
 								<pre class="api-code">curl http://192.168.1.50/api/mqtt -H "X-OTA-Password: splitflap"
 
 curl -X POST http://192.168.1.50/api/mqtt \
@@ -2170,7 +2178,7 @@ curl -X POST http://192.168.1.50/api/mqtt \
 						<details class="api-endpoint">
 							<summary>POST /api/ota-password</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Passwort und/oder Freigaben ändern; <code>currentPassword</code> ist immer Pflicht. Ein neues Passwort braucht mindestens 8 Zeichen; leeres <code>newPassword=</code> schaltet den Schutz ab.</p>
+								<p class="api-endpoint-desc">Passwort und/oder Freigaben ändern; <code>currentPassword</code> ist immer Pflicht. Ein neues Passwort braucht mindestens 8 Zeichen; leeres <code>newPassword=</code> schaltet den Schutz ab. Das Gerät speichert nur einen Hash des Passworts.</p>
 								<pre class="api-code"># Nur Passwort ändern
 curl -X POST http://192.168.1.50/api/ota-password \
   --data "currentPassword=splitflap&amp;newPassword=neuesPasswort"
@@ -2182,6 +2190,30 @@ curl -X POST http://192.168.1.50/api/ota-password \
 # /api/text öffentlich machen, alles andere bleibt geschützt
 curl -X POST http://192.168.1.50/api/ota-password \
   --data "currentPassword=splitflap&amp;accessControlText=on"</pre>
+							</div>
+						</details>
+
+						<p class="api-group-title">Mehrgeräte-Verbund</p>
+						<details class="api-endpoint">
+							<summary>POST /api/device-role</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Rolle <code>standalone</code>, <code>primary</code> oder <code>extension</code>; <code>linkMode</code> (<code>extend</code>/<code>mirror</code>) gilt für das Primärgerät.</p>
+								<pre class="api-code">curl -X POST http://192.168.1.50/api/device-role \
+  -H "X-OTA-Password: splitflap" --data "role=primary&amp;linkMode=extend"</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>GET|POST /api/extension-devices</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Auf dem Primärgerät: Erweiterungsgeräte mit Erreichbarkeit und Kopplung lesen, Liste ersetzen oder ein Gerät koppeln (<code>index</code> in der Liste, <code>password</code> = Administrator-Passwort des Erweiterungsgeräts). Danach signiert das Primärgerät jede Anzeige.</p>
+								<pre class="api-code">curl http://192.168.1.50/api/extension-devices -H "X-OTA-Password: splitflap"
+
+curl -X POST http://192.168.1.50/api/extension-devices \
+  -H "X-OTA-Password: splitflap" --data-urlencode 'hosts=["192.168.1.51"]'
+
+# Erstes Gerät der Liste koppeln
+curl -X POST "http://192.168.1.50/api/extension-devices?action=pair" \
+  -H "X-OTA-Password: splitflap" --data "index=0&amp;password=passwortDesErweiterungsgeraets"</pre>
 							</div>
 						</details>
 

@@ -22,7 +22,7 @@ firmware/
 ├── Unit/
 │   ├── Unit.hex         - App-Firmware für die Units (Intel HEX, für ISP/Arduino-IDE-Upload)
 │   └── Unit.bin         - Dieselbe Firmware als rohes Binary (für den I2C-Firmware-Update-Push
-│                          über die ESPMaster Admin-Seite, siehe Unit/BOOTLOADER_SETUP.md)
+│                          über die ESPMaster-Weboberfläche, siehe Unit/BOOTLOADER_SETUP.md)
 └── bootloader/
     ├── twiboot.hex       - Bootloader-Firmware (Intel HEX, für ISP-Flash)
     └── twiboot.bin       - Dasselbe als rohes Binary
@@ -123,16 +123,20 @@ make MCU=atmega328p CFLAGS_TARGET="-DUSE_CLOCKSTRETCH=1"
 
 - **ESPMaster:** `ESPMaster.bin` per `arduino-cli upload`/`esptool.py` auf
   Adresse `0x0`, danach `littlefs.bin` auf Adresse `0x300000` (seit
-  2026-08-21/Punkt 83 - vorher `0xDB000`, siehe Haupt-[README](../README.md),
-  Abschnitt "Uploading the Static Assets", dort noch die alte Adresse
-  dokumentiert). **Seit 2026-08-22/Punkt 88 zuverlässig auch per Browser
-  möglich** (nur den Sketch, kein LittleFS) - über die Admin-Seite, die den
-  Sketch in 4KB-Häppchen über `/api/firmware-start`/`-chunk`/`-finish`
-  hochlädt. Der serielle Programmer bleibt nützlich für Diagnose
-  (Serial-Log), ist für normale Updates aber nicht mehr zwingend nötig.
+  2026-08-21/Punkt 83 - vorher `0xDB000`). **Seit 2026-08-22/Punkt 88
+  zuverlässig auch per Browser möglich** (nur den Sketch, kein LittleFS) - über
+  ⋮ Menü > Firmware Update > ESPMaster, das den Sketch in 4KB-Häppchen über
+  `/api/firmware-start`/`-chunk`/`-finish` hochlädt. Die Weboberfläche allein
+  lässt sich per `POST /api/web-file` (`index.html.gz`) ersetzen. Der serielle
+  Programmer bleibt nützlich für Diagnose (Serial-Log), ist für normale Updates
+  aber nicht mehr zwingend nötig.
+- **ESPMaster 5.0.0:** Der erste Start wandelt das Admin-Passwort in einen Hash um.
+  Ein Primärgerät vor 5.0.0 kann ein geschütztes Erweiterungsgerät mit 5.0.0 nicht
+  mehr ansteuern - im Verbund beide Geräte updaten und danach koppeln (siehe
+  Haupt-[README](../README.md#multiple-displays)).
 - **Unit-App:** `Unit.hex` per ISP oder Arduino-IDE - oder, falls die Unit
-  bereits den twiboot-Bootloader hat, `Unit.bin` über die ESPMaster
-  Admin-Seite ("Unit Firmware Update") per I2C pushen, kein USB nötig.
+  bereits den twiboot-Bootloader hat, `Unit.bin` über die ESPMaster-Weboberfläche
+  (⋮ Menü > Firmware Update > Units) per I2C pushen, kein USB nötig.
 - **Bootloader:** `twiboot.hex` per ISP-Programmer, siehe
   [`Unit/BOOTLOADER_SETUP.md`](../Unit/BOOTLOADER_SETUP.md) für die
   vollständige, verifizierte Anleitung inkl. Fuse-Werten - **einmalig pro

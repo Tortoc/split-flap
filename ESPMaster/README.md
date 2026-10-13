@@ -1,114 +1,89 @@
-# ESPMaster Scott Version - Modifications
+# ESPMaster
 
-This is a modified version of the ESPMaster code with improvements for better web server responsiveness and debugging capabilities.
+Firmware for the ESP8266 that drives the display: web UI, WiFi, time keeping, and the I2C link to
+the units. Current version: `espVersion` in `ESPMaster.ino` (git tags `esp-vX.Y.Z`).
 
-See [`API.md`](API.md) in this folder for a full reference of every HTTP endpoint this firmware exposes.
+- [`API.md`](API.md) - every HTTP endpoint, with `curl` examples.
+- [`../firmware/README.md`](../firmware/README.md) - build options, prebuilt binaries, flashing.
+- [`../firmware/BUILD_INFO.md`](../firmware/BUILD_INFO.md) - what changed in each build.
+- [`../README.md`](../README.md) - hardware, setup, security and multi-device overview.
 
-## Major Changes from the Base v2.3.0 Release
+## Building
 
-- Added LED-driven setup/debug indicators that map each initialization stage to a blink pattern for quick diagnosis in the field.
-- Replaced blocking calls (notably `waitForSync()` and `delay()`) with non-blocking loops that `yield()` so the HTTP server stays responsive.
-- Introduced per-phase timeouts (WiFi, NTP sync, flap updates, filesystem waits) to prevent indefinite hangs.
-- Expanded debug output, including a status string that traces the current setup phase over serial and mirroring of those messages to the web UI.
-- Added a WiFi strength indicator (RSSI + qualitative label) on the main interface so you can spot reception issues without attaching a serial cable.
-- Hardened `ServiceFlapFunctions` with cooperative timing so lengthy display updates do not starve the rest of the system.
+Always build with [`../firmware/compile-espmaster.sh`](../firmware/compile-espmaster.sh). It sets
+the three options this firmware depends on:
 
-## Key Changes
+- FQBN `esp8266:esp8266:generic:eesz=4M1M,mmu=4816H` - 4 MB flash with 1 MB LittleFS at `0x300000`.
+  A build without `eesz=4M1M` compiles but can't find its settings and breaks OTA updates.
+  `mmu=4816H` adds a second ~19 KB heap in IRAM, used for the OTA buffers.
+- `-Wl,--wrap=_Znwj -Wl,--wrap=tcp_accept` - the TCP connection gate and memory reserve
+  (`ServiceConnectionGateFunctions.cpp`, `ServiceMemoryReserveFunctions.cpp`). The link fails
+  without them, on purpose.
 
-### 1. LED Debug Codes
-Added LED blink codes on GPIO 2 (configurable) to indicate system status:
-- **1 blink** = WiFi connecting
-- **2 blinks** = WiFi connected
-- **3 blinks** = NTP syncing
-- **4 blinks** = NTP sync success
-- **5 blinks** = NTP sync failed
-- **6 blinks** = File system init
-- **7 blinks** = Web server starting
-- **8 blinks** = Web server ready
-- **Continuous blink** = Error/hang detected
+The Arduino IDE does not pass these linker flags by default, so a plain IDE build fails.
 
-**ESP-01 vs ESP-01S notes**
-- `ESP-01` (original): the onboard blue LED is tied to GPIO 1 (TX), so leave `LED_DEBUG_PIN` on GPIO 2 and drive an external LED when using that module.
-- `ESP-01S`: the blue LED is factory-wired to GPIO 2 (not TX/RX), is active LOW, and works great for the blink codes out of the box—no extra wiring needed. Keeping the default `LED_DEBUG_PIN 2` setting drives that LED while the UART pins stay dedicated to the flap-chain traffic.
+The web UI is `data/index.html`. The device serves it gzip-compressed from LittleFS
+(`index.html.gz`); see `firmware/README.md` for building `littlefs.bin`, or replace just the page
+with `POST /api/web-file`.
 
-### 2. Non-Blocking NTP Sync
-- Replaced blocking `waitForSync()` with a non-blocking timeout-based approach
-- 30-second timeout prevents indefinite hanging
-- Calls `yield()` during sync to allow web server to process requests
-- System continues even if NTP sync fails
+## Feature flags
 
-### 3. Web Server Responsiveness Improvements
-- Added `yield()` calls in all blocking `while` loops in `ServiceFlapFunctions.ino`
-- Replaced blocking `delay()` calls with non-blocking timing using `millis()`
-- Added 30-second timeouts to prevent infinite hangs when waiting for display
-- Web server can now process requests even while display is updating
+At the top of `ESPMaster.ino`:
 
-### 4. Enhanced Debugging
-- Added `DEBUG:` status messages throughout setup
-- Debug status string tracks current initialization phase
-- More verbose logging for troubleshooting
-- **Debug Mode** (`DEBUG_ENABLE`): When enabled, provides comprehensive debugging features:
-  - **Startup Debug Page**: Shows initialization log during boot (accessible before main UI loads)
-  - **Error Status Panel**: Displays JavaScript errors, network errors, and page load issues at the top of the main page
-  - **Page Load Debug Log**: Shows debug messages during page initialization (collapsible viewer)
-  - **Serial Debug Log**: Real-time serial output at the bottom of the main page with hide/show toggle
-- All debug features can be enabled/disabled via `POST /api/debug-mode` (`enabled=true`/`false`) - see [`API.md`](API.md)
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `SERIAL_ENABLE` | `true` | Serial log at `SERIAL_BAUDRATE` (115200). |
+| `UNIT_CALLS_DISABLE` | `false` | No I2C calls to the units - for testing the ESP alone. |
+| `WEB_FIRMWARE_UPDATE_ENABLE` | `true` | Firmware upload from the browser (**⋮ menu > Firmware Update**). |
+| `UNIT_BOOTLOADER_ENABLE` | `true` | Push `Unit.ino` updates over I2C via twiboot, see [`../Unit/BOOTLOADER_SETUP.md`](../Unit/BOOTLOADER_SETUP.md). |
+| `UNITS_AMOUNT_MAX` | `64` | Highest unit count; the real count is detected at startup (I2C scan from address 0). |
+| `WIFI_USE_DIRECT` | `false` | `false`: WiFiManager setup hotspot `Split-Flap-AP`. `true`: fixed credentials in `wifiDirectSsid`/`wifiDirectPassword`. |
+| `WIFI_STATIC_IP` | `false` | Static IP from `wifiDeviceStaticIp` etc. instead of DHCP. |
+| `USE_MULTICAST` | `true` | mDNS name `<name>.local`; the name is set in the web UI and must be unique per device. |
+| `LED_ENABLE` | `true` | Error blink on `LED_DEBUG_PIN` (GPIO 2) when WiFi failed at startup - only while debug mode is on. |
+| `DEBUG_ENABLE` | `true` | Startup debug page, error panel and serial log in the web UI, switched at runtime with `POST /api/debug-mode`. |
+| `MQTT_ENABLE` | `false` | MQTT / Home Assistant integration. Off saves the PubSubClient buffer. |
+| `FAE_MOD` | defined | fae-pcb with ESP-12F module. |
 
-### 5. WiFi Strength Indicator
-- `getCurrentSettingValues()` now samples RSSI multiple times and returns both the raw dBm value and connection state.
-- The web UI renders this as a color-coded "Excellent/Very Good/…/Very Weak" status line next to the WiFi details.
-- Use this to diagnose poor placement or antenna issues; values worse than about -80 dBm usually cause missed OTA packets and unreliable message pushes.
+Settings that used to be compile-time constants (time zone, mDNS name, password, quiet hours,
+device role, ...) are set in the web UI and stored on LittleFS.
 
-## Hardware Requirements
+## Source files
 
-- **LED Debug Pin**: GPIO 2 (default, can be changed in code)
-- Connect LED between GPIO 2 and GND (with appropriate current-limiting resistor if needed)
-- Note: GPIO 2 is also used for I2C on some ESP01 modules - adjust if there's a conflict
+| File | Content |
+| --- | --- |
+| `ESPMaster.ino` | Flags, globals, `setup()`/`loop()`, all web handlers. |
+| `ServiceDisplayJobFunctions.ino`, `ServiceFlapFunctions.ino` | Non-blocking display updates, line splitting, alignment, animations. |
+| `ServiceRotationFunctions.ino`, `ServiceScheduledMessageFunctions.ino`, `ServiceCountdownFunctions.ino`, `ServiceCountupFunctions.ino`, `ServiceQuietHoursFunctions.ino` | Display modes and schedules. |
+| `ServiceAccessControlFunctions.ino` | Admin password (PBKDF2 hash), login sessions, per-category access control. |
+| `ServiceExtensionFunctions.ino` | Multi-device link: health checks, signed display pushes, pairing. |
+| `ServiceWifiFunctions.ino` | WiFiManager setup hotspot and its password on the display. |
+| `ServiceAsyncTimeSyncFunctions.ino`, `ServiceRtcFunctions.ino` | Non-blocking NTP/time zone lookup, optional DS3231 RTC. |
+| `ServiceFileSystemFunctions.ino` | LittleFS settings, boot snapshot, JSON files. |
+| `ServiceUnitFirmwareFunctions.ino`, `ServiceI2CRecoveryFunctions.ino` | Unit firmware over I2C (twiboot), I2C bus recovery. |
+| `ServiceCrashLogFunctions.*`, `CrashLog.h` | On-device crash log (`GET /api/crash-log`). |
+| `ServiceConnectionGateFunctions.cpp`, `ServiceMemoryReserveFunctions.*` | Protection against TCP connection floods and out-of-memory aborts. |
+| `ServiceMqttFunctions.ino` | MQTT, only with `MQTT_ENABLE`. |
+| `Helpers*.ino`, `Classes.h` | Serial wrappers, string helpers, shared structs. |
 
-## Configuration
+## Diagnostics
 
-To change the LED pin, modify these lines in `ESPMaster.ino`:
-```cpp
-#define LED_DEBUG_PIN 2
-#define LED_ON LOW   // ESP01 LED is typically active LOW
-#define LED_OFF HIGH
-```
+- Serial log (115200 baud) - also prints the setup hotspot password when the hotspot opens.
+- Debug mode (`POST /api/debug-mode`): startup debug page and in-page serial log.
+- `GET /api/crash-log` - exceptions and resets, kept across reboots.
+- `GET /api/diag` - heap, flash layout, WiFi and other diagnostics (`type=heap`, `type=health`, ...).
+  After a cable flash, compare `flashConfigured` with `flashReal` in `type=heap`.
 
-## Version
+Free heap after boot is only about 20 KB; avoid large allocations, and build HTML for firmware
+pages sparingly.
 
-- **Version**: 2.3.0-Scott
-- **Based on**: split-flap-scientress ESPMaster v2.3.0
+## Security and multiple displays
 
-## Files Modified
+See the [Security](../README.md#security) and [Multiple Displays](../README.md#multiple-displays)
+sections of the main README; the protocol details are in [`API.md`](API.md#authentication).
 
-1. **ESPMaster.ino**
-   - Added LED control functions
-   - Non-blocking NTP sync with timeout
-   - LED blink codes throughout setup
-   - Enhanced debug logging
+## History
 
-2. **ServiceFlapFunctions.ino**
-   - Added `yield()` calls in all blocking loops
-   - Non-blocking delays with `yield()`
-   - Timeout protection for display wait loops
-
-## Benefits
-
-- **Web interface remains responsive** even when display is updating
-- **Visual debugging** via LED blink codes
-- **No more indefinite hangs** from NTP sync or display waits
-- **Better error detection** through LED patterns and debug messages
-
-## Troubleshooting
-
-If the web page still doesn't load:
-1. Check LED blink pattern to see where initialization stops
-2. Enable `SERIAL_ENABLE` to see debug messages
-3. Check if NTP sync is failing (5 blinks = failed)
-4. Verify WiFi connection (2 blinks = connected)
-
-If LED doesn't work:
-- Check GPIO 2 pin assignment
-- Verify LED polarity (LED_ON = LOW for ESP01)
-- Ensure LED has proper current-limiting resistor
-
+Started from the split-flap-scientress ESPMaster v2.3.0 ("Scott" version: non-blocking NTP
+sync, `yield()` in display loops, WiFi strength indicator, LED setup codes). Most of that has
+since been reworked; the per-version changes are in `firmware/BUILD_INFO.md` and the git tags.

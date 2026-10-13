@@ -127,6 +127,15 @@ same way. A request with more than one `Content-Type` header is refused with 400
 | POST | [`/api/debug-mode`](#post-apidebug-mode) | Enable/disable debug mode |
 | POST | [`/api/reboot`](#post-apireboot) | Reboot the device |
 | GET | [`/api/rotation-items`](#get-apirotation-items) | List all Rotation items |
+| POST | [`/api/rotation-items`](#post-apirotation-items) | Replace all Rotation items (JSON body) |
+| POST | [`/api/quiet-hours`](#post-apiquiet-hours) | Change the quiet hours |
+| POST | [`/api/device-role`](#post-apidevice-role) | Multi-device role and link mode |
+| GET | [`/api/extension-devices`](#multi-device-link) | Primary: configured extensions, reachability, pairing state |
+| POST | [`/api/extension-devices`](#multi-device-link) | Primary: replace the extension list, or `?action=pair` |
+| POST | [`/api/extension-display`](#multi-device-link) | Extension: signed display push, or pairing |
+| GET | [`/api/session`](#authentication) | Whether the web UI needs a login |
+| POST | [`/api/login`](#authentication) | Log in, sets the session cookie |
+| POST | [`/api/logout`](#authentication) | End the session |
 | GET | [`/api/scheduled-messages`](#get-apischeduled-messages) | List all scheduled messages |
 | DELETE | [`/api/scheduled-messages`](#delete-apischeduled-messages) | Remove a scheduled message |
 | POST | [`/api/wifi?action=`](#post-apiwifi) | WiFi actions: `reset`\|`scan`\|`connect`\|`set-hostname`\|`set-router-hostname`\|`set-setup-ap-password` |
@@ -213,7 +222,7 @@ each `accessControl*Public` is that category's own toggle. The whole response ne
 unless `accessControlSettings` is public (since 4.10.14). `wifiSettingsResettable` reflects `WIFI_USE_DIRECT` being
 off (AP-config mode). `mdnsHostname` is the current `http://<hostname>.local/` name - user-
 changeable via [`POST /api/wifi?action=set-hostname`](#post-apiwifi), see that entry. The
-`mqtt*` fields only appear if `MQTT_ENABLE` is compiled in (the default) - see
+`mqtt*` fields only appear if `MQTT_ENABLE` is compiled in (off by default) - see
 [`GET`/`POST /api/mqtt`](#getpost-apimqtt).
 
 `scheduledMessageCount` is just the count (cheap) - same reasoning as `rotationItemCount`: the
@@ -393,7 +402,7 @@ curl -X DELETE http://192.168.1.50/api/crash-log -H "X-OTA-Password: splitflap"
 
 ### `GET /api/i2c-scan`
 
-Legacy raw I2C bus scanner - pings every address 0-15 directly (not limited to addresses already
+Legacy raw I2C bus scanner - pings every address 0-63 (`UNITS_AMOUNT_MAX`) directly (not limited to addresses already
 known as units) and reports what answered. Mostly superseded by
 [`GET /api/units`](#get-apiunits) for normal use; still useful for diagnosing address/wiring
 issues at a lower level. Response is deferred to `loop()` (real I2C traffic never runs inside the
@@ -805,11 +814,60 @@ animation override fields below.
   otherwise both are validated exactly like the top-level `POST /api/settings` fields of the same
   name (see that entry).
 
-Replace the whole list via [`POST /api/settings`](#post-apisettings)'s `rotationItems` param
-(full replace, not a merge/patch - send the complete list every time).
+Replace the whole list via [`POST /api/rotation-items`](#post-apirotation-items) (full replace,
+not a merge/patch - send the complete list every time). `POST /api/settings`'s `rotationItems`
+param still works too, but a form field of a few KB can arrive empty on this device (BUILD_INFO
+Punkt 235), so the web UI uses the JSON body.
 
 ```bash
 curl http://192.168.1.50/api/rotation-items -H "X-OTA-Password: splitflap"
+```
+
+---
+
+### `POST /api/rotation-items`
+
+Replaces the whole Rotation item list. Body: the JSON array from
+[`GET /api/rotation-items`](#get-apirotation-items), sent as `Content-Type: application/json`, at
+most 8000 bytes. `accessControlSettings` category. Text items may use at most as many characters
+per line as the display has (`displayWidth` in `GET /api/settings`).
+**Response:** `200 text/plain` `"OK"`. `400` for invalid JSON or items (the existing list stays
+unchanged), `413` if the body is too large or memory is short, `503` while the list isn't fully
+loaded.
+
+```bash
+curl -X POST http://192.168.1.50/api/rotation-items -H "X-OTA-Password: splitflap" \
+  -H "Content-Type: application/json" \
+  --data '[{"type":"clock","value":"","format":"","targetDateTimeUnix":0,"prefix":"","suffix":"","durationSeconds":10,"alignment":"","animationMode":"","animationStaggerMs":-1}]'
+```
+
+---
+
+### `POST /api/quiet-hours`
+
+Turns the quiet hours on or off and sets their window; during them the display is left alone.
+On an extension device the primary's quiet hours apply. `accessControlSettings` category.
+**Body params:** `enabled` (`true` or anything else for off), `start` and `end` (24h `HH:mm`,
+the window may cross midnight) - all three required.
+**Response:** `200 text/plain` `"Quiet Hours updated"`, `400` if a param is missing or invalid.
+
+```bash
+curl -X POST http://192.168.1.50/api/quiet-hours -H "X-OTA-Password: splitflap" \
+  --data "enabled=true&start=22:00&end=07:00"
+```
+
+---
+
+### `POST /api/device-role`
+
+Multi-device role, see [Multi-device link](#multi-device-link). `accessControlSystem` category.
+**Body params:** `role` (`standalone` | `primary` | `extension`, required), `linkMode`
+(`extend` | `mirror`, optional - omitted keeps the current one; only used on a primary).
+**Response:** `200 text/plain` `"OK"`, `400` for an unknown value.
+
+```bash
+curl -X POST http://192.168.1.50/api/device-role -H "X-OTA-Password: splitflap" \
+  --data "role=primary&linkMode=extend"
 ```
 
 ---
@@ -963,7 +1021,7 @@ curl "http://192.168.1.50/api/wifi?type=connect-status" -H "X-OTA-Password: spli
 
 MQTT + Home Assistant auto-discovery, added 2026-09-10 (found in two independent forks).
 Only exists at all if `MQTT_ENABLE` in `ESPMaster.ino` is `true`
-(the default) - a compile-time flag, not runtime-changeable, since `PubSubClient`'s buffer is
+(off by default) - a compile-time flag, not runtime-changeable, since `PubSubClient`'s buffer is
 `malloc()`'d from its constructor and there's no way to avoid that cost short of not linking the
 library in at all. Separately, `mqttEnabled` (this endpoint) controls whether it actually
 connects - `false` by default, changeable here without a reflash.

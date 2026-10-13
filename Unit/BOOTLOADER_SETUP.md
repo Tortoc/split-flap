@@ -3,7 +3,8 @@
 Dieses Dokument beschreibt den **einmaligen, physischen** Vorgang, um eine
 Unit (bare ATmega328P auf der [fae-pcb](https://github.com/codingcatgirl/split-flap-fae-pcb))
 für Firmware-Updates über I2C vorzubereiten. Danach lassen sich künftige
-`Unit.ino`-Updates für diese Unit über die ESPMaster Admin-Seite ausrollen,
+`Unit.ino`-Updates für diese Unit über die ESPMaster-Weboberfläche (⋮ Menü >
+Firmware Update > Units) ausrollen,
 ohne sie nochmal per USB/ISP anzufassen.
 
 > ⚠️ **Das hier ist ein Eingriff an echter, bereits verbauter Hardware.**
@@ -212,7 +213,7 @@ die nächste Unit angefasst wird:
    einen **anderen** Wert umstellen, Unit per Stromzyklus resetten, erneut
    prüfen: Bootloader antwortet jetzt an der **neuen** Adresse - ganz ohne
    erneuten ISP-Flash. Erst wenn das zuverlässig klappt, weiter zu Punkt 3.
-3. Über die ESPMaster Admin-Seite ("Unit Firmware Update") einen
+3. Über die ESPMaster-Weboberfläche (⋮ Menü > Firmware Update > Units) einen
    vollständigen Push einer (funktional unveränderten) neu kompilierten
    `Unit.ino` an genau diese Unit durchführen, danach nochmal normalen
    Betrieb prüfen.
