@@ -136,6 +136,12 @@ String mdnsHostname = "split-flap";
 //set-router-hostname (Netzwerk tab). Must be exact: any other domain is refused (code review V9-02).
 String routerHostname = "";
 const char* routerHostnamePath = "/routerhostname.txt";
+//Fixed password for WiFiManager's setup hotspot, "" = a fresh random one shown on the display
+//every time (default). Lets the user keep the display quiet, e.g. on a narrow display where the
+//random one only appears in parts. Plaintext on purpose: WPA2 needs the passphrase itself. Set
+//via POST /api/wifi?action=set-setup-ap-password (Netzwerk tab); 8-63 printable ASCII characters.
+String setupApFixedPassword = "";
+const char* setupApFixedPasswordPath = "/setupappassword.txt";
 
 //Used if connecting via "WIFI_USE_DIRECT" of "true" - Otherwise, leave blank
 const char* wifiDirectSsid = "";
@@ -1360,6 +1366,7 @@ void setup() {
       minimalDoc["wifiSettingsResettable"] = true;
       minimalDoc["mdnsHostname"] = mdnsHostname; //user-editable, see POST /api/wifi's "set-hostname" action
       minimalDoc["routerHostname"] = routerHostname; //"set-router-hostname" action, same endpoint
+      minimalDoc["setupApPasswordFixed"] = setupApFixedPassword != ""; //never the password itself
       minimalDoc["deviceRole"] = deviceRole; //user-editable, see POST /api/device-role (multiple-units.md)
       minimalDoc["extensionLinkMode"] = extensionLinkMode; //same endpoint, optional 'linkMode' param
 #if MQTT_ENABLE == true
@@ -3264,7 +3271,27 @@ void setup() {
         return;
       }
 
-      request->send(400, "text/plain", F("Unknown 'action' - use reset, scan, connect, set-hostname, or set-router-hostname"));
+      if (action == "set-setup-ap-password") {
+        //Fixed setup hotspot password (see setupApFixedPassword). Empty switches back to a random
+        //one on the display. Checked here because WiFiManager refuses to open the hotspot at all
+        //with a passphrase outside WPA2's 8-63 characters.
+        String newPassword = request->hasParam("password", true) ? request->getParam("password", true)->value() : "";
+        bool valid = newPassword == "" || (newPassword.length() >= 8 && newPassword.length() <= 63);
+        for (unsigned int i = 0; valid && i < newPassword.length(); i++) {
+          valid = newPassword[i] >= 0x20 && newPassword[i] <= 0x7E;
+        }
+        if (!valid) {
+          request->send(400, "text/plain", F("Invalid password - 8-63 printable ASCII characters, or empty for a random one on the display"));
+          return;
+        }
+        setupApFixedPassword = newPassword;
+        writeFile(LittleFS, setupApFixedPasswordPath, setupApFixedPassword.c_str());
+        checkBootSnapshotFreshness();
+        request->send(200, "text/plain", F("Setup hotspot password updated"));
+        return;
+      }
+
+      request->send(400, "text/plain", F("Unknown 'action' - use reset, scan, connect, set-hostname, set-router-hostname, or set-setup-ap-password"));
     });
 #endif
 

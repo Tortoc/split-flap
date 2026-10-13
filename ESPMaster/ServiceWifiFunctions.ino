@@ -97,7 +97,9 @@ void checkWifiConnectAttempt() {
 //with 8+ units shows it whole and keeps it. A narrower one cycles through it for as long as the
 //portal is open: frame 0 is all dashes (marks the start, the password has no '-'), frames 1..n
 //are consecutive parts of the password, each held for SETUP_AP_PASSWORD_HOLD_MS.
-char setupApPassword[9] = "";
+//Holds the user's fixed password instead when one is set (setupApFixedPassword) - that one is
+//never shown, so the frame functions below only ever see the random 8-character one.
+char setupApPassword[64] = "";
 int setupApPasswordFrame = 0;
 bool setupApPasswordFrameStarted = false;
 unsigned long setupApPasswordFrameDoneAt = 0; //0 = current frame not finished yet
@@ -210,19 +212,28 @@ void initWiFi() {
   //use it. Uppercase letters and digits only (the flaps have no lowercase), without the
   //look-alikes 0/O, 1/I, 2/Z, 5/S and 8/B.
   //No two equal characters in a row - on a one-unit display they'd look like a single one.
-  static const char apPasswordAlphabet[] = "ACDEFGHJKLMNPQRTUVWXY34679";
-  for (int i = 0; i < 8; i++) {
-    do {
-      setupApPassword[i] = apPasswordAlphabet[ESP.random() % (sizeof(apPasswordAlphabet) - 1)];
-    } while (i > 0 && setupApPassword[i] == setupApPassword[i - 1]);
+  //A fixed password set by the user replaces it; the display then stays quiet. The serial log
+  //below is the way back in if that password is forgotten.
+  if (setupApFixedPassword != "") {
+    strlcpy(setupApPassword, setupApFixedPassword.c_str(), sizeof(setupApPassword));
+  } else {
+    static const char apPasswordAlphabet[] = "ACDEFGHJKLMNPQRTUVWXY34679";
+    for (int i = 0; i < 8; i++) {
+      do {
+        setupApPassword[i] = apPasswordAlphabet[ESP.random() % (sizeof(apPasswordAlphabet) - 1)];
+      } while (i > 0 && setupApPassword[i] == setupApPassword[i - 1]);
+    }
+    setupApPassword[8] = '\0';
   }
-  setupApPassword[8] = '\0';
   wifiManager.setAPCallback([](WiFiManager*) {
     SerialPrintln(F("Setup hotspot \"Split-Flap-AP\" open - password: ") + String(setupApPassword));
     wifiSetupPortalOpen = true;
     //The setup takes precedence over whatever setup()'s pre-WiFi display is still writing (code
     //review V9-03) - a busy display would refuse the password.
     cancelDisplayControllers();
+    if (setupApFixedPassword != "") {
+      return; //fixed password - nothing to show
+    }
     setupApPasswordFrame = unitsAmount >= 8 ? 0 : 1; //narrow display: start with the first part
     setupApPasswordFrameStarted = false;
     setupApPasswordFrameDoneAt = 0;

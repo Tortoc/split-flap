@@ -1741,6 +1741,33 @@
 						</p>
 						<p id="routerHostnameChangeStatus"></p>
 					</div>
+
+					<!-- Einrichtungs-Hotspot - öffnet nur, wenn beim Start kein bekanntes WLAN erreichbar ist. -->
+					<div style="text-align: left; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1.5em;">
+						<p>
+							Findet das Gerät beim Start kein bekanntes WLAN, öffnet es den Einrichtungs-Hotspot <code>Split-Flap-AP</code>.
+						</p>
+						<p>
+							<label for="setupApPasswordMode">Hotspot-Passwort</label>
+							<br>
+							<select id="setupApPasswordMode" onchange="showSetupApPasswordField()">
+								<option value="random">Zufällig, auf der Anzeige</option>
+								<option value="fixed">Festes Passwort</option>
+							</select>
+						</p>
+						<p id="setupApPasswordField" class="hidden">
+							<label for="setupApPassword">Festes Passwort</label>
+							<br>
+							<input type="password" id="setupApPassword" autocomplete="new-password" maxlength="63" />
+						</p>
+						<p>
+							<button class="btn-primary" onclick="saveSetupApPassword()">Speichern</button>
+						</p>
+						<p class="note">
+							Zufällig: bei jedem Öffnen ein neues Passwort, das die Anzeige zeigt (bei weniger als 8 Units in Teilen). Fest: 8-63 Zeichen, die Anzeige bleibt leer. Wer das feste Passwort vergisst, findet es nur noch in der seriellen Ausgabe beim Öffnen des Hotspots.
+						</p>
+						<p id="setupApPasswordChangeStatus"></p>
+					</div>
 				</div>
 
 				<div id="systemTabTimezone" class="hidden">
@@ -2099,6 +2126,14 @@ curl "http://192.168.1.50/api/wifi?type=connect-status" -H "X-OTA-Password: spli
 # Vollständiger DNS-Name aus dem Router (leer = entfernen)
 curl -X POST "http://192.168.1.50/api/wifi?action=set-router-hostname" \
   -H "X-OTA-Password: splitflap" --data "hostname=split-flap.fritz.box"</pre>
+							</div>
+						</details>
+						<details class="api-endpoint">
+							<summary>POST /api/wifi?action=set-setup-ap-password</summary>
+							<div class="api-endpoint-body">
+								<p class="api-endpoint-desc">Festes Passwort für den Einrichtungs-Hotspot, 8-63 Zeichen; die Anzeige bleibt dann leer. Leer = wieder ein zufälliges Passwort auf der Anzeige.</p>
+								<pre class="api-code">curl -X POST "http://192.168.1.50/api/wifi?action=set-setup-ap-password" \
+  -H "X-OTA-Password: splitflap" --data "password=MeinHotspot123"</pre>
 							</div>
 						</details>
 
@@ -4077,6 +4112,9 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						}
 						document.getElementById("currentMdnsHostnameDisplay").innerText = responseObject.mdnsHostname || "split-flap";
 						document.getElementById("routerHostname").value = responseObject.routerHostname || "";
+						setupApPasswordFixed = !!responseObject.setupApPasswordFixed;
+						document.getElementById("setupApPasswordMode").value = setupApPasswordFixed ? "fixed" : "random";
+						showSetupApPasswordField();
 						document.getElementById("deviceRoleSelect").value = responseObject.deviceRole || "standalone";
 						document.getElementById("extensionLinkModeSelect").value = responseObject.extensionLinkMode || "extend";
 						showDeviceRoleSections(responseObject.deviceRole);
@@ -4823,6 +4861,65 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
 			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("hostname=" + encodeURIComponent(value));
+		}
+
+		//Setup hotspot password (POST /api/wifi?action=set-setup-ap-password): empty = random one on
+		//the display. The device never sends the fixed password back, only whether one is set - an
+		//empty field with "fixed" already active therefore keeps it unchanged.
+		var setupApPasswordFixed = false;
+
+		function showSetupApPasswordField() {
+			var fixed = document.getElementById("setupApPasswordMode").value === "fixed";
+			document.getElementById("setupApPasswordField").classList.toggle("hidden", !fixed);
+			document.getElementById("setupApPassword").placeholder = setupApPasswordFixed ? "gesetzt - zum Ändern neu eingeben" : "8-63 Zeichen";
+		}
+
+		function saveSetupApPassword() {
+			var statusEl = document.getElementById("setupApPasswordChangeStatus");
+			var input = document.getElementById("setupApPassword");
+			var fixed = document.getElementById("setupApPasswordMode").value === "fixed";
+			var value = fixed ? input.value : "";
+			if (fixed && value === "") {
+				statusEl.innerHTML = setupApPasswordFixed
+					? '<span class="status-online-ready">Unverändert.</span>'
+					: '<span class="status-offline">Bitte ein Passwort eingeben.</span>';
+				return;
+			}
+			if (fixed && !/^[\x20-\x7E]{8,63}$/.test(value)) {
+				statusEl.innerHTML = '<span class="status-offline">Ungültig: 8-63 Zeichen, keine Umlaute.</span>';
+				return;
+			}
+			if (localDevelopment) {
+				setupApPasswordFixed = fixed;
+				input.value = "";
+				showSetupApPasswordField();
+				statusEl.innerHTML = '<span class="status-online-ready">Gespeichert (simuliert).</span>';
+				return;
+			}
+			statusEl.innerHTML = "";
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState == 4) {
+					if (this.status == 200) {
+						setupApPasswordFixed = fixed;
+						input.value = "";
+						showSetupApPasswordField();
+						statusEl.innerHTML = '<span class="status-online-ready">Gespeichert.</span>';
+					} else if (this.status == 401) {
+						clearAdminPassword();
+						statusEl.innerHTML = '<span class="status-offline">Falsches Administrator-Passwort.</span>';
+					} else {
+						statusEl.innerHTML = '<span class="status-offline">Fehlgeschlagen: ' + escapeHtml(this.responseText || ("Status " + this.status)) + '</span>';
+					}
+				}
+			};
+			xhrRequest.onerror = function () {
+				statusEl.innerHTML = '<span class="status-offline">Netzwerkfehler.</span>';
+			};
+			xhrRequest.open("POST", "/api/wifi?action=set-setup-ap-password", true);
+			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
+			xhrRequest.send("password=" + encodeURIComponent(value));
 		}
 
 		//POST /api/mqtt: `password` is only sent when the field isn't empty (leaving it blank means

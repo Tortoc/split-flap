@@ -118,7 +118,7 @@ same way. A request with more than one `Content-Type` header is refused with 400
 | GET | [`/api/rotation-items`](#get-apirotation-items) | List all Rotation items |
 | GET | [`/api/scheduled-messages`](#get-apischeduled-messages) | List all scheduled messages |
 | DELETE | [`/api/scheduled-messages`](#delete-apischeduled-messages) | Remove a scheduled message |
-| POST | [`/api/wifi?action=`](#post-apiwifi) | WiFi actions: `reset`\|`scan`\|`connect`\|`set-hostname`\|`set-router-hostname` |
+| POST | [`/api/wifi?action=`](#post-apiwifi) | WiFi actions: `reset`\|`scan`\|`connect`\|`set-hostname`\|`set-router-hostname`\|`set-setup-ap-password` |
 | GET | [`/api/wifi?type=`](#get-apiwifi) | WiFi queries: `scan-result`\|`connect-status` |
 | GET | [`/api/mqtt`](#getpost-apimqtt) | Read MQTT broker settings/connection status |
 | POST | [`/api/mqtt`](#getpost-apimqtt) | Change MQTT broker settings |
@@ -172,6 +172,7 @@ speed, mode, WiFi status, etc.
   "wifiSettingsResettable": true,
   "mdnsHostname": "split-flap",
   "routerHostname": "",
+  "setupApPasswordFixed": false,
   "mqttEnabled": false,
   "mqttBrokerHost": "",
   "mqttBrokerPort": 1883,
@@ -848,18 +849,19 @@ curl -X DELETE "http://192.168.1.50/api/scheduled-messages?id=1755331200" -H "X-
 
 ### `POST /api/wifi`
 
-Four WiFi write-actions sharing one registered route, picked via `?action=` (same
+Six WiFi write-actions sharing one registered route, picked via `?action=` (same
 route-registration-costs-heap reasoning as `GET /api/diag` and `POST /api/units`).
-`accessControlWifi` category for all four actions - see [Authentication](#authentication);
+`accessControlWifi` category for all six actions - see [Authentication](#authentication);
 `401 text/plain` if a password is required and missing/wrong. Only present if
 `WIFI_USE_DIRECT` is `false` (it is, by default - this device uses WiFiManager's AP-config flow
 rather than hardcoded credentials).
 
-**Query param** `action` (required): `reset` | `scan` | `connect` | `set-hostname` | `set-router-hostname`.
+**Query param** `action` (required): `reset` | `scan` | `connect` | `set-hostname` | `set-router-hostname` | `set-setup-ap-password`.
 
 **`action=reset`** - erases the stored WiFi configuration and reboots into AP setup mode (connect
 to the device's own `Split-Flap-AP` network to reconfigure). Since 4.10.14 that hotspot is
-protected by a fresh random 8-character password, shown on the flaps while it is open (OW-06).
+protected by a fresh random 8-character password, shown on the flaps while it is open (OW-06),
+unless a fixed one is set (`action=set-setup-ap-password`).
 **Response** `200 text/html` - an explanatory page (meant for real navigation).
 
 **`action=scan`** - starts an async network scan (the actual `WiFi.scanNetworksAsync()` call
@@ -889,7 +891,15 @@ the Host header note under [Authentication](#authentication)). Shown as `routerH
 **Body params:** `hostname` - a full DNS name without port; empty clears it.
 **Response:** `200 text/plain`: `"Router hostname updated"`. `400 text/plain` if invalid.
 
-`400 text/plain` if `action` is missing or not one of the five values above.
+**`action=set-setup-ap-password`** (since 4.11.0) - a fixed password for the `Split-Flap-AP`
+setup hotspot; the flaps then stay blank while it is open. Stored in plaintext (WPA2 needs the
+passphrase itself) and never returned - `GET /api/settings` only shows `setupApPasswordFixed`.
+The serial log prints it when the hotspot opens, the only way back in if it is forgotten.
+**Body params:** `password` - 8-63 printable ASCII characters; empty switches back to a random
+password on the display.
+**Response:** `200 text/plain`: `"Setup hotspot password updated"`. `400 text/plain` if invalid.
+
+`400 text/plain` if `action` is missing or not one of the six values above.
 
 ```bash
 curl -X POST "http://192.168.1.50/api/wifi?action=reset" -H "X-OTA-Password: splitflap"
@@ -897,6 +907,7 @@ curl -X POST "http://192.168.1.50/api/wifi?action=scan" -H "X-OTA-Password: spli
 curl -X POST "http://192.168.1.50/api/wifi?action=connect" -H "X-OTA-Password: splitflap" --data "ssid=MyNetwork&password=secret"
 curl -X POST "http://192.168.1.50/api/wifi?action=set-hostname" -H "X-OTA-Password: splitflap" --data "hostname=my-split-flap"
 curl -X POST "http://192.168.1.50/api/wifi?action=set-router-hostname" -H "X-OTA-Password: splitflap" --data "hostname=split-flap.fritz.box"
+curl -X POST "http://192.168.1.50/api/wifi?action=set-setup-ap-password" -H "X-OTA-Password: splitflap" --data "password=MyHotspot123"
 ```
 
 ---

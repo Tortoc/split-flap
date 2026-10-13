@@ -94,6 +94,7 @@ bool loadValuesFromBootSnapshot() {
   otaPassword = String((const char*)(doc["otaPassword"] | "splitflap"));
   mdnsHostname = String((const char*)(doc["mdnsHostname"] | "split-flap"));
   routerHostname = String((const char*)(doc["routerHostname"] | ""));
+  setupApFixedPassword = String((const char*)(doc["setupApFixedPassword"] | ""));
 #if MQTT_ENABLE == true
   mqttEnabled = doc["mqttEnabled"] | false;
   mqttBrokerHost = String((const char*)(doc["mqttBrokerHost"] | ""));
@@ -142,6 +143,7 @@ void loadValuesFromIndividualFiles() {
   otaPassword = readFile(LittleFS, otaPasswordPath, "splitflap"); //persisted, not a compile-time constant
   mdnsHostname = readFile(LittleFS, mdnsHostnamePath, "split-flap"); //persisted, not a compile-time constant
   routerHostname = readFile(LittleFS, routerHostnamePath, "");
+  setupApFixedPassword = readFile(LittleFS, setupApFixedPasswordPath, "");
 #if MQTT_ENABLE == true
   mqttEnabled = readFile(LittleFS, mqttEnabledPath, "false") == "true";
   mqttBrokerHost = readFile(LittleFS, mqttBrokerHostPath, ""); //"" = not configured yet
@@ -196,6 +198,7 @@ bool saveBootSnapshot() {
   doc["otaPassword"] = otaPassword;
   doc["mdnsHostname"] = mdnsHostname;
   doc["routerHostname"] = routerHostname;
+  doc["setupApFixedPassword"] = setupApFixedPassword;
 #if MQTT_ENABLE == true
   doc["mqttEnabled"] = mqttEnabled;
   doc["mqttBrokerHost"] = mqttBrokerHost;
@@ -251,6 +254,7 @@ String computeSettingsSignature() {
   sig += otaPassword; sig += '|';
   sig += mdnsHostname; sig += '|';
   sig += routerHostname; sig += '|';
+  sig += setupApFixedPassword; sig += '|';
 #if MQTT_ENABLE == true
   sig += mqttEnabled ? '1' : '0'; sig += '|';
   sig += mqttBrokerHost; sig += '|';
