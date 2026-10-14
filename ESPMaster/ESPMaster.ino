@@ -354,7 +354,7 @@ IPAddress wifiPrimaryDns(8, 8, 8, 8);
 //--- Core state - normal running of the system, be careful changing these ---
 //Firmware version shown in the UI (git tags esp-vX.Y.Z) - an own version line since the fork from
 //JonnyBooker's 2.3.0-Scott.
-const char* espVersion = "5.0.1";
+const char* espVersion = "5.0.2";
 
 //The letters on the flaps, in drum order - must match the physical drums.
 const char letters[] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '$', '&', '#', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', '-', '?', '!'};
