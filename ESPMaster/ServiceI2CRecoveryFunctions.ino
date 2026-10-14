@@ -1,18 +1,13 @@
-//I2C bus recovery for a slave stuck holding SDA low. Per the I2C spec (NXP AN10216), the master can
-//free it by clocking SCL up to 9 times then forcing a STOP - the ESP8266 core doesn't do this
-//itself. Called both proactively and when a read fails.
-
-// Un-sticks a hung bus: clocks SCL to release a slave holding SDA low, then generates a STOP.
-// Cheap, no-op if already idle. Uses pin *mode* switching, not digitalWrite() - I2C is open-drain,
-// so writing HIGH against a slave actively driving the line would fight it instead of releasing it.
+//I2C bus recovery for a slave stuck holding SDA low (NXP AN10216): clock SCL up to 9 times, then
+//force a STOP - the ESP8266 core doesn't do this itself. Cheap no-op on an idle bus. Uses pin mode
+//switching, not digitalWrite(): I2C is open-drain, driving HIGH would fight a slave pulling low.
 bool recoverI2CBus() {
   pinMode(I2C_SCL_PIN, INPUT_PULLUP);
   pinMode(I2C_SDA_PIN, INPUT_PULLUP);
   delayMicroseconds(5);
 
   if (digitalRead(I2C_SCL_PIN) == LOW) {
-    // Only the master normally drives SCL - if a slave is holding it low, toggling it from our
-    // side can't force anything; needs a slave-side reset instead.
+    // A slave holding SCL low can't be fixed from the master side; it needs a slave reset.
     SerialPrintln(F("I2C bus recovery: SCL held low by a slave, cannot recover from the master side alone"));
     return false;
   }
@@ -67,9 +62,7 @@ bool recoverI2CBus() {
 void forceUnitRecoveryReset(int unitIndex) {
   SerialPrintln(F("I2C recovery: unit ") + String(unitIndex) + F(" still not responding after bus recovery - forcing it to reboot"));
   requestUnitEnterBootloader(unitIndex);
-  //Invalidate the display cache - the reboot re-homes the unit from scratch, so its actual
-  //position may no longer match what the cache believes was last written. See
-  //displayRenderGeneration's own comment.
+  //The reboot re-homes the unit, so invalidate the display cache.
   displayRenderGeneration++;
 }
 #else

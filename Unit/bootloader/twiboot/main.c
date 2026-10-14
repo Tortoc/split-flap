@@ -19,71 +19,38 @@
 /***************************************************************************
  * MODIFIED FORK - split-flap project (https://github.com/Tortoc/split-flap)
  *
- * Based on unmodified upstream https://github.com/orempel/twiboot
- * commit 559a403836e8d91a2d5b962e9541af679150b7a9 (2021-02-20).
+ * Based on upstream https://github.com/orempel/twiboot commit
+ * 559a403836e8d91a2d5b962e9541af679150b7a9 (2021-02-20).
  *
- * Change 1: the TWI/I2C address is no longer a fixed compile-time value.
- * Instead, main() reads the same 6 DIP-switch address pins (A0-A3, D3-D4)
- * that Unit.ino's getaddress() already reads, and adds that to
- * TWI_ADDRESS_BASE. This keeps a single compiled bootloader image usable on
- * every unit, and makes DIP-switch/jumper changes take effect immediately
- * for firmware updates too, without needing a per-unit bootloader reflash.
- * See Unit/BOOTLOADER_SETUP.md for the full rationale.
+ * Change 1: the I2C address is TWI_ADDRESS_BASE plus the unit's address
+ * jumpers (A0-A3, D3-D4), read the same way as Unit.ino's getaddress(). One
+ * image fits every unit, and jumper changes apply without a reflash.
  *
- * Change 2: an EEPROM byte at EEPROM_UPDATE_MARKER_ADDR now gates the app-boot
- * decision (see the for(;;) wrapper around the main command loop below).
- * Application pages are written 1..N-1 first, page 0 (the reset vector) last
- * - but that only protects the jump instruction itself, not its target: on
- * the atmega328p the real entry point the reset vector jumps to already
- * lands in page 1, i.e. exactly the pages rewritten FIRST. An update aborted
- * partway through (e.g. a power loss between pages) followed by any reset
- * would otherwise auto-boot the old (untouched) page 0 straight into a mix
- * of old and new code once the idle timeout (or an explicit
- * CMD_SWITCH_APPLICATION) fires. The marker makes twiboot stay resident
- * instead - see ESPMaster/ServiceUnitFirmwareFunctions.ino's
- * pushFirmwareToUnit(), which arms the marker before writing any page and
- * only clears it after page 0 is written AND verified.
+ * Change 2: an EEPROM marker (EEPROM_UPDATE_MARKER_ADDR) gates booting the
+ * app. Writing page 0 last isn't enough, because the reset vector's target
+ * lands in page 1 - an update aborted midway would boot a mix of old and new
+ * code. pushFirmwareToUnit() (ESPMaster) arms the marker before writing any
+ * page and clears it only after page 0 is written and verified.
  *
- * Change 3: unmodified upstream TWI_data_write() sets boot_timeout = 0
- * ("abort countdown") on every real command (chip-info read, flash/eeprom
- * access, WAIT heartbeat) and never sets it back to a nonzero value anywhere
- * else in this file - so the ~1000ms idle-boot countdown is permanently
- * disabled for the rest of the power cycle the moment any real command
- * arrives. A master that then abandons the session before ever arming the
- * Change-2 EEPROM marker leaves the unit stuck in the bootloader with no
- * automatic recovery path (twiboot also disables the watchdog on entry, see
- * disable_wdt_timer() below, so there's no independent hardware fallback
- * either). Changed to re-arm TIMER_MSEC2IRQCNT(TIMEOUT_MS) instead of
- * disabling on every command, making it a rolling idle timer: the unit now
- * auto-boots ~1s after the master goes quiet, in every abandonment scenario.
- * This does not weaken Change 2's protection - jump_to_app()'s marker check
- * still runs on every trip through the for(;;) loop regardless of which of
- * the three paths (idle timeout / explicit switch-app / SLA+W junk byte) set
- * cmd = CMD_BOOT_APPLICATION, and sends it back to CMD_WAIT if a write is
- * genuinely still in progress.
+ * Change 3: upstream clears boot_timeout on every command and never re-arms
+ * it, so a master that abandoned a session before arming the marker left the
+ * unit stuck in the bootloader (the watchdog is off here too). The idle
+ * timeout is now re-armed on every command: the unit boots ~1s after the
+ * master goes quiet. The Change 2 check still applies to every boot path.
  *
- * This fork's own version, continuing upstream's own MAJOR.MINOR-only tag
- * scheme (v1.0/v1.1/v1.2/v2.0/v2.1/v3.0 on GitHub) forward from the v3.2
- * this fork's base commit already carries in VERSION_STRING, rather than
- * resetting to a fresh v1.0: v3.2 + Change 1 = v3.3, + Change 2 = v3.4,
- * + Change 3 = v3.5. Reported as-is in VERSION_STRING below ("SF-TWIBOOT
- * v3.5"). A unit whose bootloader predates this version string change still
- * answers `Show bootloader version` with the old "TWIBOOT v3.2" string -
- * that's expected, not a bug (no OTA path exists for the bootloader itself,
- * by design - it's what makes app OTA possible in the first place).
+ * Version: upstream's v3.2 continued as v3.3/v3.4/v3.5 (one per change),
+ * reported as "SF-TWIBOOT v3.5". A unit with an older bootloader still
+ * reports "TWIBOOT v3.2" (the bootloader itself has no OTA path).
  *
- * Everything else in this file is unmodified upstream code. This file
- * remains licensed under GPL-2.0 (see LICENSE in this directory), as
- * required for redistributing a modified version.
+ * Everything else is unmodified upstream code, licensed under GPL-2.0 (see
+ * LICENSE in this directory).
  ***************************************************************************/
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <avr/boot.h>
 #include <avr/pgmspace.h>
 
-//Fork version (see this file's own header comment above for the full v3.2->v3.5 derivation).
-//Exactly 15 characters + the array's implicit trailing byte = 16, fitting info[16] below without
-//truncation.
+//Fork version (see the header). 15 characters + terminator fit info[16].
 #define VERSION_STRING          "SF-TWIBOOT v3.5"
 #define EEPROM_SUPPORT          1
 #define LED_SUPPORT             1
@@ -99,11 +66,10 @@
 #ifndef TWI_ADDRESS_BASE
 #define TWI_ADDRESS_BASE        0x29
 #endif
-/* Actual TWI address = TWI_ADDRESS_BASE + (DIP switch reading), computed at runtime in main() */
+/* Actual TWI address = TWI_ADDRESS_BASE + (address jumper reading), computed at runtime in main() */
 
-/* 16MHz, NOT twiboot's upstream 8MHz default - this hardware has a real external 16MHz crystal
- * (Y2). Must be paired with the Makefile's AVRDUDE_FUSES (lfuse=0xFF, hfuse=0xDA) - a mismatch
- * here silently runs the chip wrong, no error message. See Unit/BOOTLOADER_SETUP.md. */
+/* 16MHz external crystal (Y2), not upstream's 8MHz - must match the Makefile's AVRDUDE_FUSES
+ * (lfuse=0xFF, hfuse=0xDA). A mismatch runs the chip at the wrong clock without any error. */
 #define F_CPU                   16000000ULL
 /* Must come after F_CPU above - util/delay.h calibrates against it at include time. */
 #include <util/delay.h>
@@ -205,14 +171,9 @@
 #define MEMTYPE_FLASH           0x01
 #define MEMTYPE_EEPROM          0x02
 
-/* "Update complete" gate for the app-boot decision - see Change 2 in the file header comment
- * above. E2END (not a hardcoded address) so this always matches whatever MCU this is built for.
- * Deliberately the opposite end of the EEPROM from Unit.ino's own calOffset (address 0-1), to
- * keep the two completely separate. 0xFF (the EEPROM-erased default) means "OK to boot" - no
- * migration step needed for a unit that has never gone through an update with this mechanism, or
- * right after a fresh ISP chip-erase. Only an explicit 0x00 (armed by pushFirmwareToUnit() before
- * writing any flash page) blocks booting - EEPROM needs no separate erase cycle, so clearing it
- * back to 0xFF after a verified-complete update is a perfectly ordinary write. */
+/* "Update complete" gate for booting the app (Change 2). E2END = last EEPROM byte for any MCU,
+ * the opposite end from Unit.ino's calOffset (0-1). 0xFF (erased) means OK to boot, so nothing
+ * needs migrating - only an explicit 0x00 (armed by pushFirmwareToUnit()) blocks it. */
 #define EEPROM_UPDATE_MARKER_ADDR      E2END
 #define EEPROM_UPDATE_MARKER_INPROGRESS 0x00
 
@@ -911,10 +872,8 @@ int main(void)
 #endif
 
 #if defined (TWCR)
-    /* Read the address jumpers (same pins/bit mapping as Unit.ino's getaddress()) so the
-     * bootloader's I2C address always matches the app's - one image for every unit, jumper
-     * changes apply immediately without a reflash. bit 0..3 = A0-A3 (PC0-PC3), bit 4..5 = D3-D4
-     * (PD3-PD4); D5/D6 stay unread. Must stay in sync with Unit.ino's getaddress(). */
+    /* Read the address jumpers like Unit.ino's getaddress() (keep in sync): bits 0-3 = A0-A3
+     * (PC0-PC3), bits 4-5 = D3-D4 (PD3-PD4). */
     DDRD &= ~((1<<PD3) | (1<<PD4));  /* inputs */
     PORTD |= (1<<PD3) | (1<<PD4);    /* enable pull-ups */
     DDRC &= ~((1<<PC0) | (1<<PC1) | (1<<PC2) | (1<<PC3));  /* inputs */
@@ -941,14 +900,9 @@ int main(void)
 #error "No TWI/USI peripheral found"
 #endif
 
-    /* Outer loop, see Change 2 in the file header comment above: cmd can become
-     * CMD_BOOT_APPLICATION three different ways (the idle timeout in TIMER0_OVF_vect, an explicit
-     * CMD_SWITCH_APPLICATION/BOOTTYPE_APPLICATION, or the SLA+W-junk-byte shortcut in
-     * TWI_data_write) - gating all of them at once, right here at the only place that actually
-     * calls jump_to_app() below, is simpler and provably complete rather than tracking three
-     * separate call sites. Read fresh from EEPROM every time (never cached in a variable) - a
-     * push that clears the marker during THIS same bootloader session (recovering from an earlier
-     * aborted one) must be able to boot immediately once it does, without needing a second reset. */
+    /* Outer loop (Change 2): cmd can become CMD_BOOT_APPLICATION three ways (idle timeout,
+     * CMD_SWITCH_APPLICATION, SLA+W junk byte) - gating jump_to_app() here covers all of them. The
+     * marker is read fresh each time, so a push that clears it in this session can boot at once. */
     for (;;)
     {
         while (cmd != CMD_BOOT_APPLICATION)
@@ -983,9 +937,7 @@ int main(void)
         }
 
 #if (EEPROM_SUPPORT)
-        /* Refuse to boot into a possibly-inconsistent app while an update is armed/in-progress
-         * (see EEPROM_UPDATE_MARKER_ADDR's comment and Change 2 above) - go back to waiting for
-         * I2C instead of falling through to jump_to_app() below. */
+        /* Don't boot a possibly inconsistent app while an update is in progress (Change 2). */
         if (read_eeprom_byte(EEPROM_UPDATE_MARKER_ADDR) == EEPROM_UPDATE_MARKER_INPROGRESS)
         {
             cmd = CMD_WAIT;

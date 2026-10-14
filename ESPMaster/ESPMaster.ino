@@ -1,8 +1,8 @@
 /*
   SplitFlap ESPMaster firmware.
-  Based on https://github.com/JonnyBooker/split-flap, built on the work of David Königsmann
-  (https://github.com/Dave19171/split-flap). Licensed under GNU:
-  https://github.com/JonnyBooker/split-flap/blob/master/LICENSE
+  Fork of https://github.com/scientress/split-flap, based on https://github.com/JonnyBooker/split-flap,
+  built on the work of David Königsmann (https://github.com/Dave19171/split-flap).
+  Licensed under the GNU GPL v3, see LICENSE in the repository root.
 */
 
 //--- Feature flags ---
@@ -11,30 +11,22 @@
 #define WEB_FIRMWARE_UPDATE_ENABLE true //browser-based firmware upload from the Admin page
 #define UNIT_BOOTLOADER_ENABLE true //push Unit.ino updates over I2C via twiboot - needs every
                                     //unit pre-flashed with twiboot, see Unit/BOOTLOADER_SETUP.md
-#define UNITS_AMOUNT_MAX    64     //matches the 6-bit DIP switch addressing range; actual amount
+#define UNITS_AMOUNT_MAX    64     //matches the 6-bit address jumper range; actual amount
                                     //is auto-detected at startup via scanI2CBus()
 #define SERIAL_BAUDRATE     115200
 #define WIFI_USE_DIRECT     false  //false = AP config portal (WiFiManager), true = direct connect
-#define USE_MULTICAST       true   //broadcast a "<mdnsName>.local" hostname on the local network.
-                                   //If running more than one display on the same network, mdnsName
-                                   //below must be unique per device.
-//LED_ENABLE only gates the "WiFi totally failed to connect" continuous error blink at the end of
-//setup() - see that block's own comment.
+#define USE_MULTICAST       true   //"<mdnsHostname>.local" on the LAN, unique per display
+//LED_ENABLE only gates the error blink when WiFi failed at startup (end of setup()).
 #define LED_ENABLE          true
 #define DEBUG_ENABLE true  //startup debug page, error panel, page-load log, serial debug log -
-                           //gated at runtime by showDebugPage (POST /api/debug-mode, persisted
-                           //in /debugmode.txt)
-#define MQTT_ENABLE false  //MQTT + Home Assistant auto-discovery. This flag alone decides whether
-                           //the feature exists in the firmware AT ALL - PubSubClient's own buffer
-                           //is malloc()'d from its constructor, so a compile-time false here is
-                           //the only way to avoid that cost entirely. Flip to true + rebuild if
-                           //MQTT/Home-Assistant integration is ever wanted.
+                           //switched at runtime via POST /api/debug-mode
+#define MQTT_ENABLE false  //MQTT + Home Assistant auto-discovery.
+                           //Compile-time only: PubSubClient malloc()s its buffer in the
+                           //constructor, so false is the only way to avoid that cost.
 
 #define WIFI_STATIC_IP      false //try a router-assigned static IP instead of DHCP
-#define FAE_MOD                   //modified PCB with an ESP-12F module
 
-//ESP01 GPIO1/TX is used for I2C SDA and GPIO3/RX for I2C SCL (Wire.begin(1, 3)) - so the debug LED
-//goes on GPIO2 instead of the built-in GPIO1 LED. VCC must be 3.3V only.
+//fae-pcb with an ESP-12F module. Debug LED on GPIO2. VCC must be 3.3V only.
 #define LED_DEBUG_PIN 2
 #define LED_ON HIGH
 #define LED_OFF LOW
@@ -43,12 +35,9 @@
 #define ANSWER_SIZE         6 //status + offset + phase + progress bytes, must match Unit.ino's requestEvent()
 #define ANSWER_SIZE_LIGHT   3 //status + offset only, see readUnitInfo()'s 3-arg overload
 #define ANSWER_SIZE_DIAG    8 //adds the two diagnostic counters - see readUnitInfo()'s 7-arg
-                               //overload. A unit not yet updated to the newer Unit.ino still
-                               //answers without error - the last 2 bytes just read back as 255
-                               //(idle bus), not a detectable "unsupported" marker.
+                               //overload (older units read the extra bytes as 255).
 #define ANSWER_SIZE_VERSION 11 //adds the 3 firmware-version bytes (major/minor/patch) - see
-                               //readUnitInfo()'s 10-arg overload. Same 255-byte caveat as
-                               //ANSWER_SIZE_DIAG above.
+                               //readUnitInfo()'s 10-arg overload (same 255 caveat).
 #define FLAP_AMOUNT         45
 #define MIN_SPEED           1
 #define MAX_SPEED           12
@@ -63,13 +52,8 @@
 #define RTC_I2C_ADDRESS 0x68
 
 //Named so ServiceI2CRecoveryFunctions.ino's bus-recovery routine can reuse the exact same pins.
-#ifdef FAE_MOD
 #define I2C_SDA_PIN 4
 #define I2C_SCL_PIN 5
-#else
-#define I2C_SDA_PIN 1
-#define I2C_SCL_PIN 3
-#endif
 
 //--- Libraries ---
 #if WIFI_USE_DIRECT == false
@@ -89,9 +73,7 @@
 #include <ESPAsyncTCP.h>
 #include <ESPAsyncWebSrv.h>
 #include <ESP8266WiFi.h>
-#include <ESP8266HTTPClient.h> //Primary->Extension push/health-check (ServiceExtensionFunctions.ino) -
-                               //verified IRAM-neutral vs. plain WiFiClient before adding this
-                               //dependency (byte-identical IRAM usage in isolated test builds).
+#include <ESP8266HTTPClient.h> //primary->extension push and health check
 #if USE_MULTICAST == true
 #include <ESP8266mDNS.h>
 #endif
@@ -115,32 +97,23 @@
 #include "ServiceMemoryReserveFunctions.h"
 #include "LittleFS.h"
 
-//Request method values for webServer.on() and request->method() - ESPAsyncWebSrv's own bit flags.
-//The library's HTTP_POST/HTTP_DELETE names can't be used in this sketch: WiFiManager includes
-//ESP8266WebServer, and ESPAsyncWebSrv.h only defines its own WebRequestMethod enum
-//#ifndef WEBSERVER_H - so here HTTP_POST/HTTP_DELETE are ESP8266WebServer's HTTPMethod values (3/6)
-//while the separately compiled library still sets and checks its bit values (2/4). An "HTTP_POST"
-//registration therefore also accepted GET (3 = GET|POST bits), "HTTP_DELETE" also POST, and
-//comparisons against HTTP_POST were never true. Only HTTP_GET (1) happened to match
-//(BUILD_INFO Punkt 236).
+//Request method values for webServer.on()/request->method(): ESPAsyncWebSrv's own bit flags. Its
+//HTTP_POST/HTTP_DELETE names are wrong in this sketch - WiFiManager pulls in ESP8266WebServer, whose
+//HTTPMethod values (3/6) win, while the library still uses its bits (2/4): "HTTP_POST" matched GET.
 const WebRequestMethodComposite ASYNC_HTTP_GET = 0b00000001;
 const WebRequestMethodComposite ASYNC_HTTP_POST = 0b00000010;
 const WebRequestMethodComposite ASYNC_HTTP_DELETE = 0b00000100;
 
 //--- User-facing settings ---
-//Hostname broadcast via mDNS when USE_MULTICAST is enabled - reachable as "<mdnsHostname>.local"
-//on networks whose clients support mDNS. Persisted, not a compile-time constant - see POST
-///api/wifi's "set-hostname" action (Netzwerk tab in the UI).
+//mDNS hostname ("<mdnsHostname>.local"), set via POST /api/wifi (Netzwerk tab).
 String mdnsHostname = "split-flap";
-//Full name the router's DNS gives this device (e.g. "split-flap.fritz.box"), "" = none. Only used
-//to accept that name in the Host header (RequestGuard) - set via POST /api/wifi?action=
-//set-router-hostname (Netzwerk tab). Must be exact: any other domain is refused (code review V9-02).
+//Exact DNS name the router gives this device (e.g. "split-flap.fritz.box"), "" = none. Only used
+//to accept that Host header (RequestGuard); set via POST /api/wifi?action=set-router-hostname.
 String routerHostname = "";
 const char* routerHostnamePath = "/routerhostname.txt";
-//Fixed password for WiFiManager's setup hotspot, "" = a fresh random one shown on the display
-//every time (default). Lets the user keep the display quiet, e.g. on a narrow display where the
-//random one only appears in parts. Plaintext on purpose: WPA2 needs the passphrase itself. Set
-//via POST /api/wifi?action=set-setup-ap-password (Netzwerk tab); 8-63 printable ASCII characters.
+//Fixed setup-hotspot password, "" = a fresh random one shown on the display (default). Plaintext
+//on purpose (WPA2 needs the passphrase). Set via POST /api/wifi?action=set-setup-ap-password,
+//8-63 printable ASCII characters.
 String setupApFixedPassword = "";
 const char* setupApFixedPasswordPath = "/setupappassword.txt";
 
@@ -148,24 +121,19 @@ const char* setupApFixedPasswordPath = "/setupappassword.txt";
 const char* wifiDirectSsid = "";
 const char* wifiDirectPassword = "";
 
-//Runtime-changeable admin password (see /api/ota-password), persisted to LittleFS only as a salted
-//PBKDF2-SHA256 hash since 5.0.0 (security review 2026-10-12, OW-10) - see hashAdminPassword().
-//Default "splitflap". Empty string = password protection globally OFF - every endpoint below
-//(including firmware/flash ones) is then unauthenticated, no exceptions, regardless of the toggles
-//below.
+//Admin password, persisted only as a salted PBKDF2-SHA256 hash (see hashAdminPassword()). Default
+//"splitflap"; empty = protection off for every endpoint, firmware included, regardless of the
+//toggles below.
 String adminPasswordHash = "";
 const char* adminPasswordHashPath = "/adminpasswordhash.txt";
-//Where firmware before 5.0.0 kept the password in plaintext - read once to migrate, then deleted.
-//An older firmware flashed afterwards finds no password and falls back to "splitflap" (user
-//decision 2026-10-13).
+//Where firmware before 5.0.0 kept the plaintext password - read once to migrate, then deleted. An
+//older firmware flashed afterwards falls back to "splitflap".
 const char* legacyOtaPasswordPath = "/otapassword.txt";
 bool adminPasswordMigrated = false; //set while loading, persisted by loadValuesFromFileSystem()
 
-//Primary<->extension link (OW-10/OW-02): the primary signs every display push with HMAC-SHA256
-//instead of sending its admin password along, which used to hand that password to anyone reading
-//the WiFi traffic. primaryLinkSecret is this device's own key as a primary (created on the first
-//pairing), pairedPrimaryLinkSecret the key it accepts as an extension (set by its primary's
-//pairing request). 64 hex characters each, "" = none. See ServiceExtensionFunctions.ino.
+//Primary<->extension link keys (HMAC-SHA256 signed pushes, no password on the wire):
+//primaryLinkSecret is this device's key as a primary (created on first pairing),
+//pairedPrimaryLinkSecret the key it accepts as an extension. 64 hex chars, "" = none.
 String primaryLinkSecret = "";
 const char* primaryLinkSecretPath = "/linksecret.txt";
 String pairedPrimaryLinkSecret = "";
@@ -175,12 +143,11 @@ const char* pairedPrimaryLinkSecretPath = "/pairedlinksecret.txt";
 volatile bool pendingExtensionPairing = false;
 int pendingExtensionPairingIndex = -1;
 String pendingExtensionPairingPassword;
-//Only one delivery of the web page at a time - see GET "/"'s comment (BUILD_INFO Punkt 237).
+//Only one delivery of the web page at a time - see GET "/"'s comment.
 bool pageDeliveryActive = false;
 unsigned long pageDeliveryStartedAt = 0;
-//Which delivery owns pageDeliveryActive, and its connection - only that delivery's own disconnect
-//releases the guard, and an overdue one gets closed explicitly (CODE_REVIEW_V8.md #2). The client
-//stays valid until that disconnect callback runs, which also clears it.
+//The delivery that owns pageDeliveryActive and its connection; only its own disconnect releases
+//the guard (an overdue one is closed explicitly).
 uint32_t pageDeliveryGeneration = 0;
 AsyncClient* pageDeliveryClient = nullptr;
 
@@ -208,10 +175,8 @@ void freeRotationBody(bool ownBuffer) {
 #define LOGIN_SESSION_COOKIE_MAX_AGE 34560000UL //400 days, the most browsers accept
 const char* loginSessionsPath = "/loginsessions.json";
 
-//Wrong admin-password attempts per sender IP, see checkAdminPassword(): each sender waits
-//FAILED_LOGIN_PAUSE_MS after its own wrong guess. Per sender, not global - otherwise anyone could
-//lock out every header login (and the primary's display pushes) with one wrong guess every 2 s
-//(security review 2026-10-12, OW-09).
+//Wrong admin-password attempts per sender IP (see checkAdminPassword()): each sender waits
+//FAILED_LOGIN_PAUSE_MS after a wrong guess. Per sender, so one attacker can't lock everyone out.
 #define FAILED_LOGIN_SLOTS 8
 #define FAILED_LOGIN_PAUSE_MS 2000
 struct FailedLogin {
@@ -225,35 +190,23 @@ FailedLogin failedLogins[FAILED_LOGIN_SLOTS];
 #define PASSWORD_THROTTLED 2
 const char* mdnsHostnamePath = "/mdnsname.txt";
 
-//Unit 63's bootloader address is UNIT_BOOTLOADER_BASE_ADDRESS(0x29) + 63 = 0x68 - EXACTLY
-//RTC_I2C_ADDRESS. twibootReadChipInfo() sent to the RTC's address writes a register pointer of
-//0x02 (hours) followed by three zero bytes via the DS3231's own register auto-increment - a
-//"read-only diagnostic" against the wrong device that actually corrupts its time registers.
-//Checked at every bootloader-address entry point, independent of unitsAmount.
-//
-//Must live here, AFTER this file's own #include block above - a real function/variable definition
-//placed BEFORE those includes confuses arduino-cli's auto-prototype-generator into inserting its
-//generated prototype block ahead of the #include lines that actually declare those types,
-//breaking the entire sketch's compile. #defines don't have this problem.
+//Unit 63's bootloader address (0x29 + 63 = 0x68) is RTC_I2C_ADDRESS - a chip-info read there would
+//overwrite the DS3231's time registers. Checked at every bootloader-address entry point.
+//Defined after the #include block: a definition before it makes arduino-cli insert its generated
+//prototypes ahead of the includes, breaking the build.
 bool isReservedI2CAddress(int address) {
   return address == RTC_I2C_ADDRESS;
 }
 
-//Registered as the very first web handler: claims - and answers with 400 - every request the
-//handlers behind it must never see. Since it's a "trivial" handler (no onRequest), the library
-//doesn't even parse such a request's body.
-//
-//1. Multipart boundary outside RFC 2046's 1-70 characters: ESPAsyncWebSrv's multipart parser
-//   loops over the boundary with a uint8_t counter - 256+ characters never end that loop and the
-//   watchdog resets the device, before any handler or password check runs (same bug as
-//   CVE-2026-54571; security review 2026-10-12, OW-01). Mirrors the library's own boundary
-//   extraction (WebRequest.cpp).
-//2. Unknown Host header (DNS rebinding, OW-07): a web page from elsewhere that re-points its own
-//   domain to this device's IP would otherwise read and call everything not behind the password.
-//   Accepted: an IPv4 address, this device's mDNS/DHCP name alone or as "<name>.local", or the
-//   exact router DNS name entered in routerHostname. Any other domain is refused, even one that
-//   starts with this device's name - its owner could point "split-flap.attacker.example" here
-//   (code review V9-02). An extension device must be configured under one of these names.
+//First registered handler: answers 400 to every request the handlers behind it must never see (no
+//onRequest, so the library doesn't even parse the body).
+//1. Multipart boundary outside RFC 2046's 1-70 characters: the library's parser loops over it with
+//   a uint8_t counter, so 256+ characters hang it until the watchdog resets the device (cf.
+//   CVE-2026-54571).
+//2. Unknown Host header (DNS rebinding): accepted are an IPv4 address, this device's mDNS/DHCP name
+//   with or without ".local", or the exact routerHostname. Anything else is refused, even names
+//   starting with this device's name ("split-flap.attacker.example"). Extensions must be
+//   configured under one of these names.
 class RequestGuard : public AsyncWebHandler {
   public:
     bool canHandle(AsyncWebServerRequest *request) override {
@@ -264,10 +217,8 @@ class RequestGuard : public AsyncWebHandler {
     }
 
   private:
-    //The library parses EVERY Content-Type header and keeps the boundary of the last multipart
-    //one, while getHeader("Content-Type") returns only the first - a second header would slip a
-    //long boundary past a check of the first (code review V9-01). So more than one is refused,
-    //and the single one is the value the parser actually saw.
+    //The library keeps the boundary of the LAST multipart Content-Type header, getHeader() returns
+    //the first - so more than one header is refused.
     static bool hasInvalidMultipartBoundary(AsyncWebServerRequest *request) {
       AsyncWebHeader *contentType = nullptr;
       for (size_t i = 0; i < request->headers(); i++) {
@@ -313,17 +264,13 @@ class RequestGuard : public AsyncWebHandler {
 };
 
 #if MQTT_ENABLE == true
-//WiFiClient/PubSubClient objects declared here, not in ServiceMqttFunctions.ino - the Arduino
-//build concatenates .ino files in filename order (ESPMaster.ino before ServiceMqttFunctions.ino),
-//so a global used by code IN this file (GET /api/settings and POST /api/mqtt below both read
-//mqttClient.connected()) must be declared before that point, not in a later file.
+//Declared here, not in ServiceMqttFunctions.ino: handlers in this file use mqttClient, and .ino
+//files are concatenated in filename order.
 WiFiClient mqttWifiClient;
 PubSubClient mqttClient(mqttWifiClient);
 
-//MQTT broker settings - all persisted, all runtime-changeable via POST /api/mqtt (System ->
-//MQTT tab in the UI), same pattern as mdnsHostname/adminPasswordHash above. mqttEnabled defaults to
-//off - MQTT_ENABLE (the compile-time flag above) only controls whether the feature EXISTS in
-//this firmware at all, not whether it's actively connecting.
+//MQTT broker settings, persisted, changed via POST /api/mqtt. mqttEnabled is off by default -
+//MQTT_ENABLE only decides whether the feature is compiled in.
 bool mqttEnabled = false;
 String mqttBrokerHost = "";
 int mqttBrokerPort = 1883;
@@ -337,11 +284,9 @@ const char* mqttUsernamePath = "/mqttusername.txt";
 const char* mqttPasswordPath = "/mqttpassword.txt";
 #endif
 
-//Per-category "reachable without the password" toggles - only consulted when adminPasswordHash is
-//non-empty. Each gates a specific, named group of state-changing endpoints - see
-//isRequestAllowedWithoutPassword() (ServiceAccessControlFunctions.ino) for exactly which.
-//Firmware/flash endpoints and this access-control configuration itself deliberately have NO
-//toggle - always protected whenever a password is set. Default false for every toggle.
+//Per-category "reachable without password" toggles, only used while a password is set (see
+//isRequestAllowedWithoutPassword()). Firmware/flash endpoints and access control itself have no
+//toggle. All default false.
 bool accessControlTextPublic = false;      //POST /api/text
 bool accessControlSettingsPublic = false;  //POST /api/settings
 bool accessControlUnitsPublic = false;     //POST /api/units?action=offset|reset
@@ -360,12 +305,9 @@ const char* accessControlSystemPublicPath = "/accesscontrol-system.txt";
 String timezoneSetting = "";
 const char* timezonePath = "/timezone.txt";
 
-//Cached result of the last successful timezoned.rop.nl lookup (a POSIX TZ rule string, e.g.
-//"CET-1CEST,M3.5.0,M10.5.0/3"). Applied immediately at boot via timezone.setPosix() when
-//non-empty, so Clock/Date mode's very first pre-WiFi render already shows correct LOCAL time
-//instead of UTC - a POSIX rule encodes its own DST transition dates, so this stays correct across
-//DST changes without a fresh network lookup on every boot. Written back after every successful
-//fresh lookup.
+//POSIX TZ rule from the last successful timezoned.rop.nl lookup (e.g. "CET-1CEST,M3.5.0,M10.5.0/3"),
+//applied at boot via setPosix() so the first pre-WiFi render already shows local time; the rule
+//covers DST itself.
 String cachedTimezonePosix = "";
 const char* timezonePosixCachePath = "/timezone-posix-cache.txt";
 
@@ -394,16 +336,15 @@ String countdownSuffix = "Tage";
 String countupPrefix = "";
 String countupSuffix = "Tage";
 
-//How long to show a message for when a scheduled message is shown for
+//How long a scheduled message stays on screen
 const int scheduledMessageDisplayTimeMillis = 7500;
 
 #if WIFI_STATIC_IP == true
-//Static IP address for your device. Try take care to not conflict with something else on your network otherwise
-//it is likely to not work
-IPAddress wifiDeviceStaticIp(192, 168, 0, 111);
+//Static IP for the device - make sure it doesn't conflict with anything else on the network.
+IPAddress wifiDeviceStaticIp(192, 168, 1, 50);
 
 //Your router details
-IPAddress wifiRouterGateway(192, 168, 0, 1);
+IPAddress wifiRouterGateway(192, 168, 1, 1);
 IPAddress wifiSubnet(255, 255, 0, 0);
 
 //DNS Entry. Default: Google DNS
@@ -411,61 +352,37 @@ IPAddress wifiPrimaryDns(8, 8, 8, 8);
 #endif
 
 //--- Core state - normal running of the system, be careful changing these ---
-//The current version of code to display on the UI. "2.3.0-Scott" was JonnyBooker/split-flap's own
-//version at the point this project's initial commit forked it (2026-08-09) - never actually bumped
-//since. Reconstructed 2026-09-16 by walking every commit since that fork forward through semver
-//rules (feature commit = minor, bugfix commit = patch, breaking/protocol change = major). This is
-//now this project's own independent version line, no longer tracking JonnyBooker's upstream
-//releases (hence dropping the inherited "-Scott" codename).
+//Firmware version shown in the UI (git tags esp-vX.Y.Z) - an own version line since the fork from
+//JonnyBooker's 2.3.0-Scott.
 const char* espVersion = "5.0.1";
 
-//All the letters on the units that we have to be displayed. You can change these if it so pleases at your own risk
+//The letters on the flaps, in drum order - must match the physical drums.
 const char letters[] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '$', '&', '#', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '.', '-', '?', '!'};
 unsigned long previousMillis = 0;
 int unitsAmount = 0; //auto-detected via I2C scan, sequential from 0 - see scanI2CBus()
 
-//Replaces a fixed 30s post-boot wait (found 2026-09-11, present since this project's very first
-//commit) with adaptive polling for actual unit readiness - see the loop() block using this for
-//the full reasoning. showText() is a complete no-op while unitsAmount<=0, so this state machine
-//is what actually gates "how soon after boot can the previously configured mode first render".
+//Adaptive wait for unit readiness after boot (instead of a fixed 30s) - see its block in loop().
+//showText() is a no-op while unitsAmount <= 0, so this gates the first render after boot.
 enum UnitReadinessPhase { UNIT_READINESS_SCAN, UNIT_READINESS_POLLING, UNIT_READINESS_DONE };
 UnitReadinessPhase unitReadinessPhase = UNIT_READINESS_SCAN;
 unsigned long unitReadinessStartedAt = 0; //set in setup(); millisReached() below is overflow-safe
 unsigned long unitReadinessLastPollAt = 0;
 #define UNIT_READINESS_POLL_INTERVAL_MS 200
-//Safety ceiling, identical to the fixed wait this replaces - guarantees the worst case (a unit
-//that never finishes/never responds) is never slower than before, while the common case (units
-//actually ready within a second or two) becomes dramatically faster.
+//Ceiling equal to the old fixed wait, so the worst case is never slower than before.
 #define UNIT_READINESS_MAX_WAIT_MS 30000
 
-//Calling Wire directly from an AsyncWebServer callback crashes the ESP (too little stack for I2C
-//clock-stretch handling) - these just stash the request, loop() does the I2C work and sends the
-//response itself. One in flight at a time; a second request while one's pending gets 503.
-//
-//Generation-tracked, not a bare pointer+bool: ESPAsyncWebServer deletes the request object on
-//client disconnect, even mid-flight, and loop() frees the slot for a new request the moment it
-//starts working on the current one (so a second request isn't needlessly rejected while the
-//first is still being processed). Found 2026-09-09 (CODE_REVIEW.md #4): with a bare pointer+bool,
-//an old request's disconnect firing during that window would unconditionally null out whatever
-//NEWER request has since taken the slot, and flag it as disconnected too - a real, reachable race
-//between two genuinely unrelated requests, not just a single slow one. accept()/take()/
-//stillConnected() below scope every disconnect to the specific request generation it belongs to.
+//Wire calls from an AsyncWebServer callback crash the ESP (too little stack for clock stretching),
+//so handlers only stash the request and loop() does the I2C work and responds. One in flight;
+//another gets 503. loop() frees the slot as soon as it takes a request, and the library deletes a
+//request on disconnect - so each disconnect is scoped to its own request generation
+//(accept()/take()/stillConnected()), never to whichever request holds the slot now.
 struct PendingRequestSlot {
   AsyncWebServerRequest* request = nullptr;
   uint32_t generation = 0;             //bumped every time a new request is accepted into this slot
 
-  //Per-generation disconnect flag, NOT a single "last disconnected generation" field like before
-  //(found 2026-09-09, CODE_REVIEW_V2.md #1, live-reproducible with the extracted struct): a single
-  //shared "disconnectedGeneration" field only remembers the MOST RECENT disconnect - if generation
-  //N disconnects (disconnectedGeneration=N), then a NEWER generation M gets accepted into the
-  //now-freed slot and ALSO disconnects (disconnectedGeneration=M) BEFORE N's own
-  //stillConnected(N) check ever runs, that check would wrongly see "last disconnected was M, not
-  //N" and report N as still connected - a stale, already-deleted request pointer then gets used.
-  //Each accept() now creates its own dedicated flag instead, captured by that generation's own
-  //onDisconnect closure AND handed out by take() to the caller - kept alive via shared_ptr
-  //reference counting independent of whatever the slot itself does afterward (a newer accept()
-  //replaces the slot's own copy in disconnectedFlag below, but a caller who already took() an
-  //older generation is holding its own reference to the OLD flag, unaffected by that).
+  //Each accept() gets its own disconnect flag (shared_ptr, held by the onDisconnect closure and by
+  //take()'s caller). A single "last disconnected generation" field let a newer request's disconnect
+  //hide an older one's, and a deleted request got used.
   std::shared_ptr<std::atomic<bool>> disconnectedFlag;
 
   //Call from the HTTP request handler when accepting a new request into this (assumed-empty) slot.
@@ -483,10 +400,8 @@ struct PendingRequestSlot {
     });
   }
 
-  //Call from loop() when starting to process this slot - returns the request to use and frees the
-  //slot immediately so a new request can be accepted while this one's work is still in progress.
-  //flagOut is this specific request's own disconnect flag, for the stillConnected() check below -
-  //hold onto it (it's a shared_ptr, safe to keep past this call) until that check is done.
+  //From loop(): returns the request and frees the slot right away. Keep flagOut (shared_ptr) for
+  //the stillConnected() check.
   AsyncWebServerRequest* take(std::shared_ptr<std::atomic<bool>> &flagOut) {
     AsyncWebServerRequest* result = request;
     flagOut = disconnectedFlag;
@@ -494,10 +409,8 @@ struct PendingRequestSlot {
     return result;
   }
 
-  //Call from loop() right before using the request returned by take() (e.g. ->send()) - false
-  //means that specific request's connection is gone and the pointer is no longer safe to touch.
-  //Pass the exact flag take() gave you for this same request, not the slot's current one (which
-  //may since belong to a different, newer generation).
+  //Right before using the request: false means its connection is gone. Pass the flag take() gave
+  //you, not the slot's current one.
   static bool stillConnected(const std::shared_ptr<std::atomic<bool>> &flag) {
     return flag && !flag->load();
   }
@@ -508,39 +421,27 @@ PendingRequestSlot pendingUnitsInfoSlot;
 PendingRequestSlot pendingLegacyI2CScanSlot;
 bool pendingUnitsInfoRequestDetail = false; //captured from the "detail" query param at request time
 
-//writeOffsetToUnit() used to be called directly from the /api/units?action=offset handler - the
-//only I2C write anywhere in this file NOT deferred to loop() like every other one. Same
-//deferred-request pattern as pendingRescanSlot above.
+//Offset writes are deferred to loop() like every other I2C access.
 PendingRequestSlot pendingUnitOffsetSlot;
 int pendingUnitOffsetUnitId = -1;
 uint16_t pendingUnitOffsetValue = 0;
 
-//timezone.setLocation() does a synchronous network lookup against ezTime's timezoned service -
-//was called directly from the /api/timezone POST handler, blocking that AsyncWebServer callback
-//on network I/O. Same deferred-request pattern as pendingRescanSlot/pendingUnitOffsetSlot above.
+//Timezone changes are deferred to loop() too (no network I/O in the callback).
 PendingRequestSlot pendingTimezoneSlot;
 String pendingTimezoneValue = "";
-//The actual lookup (checkTimezoneLookup(), ServiceAsyncTimeSyncFunctions.ino) spans MULTIPLE
-//loop() ticks instead of completing within the one tick that takes the request out of
-//pendingTimezoneSlot - these hold the deferred request across that whole span.
+//The lookup (checkTimezoneLookup()) spans several loop() ticks; these hold the request meanwhile.
 AsyncWebServerRequest* timezoneLookupDeferredRequest = nullptr;
 std::shared_ptr<std::atomic<bool>> timezoneLookupDeferredFlag;
-//Snapshot of pendingTimezoneValue taken at kickoff time, NOT re-read from that shared global at
-//finish time - a second request accepted into the slot while the first's async lookup is still
-//running would otherwise overwrite it before the first one's result gets persisted.
+//Snapshot of pendingTimezoneValue at kickoff, so a second request can't overwrite it mid-lookup.
 String timezoneLookupDeferredValue = "";
-//Declared here (not in ServiceAsyncTimeSyncFunctions.ino, where they're actually driven from) -
-//ESPMaster.ino is concatenated before that file, and loop() above references them directly;
-//global variables aren't auto-forward-declared across .ino files.
+//Declared here, not in ServiceAsyncTimeSyncFunctions.ino: loop() uses them, and globals aren't
+//forward-declared across .ino files.
 bool tzLookupDone = false;
 bool tzLookupResult = false;
 
-//Retry tracking for the ONE-SHOT boot-time timezone lookup (started once in setup(), entirely
-//fire-and-forget) - a transient DNS/network failure during that single attempt would otherwise
-//permanently leave the active timezone RULE unresolved until an explicit POST /api/timezone or a
-//luckier boot, since the periodic NTP resync only refreshes the CLOCK, never the zone RULE.
-//bootTimezoneLookupPending tracks "a boot/retry attempt is currently in flight" so the retry logic
-//reacts to each completion exactly once.
+//Retry for the one-shot timezone lookup at boot - a transient failure would otherwise leave the
+//zone rule unresolved (the periodic NTP sync only refreshes the clock). bootTimezoneLookupPending
+//makes the retry logic react to each completion once.
 bool bootTimezoneRuleResolved = false;
 bool bootTimezoneLookupPending = false;
 unsigned long nextBootTimezoneRetryAt = 0; //0 = no retry currently scheduled
@@ -552,27 +453,19 @@ int pendingFirmwarePushUnitIndex = -1;
 PendingRequestSlot pendingBootloaderProbeSlot;
 int pendingBootloaderProbeUnitIndex = -1;
 
-//Shared by ServiceExtensionFunctions.ino's health check/display push AND
-//ServiceDisplayJobFunctions.ino's pollDisplayJobWaitAllExtensionsReady() - declared here, not in
-//either of those files, since Arduino concatenates .ino files alphabetically and
-//ServiceDisplayJobFunctions.ino comes before ServiceExtensionFunctions.ino (same reasoning as
-//pendingTimezoneSlot's own comment above for why a shared value used by an earlier file can't be
-//#define'd in a later one).
+//Used by ServiceDisplayJobFunctions.ino and ServiceExtensionFunctions.ino - declared here because
+//.ino files are concatenated alphabetically (the display-job file comes first).
 #define EXTENSION_HEALTH_CHECK_INTERVAL_MS (15UL * 1000UL)
 #define EXTENSION_HTTP_TIMEOUT_MS 1500
 
-//POST /api/extension-display only validates and queues the segment; tickExtensionDisplay()
-//(ServiceExtensionFunctions.ino) writes it from loop() - I2C writes don't belong in an
-//AsyncWebServer callback (CODE_REVIEW_V6.md #1). The handler acknowledges right away instead of
-//holding the request until the animation is done - a staggered animation can easily outlast the
-//primary's EXTENSION_HTTP_TIMEOUT_MS, and a timed-out push counts as failed (CODE_REVIEW_V6.md #4),
-//so the primary would re-render the same text over and over. The primary's readiness poll
-//(GET /api/units) still sees the real state via displayBusy/displayWriteFailed.
-//A newer push replaces a still-queued older one - only the latest content matters.
+//POST /api/extension-display only validates and queues; tickExtensionDisplay() writes from loop()
+//(no I2C in callbacks). The handler answers at once - a staggered animation can outlast the
+//primary's EXTENSION_HTTP_TIMEOUT_MS, which would count as failed and loop the re-render. The
+//primary sees the real state via GET /api/units (displayBusy/displayWriteFailed). A newer push
+//replaces a queued older one.
 volatile bool pendingExtensionDisplayQueued = false;
-//Set by POST /api/device-role when the role actually changed - loop() then cancels both display
-//controllers (cancelDisplayControllers()) before either runs again (CODE_REVIEW_V8.md #6). Not
-//done in the handler itself: it can run while loop() is yielding in the middle of a display job.
+//Set by POST /api/device-role on a real change; loop() then cancels both display controllers
+//(the handler may run while loop() yields mid-job).
 volatile bool pendingDisplayControllersCancel = false;
 String pendingExtensionDisplaySegment;
 String pendingExtensionDisplayAnimationMode;
@@ -613,21 +506,16 @@ const char* DEVICE_MODE_COUNTDOWN = "countdown";
 const char* DEVICE_MODE_COUNTUP = "countup";
 const char* DEVICE_MODE_ROTATION = "rotation";
 
-//Multi-device roles ("Primärgerät"/"Erweiterungsgerät", see multiple-units.md - Master/Slave
-//terminology deliberately avoided). standalone (default) is exactly today's behavior, unaffected
-//by anything below. primary owns the display logic and stretches it across its own units plus any
-//configured, reachable extensionDevices[]. extension does no display-logic of its own - its units
-//are driven entirely by POST /api/extension-display pushes from its configured primary, but it
-//keeps its own full web UI/API usable throughout.
+//Multi-device roles ("Primärgerät"/"Erweiterungsgerät", no Master/Slave): standalone (default);
+//primary drives its own units plus reachable extensionDevices[]; extension has no display logic of
+//its own, its units follow POST /api/extension-display pushes - its web UI/API stay usable.
 const char* DEVICE_ROLE_STANDALONE = "standalone";
 const char* DEVICE_ROLE_PRIMARY = "primary";
 const char* DEVICE_ROLE_EXTENSION = "extension";
 
-//How a primary uses ALL its configured extensionDevices[] (one setting for the whole group -
-//mixing both kinds in one group is deliberately not supported yet). extend (default) appends each
-//extension's units after the primary's own, widening the display. mirror sends every extension
-//the primary's own characters instead (same text, same animation timing) - cut off or padded with
-//blanks if its unit count differs - and leaves the primary's display width unchanged.
+//How a primary uses all its extensions: extend (default) appends their units after its own;
+//mirror sends each extension the primary's own characters (cut/padded to its width) and keeps the
+//primary's width.
 const char* EXTENSION_LINK_MODE_EXTEND = "extend";
 const char* EXTENSION_LINK_MODE_MIRROR = "mirror";
 
@@ -636,9 +524,8 @@ const char* ALIGNMENT_MODE_LEFT = "left";
 const char* ALIGNMENT_MODE_CENTER = "center";
 const char* ALIGNMENT_MODE_RIGHT = "right";
 
-//Animation options - see computeUnitAnimationDelayMs() (ServiceDisplayJobFunctions.ino) for what
-//each one actually does. Defined here, not in that file, despite being used there too - a #define
-//used by code in THIS file must be declared before that point in Arduino's concatenated build.
+//Animation options (see computeUnitAnimationDelayMs()). Defined here because this file uses them
+//too and must see them first.
 #define ANIMATION_MODE_SIMULTANEOUS   "simultaneous"
 #define ANIMATION_MODE_LEFT_TO_RIGHT  "left-to-right"
 #define ANIMATION_MODE_RIGHT_TO_LEFT  "right-to-left"
@@ -649,13 +536,10 @@ const char* ANIMATION_MODES[] = {
   ANIMATION_MODE_OUTSIDE_IN, ANIMATION_MODE_INSIDE_OUT
 };
 #define ANIMATION_MODES_COUNT 5
-#define ANIMATION_STAGGER_MS_MAX 1000 //see the plan's own reasoning - 10 units * 1000ms is already
-                                       //a ~9s spread for the last unit; more than that stops being
-                                       //a display effect and starts being just slow.
+#define ANIMATION_STAGGER_MS_MAX 1000 //10 units * 1000ms is already a ~9s spread
 
-//Shared by POST /api/settings' own validation and replaceRotationItemsFromJson()'s per-item
-//validation - one place for the "which values are valid" list. Functions (unlike #defines/
-//globals) are auto-prototyped regardless of file order, so this is safe to call from any file.
+//Shared validation for POST /api/settings and rotation items. Functions are auto-prototyped, so
+//this works from any file.
 bool isValidAnimationMode(const String &value) {
   for (int modeIndex = 0; modeIndex < ANIMATION_MODES_COUNT; modeIndex++) {
     if (value == ANIMATION_MODES[modeIndex]) {
@@ -673,19 +557,13 @@ const char* animationStaggerMsPath = "/animationstagger.txt";
 const char* deviceModePath = "/devicemode.txt";
 const char* deviceRolePath = "/devicerole.txt";
 const char* extensionLinkModePath = "/extensionlinkmode.txt";
-//Own file, like rotationItemsPath/scheduledMessagesPath - a short JSON array of hostnames, not a
-//scalar, so it doesn't belong in the boot-snapshot blob (see that constant's own comment).
+//Own file (a JSON array of hosts), not part of the boot snapshot.
 const char* extensionDevicesPath = "/extensiondevices.json";
-//Combined boot-time settings cache - this device's flash chip was live-measured taking ~800ms per
-//LittleFS file open regardless of file size, and loadValuesFromFileSystem() used to make ~30 of
-//those on every boot. This file mirrors those ~30 scalar settings into one JSON blob, cutting
-//boot-time loading down to ONE file open in the common case. The individual files remain the
-//actual source of truth, untouched by every existing write path - this is a derived, read-side
-//cache only.
+//Boot snapshot: this flash chip takes ~800ms per file open, and loading used ~30 files. This file
+//mirrors those scalar settings in one JSON blob, so boot needs one open. The individual files stay
+//the source of truth; this is a derived cache.
 const char* bootSnapshotPath = "/boot-snapshot.json";
-//Set once right after boot and kept current by checkBootSnapshotFreshness() (ticked periodically
-//from loop()) - see computeSettingsSignature()'s own comment for why a signature comparison, not
-//a dedicated per-setting dirty flag.
+//Kept current by checkBootSnapshotFreshness() from loop() (signature compare, no dirty flags).
 String lastSavedSettingsSignature = "";
 #define BOOT_SNAPSHOT_CHECK_INTERVAL_MS 30000 //throttles the flash-wear-conscious periodic re-check
 const char* countdownPath = "/countdown.txt";
@@ -706,16 +584,14 @@ const char* countupSuffixPath = "/countupsuffix.txt";
 //Variables for storing things for checking and use in normal running
 String alignment = "";
 String flapSpeed = "";
-String animationMode = ANIMATION_MODE_SIMULTANEOUS; //default - see the user's own confirmation
+String animationMode = ANIMATION_MODE_SIMULTANEOUS; //default: all units animate at once
 unsigned long animationStaggerMs = 150; //ms between consecutive units' start, see ANIMATION_MODES
 String inputText = "";
 String deviceMode = "";
-String deviceRole = "standalone"; //standalone|primary|extension - see DEVICE_ROLE_* constants' own comment
-String extensionLinkMode = "extend"; //extend|mirror - see EXTENSION_LINK_MODE_* constants' own comment
-//A fixed, small array like rotationItems - no per-entry heap allocation, no LinkedList
-//operator[] risk. ExtensionDevice itself is declared in Classes.h, not here - see that header's
-//own comment on TwibootChipInfo for why a struct used as a function parameter type must be
-//visible before Arduino's auto-generated prototype block.
+String deviceRole = "standalone"; //standalone|primary|extension
+String extensionLinkMode = "extend"; //extend|mirror
+//Fixed small array like rotationItems (no per-entry heap, no LinkedList operator[]). The struct is
+//in Classes.h (function parameter type, see TwibootChipInfo there).
 #define EXTENSION_DEVICES_MAX 4
 ExtensionDevice extensionDevices[EXTENSION_DEVICES_MAX];
 int extensionDeviceCount = 0;
@@ -723,16 +599,12 @@ String countdownToDateUnix = "";
 String countupSinceDateUnix = "";
 String lastWrittenText = "";
 String lastReceivedMessageDateTime = "";
-//Together with lastWrittenText and displayRenderGeneration below, what showText() compares a new
-//request against to decide whether a redraw is actually needed. Stores whichever alignment
-//(override or global) was ACTUALLY used for the last completed render, so two Rotation entries
-//with identical text but different per-item alignment still trigger a redraw.
+//With lastWrittenText and displayRenderGeneration: what showText() compares a request against. The
+//alignment actually used, so rotation items with equal text but different alignment still redraw.
 String lastWrittenAlignment = "";
-//Bumped whenever something could make the PHYSICAL display state diverge from what
-//lastWrittenText/lastWrittenAlignment claim, without the requested text/alignment itself
-//necessarily changing - the global alignment setting changing, a rescan (a unit may have
-//restarted and lost its displayed letter), or a calibration offset change. showText() redraws
-//whenever this doesn't match lastRenderedGeneration, even if text/alignment are both unchanged.
+//Bumped whenever the physical display may diverge from lastWrittenText/lastWrittenAlignment
+//without the request changing (global alignment change, rescan, calibration offset change, ...).
+//showText() redraws whenever it differs from lastRenderedGeneration.
 unsigned long displayRenderGeneration = 0;
 unsigned long lastRenderedGeneration = 0;
 bool isPendingReboot = false;
@@ -741,40 +613,27 @@ bool isPendingUnitsReset = false;
 //Hours must not blank it (see initWiFi(), ServiceWifiFunctions.ino).
 bool wifiSetupPortalOpen = false;
 bool isWifiConfigured = false;
-//Background offline-recovery retry (loop()'s `if (!isWifiConfigured)` block) - see that block's
-//own comment (Code_REVIEW_V5.md #02) for why this exists at all.
+//Background offline-recovery retry - see loop()'s `if (!isWifiConfigured)` block.
 unsigned long lastOfflineReconnectAttempt = 0;
 #define OFFLINE_RECONNECT_RETRY_MS (5UL * 60UL * 1000UL) //5 minutes
-//Makes the WiFiManager/AUTH_EXPIRE disconnect question observable over HTTP - see
-//ServiceWifiFunctions.ino's own comment (Punkt 210-adjacent, 2026-09-13) for the full reasoning.
-//Declared here (not in that file) so /api/diag?type=heap (ESPMaster.ino, concatenated before
-//ServiceWifiFunctions.ino by Arduino's alphabetical build order) can see them.
+//WiFi disconnect statistics for GET /api/diag - declared here because this file is concatenated
+//before ServiceWifiFunctions.ino.
 unsigned long wifiDisconnectCount = 0;
 String lastWifiDisconnectReason = "";
 unsigned long lastWifiDisconnectAt = 0;
-//TEMPORARY DIAGNOSTIC (2026-10-11) - only to test whether WiFi trouble correlates with low heap.
-//Lowest free heap / largest free block seen since boot (sampled once per loop() pass, so short
-//dips inside a single callback can be missed) and the free heap at the moment of the last WiFi
-//disconnect. Shown by GET /api/diag?type=heap. Safe to remove again once that question is settled
-//(these four globals, their two update sites in loop()/ServiceWifiFunctions.ino, the diag fields).
-uint32_t diagMinFreeHeap = UINT32_MAX;
-uint32_t diagMinFreeHeapAtSec = 0;
-uint32_t diagMinMaxBlock = UINT32_MAX;
-uint32_t diagFreeHeapAtLastWifiDisconnect = 0;
-//Optional DS3231 RTC (ServiceRtcFunctions.ino) - declared here, not in that file, since
-//setup()/GET /api/diag below (both in this earlier-concatenated main sketch file) need them; see
-//probeRtc()'s own comment for the full reasoning.
+//Optional DS3231 RTC (ServiceRtcFunctions.ino) - declared here since setup() and GET /api/diag in
+//this file need them.
 bool rtcPresent = false;
 bool rtcOscillatorStopFlag = false;
 bool showDebugPage = false; //defaults off - the startup debug page can render blank on fresh boots
 volatile bool webRequestActive = false; //skip display updates while a web request is in flight
 LList<ScheduledMessage> scheduledMessages;
 //False while an out-of-memory read left scheduledMessages incomplete - saving that partial list
-//would overwrite every entry never read (CODE_REVIEW_V8.md #1). writeScheduledMessagesToFile()
+//would overwrite every entry never read. writeScheduledMessagesToFile()
 //refuses while it's false; ensureScheduledMessagesComplete() retries the load first.
 bool scheduledMessagesComplete = true;
 //Bumped on every change to scheduledMessages / rotationItems - a chunked GET response aborts if
-//its list changes between two chunks instead of mixing old and new entries (CODE_REVIEW_V8.md #4).
+//its list changes between two chunks instead of mixing old and new entries.
 uint32_t scheduledMessagesGeneration = 0;
 uint32_t rotationItemsGeneration = 0;
 //Same as scheduledMessagesComplete, for the rotation list: an incomplete one isn't served by
@@ -786,22 +645,14 @@ bool rotationItemsComplete = true;
 RotationItem rotationItems[ROTATION_ITEMS_MAX];
 int rotationItemCount = 0;
 
-//Found via Code_REVIEW_V5.md #11: scheduledMessages (an LList<ScheduledMessage>, ServiceScheduledMessageFunctions.ino)
-//had no size cap at all, unlike rotationItems above - each entry's own message text is already
-//capped (same 500-byte limit as /api/text), but the COUNT of entries was unbounded, and
-//writeScheduledMessagesToFile() builds one JsonDocument plus one full serialized String for the
-//WHOLE list on every add/remove - real, unbounded heap pressure on this already heap-constrained
-//device, reachable through normal, authenticated API use (or unauthenticated too, if
-//accessControlSettingsPublic is toggled on). Same order of magnitude as ROTATION_ITEMS_MAX above -
-//generous for the device's actual use case (a handful of upcoming scheduled messages), while
-//keeping the worst-case JSON blob a small, bounded size.
+//Cap on scheduled messages, like ROTATION_ITEMS_MAX: each text is capped at 500 bytes, but the
+//count wasn't - unbounded heap pressure through normal API use. Generous for a handful of upcoming
+//messages.
 #define SCHEDULED_MESSAGES_MAX 20
-//Total characters of all scheduled message texts (and, separately, of all rotation item texts)
-//kept in RAM. Every stored text stays on the heap permanently - a hardware test with 16-20
-//messages of 440 characters (~7-9 KB) left only ~9-11 KB free: the device hung while saving the
-//17th and an OTA update failed at the connection gate (BUILD_INFO Punkt 233). 4000 characters keep
-//~16 KB free after boot. New/changed entries that would exceed it are rejected; a list already on
-//flash that's bigger (saved by an older firmware) is still loaded in full.
+//Total characters of all scheduled message texts (and separately of all rotation texts) kept in
+//RAM. 16-20 messages of 440 characters left only ~9-11 KB free (a hang while saving, a failed OTA);
+//4000 keeps ~16 KB free after boot. Entries that would exceed it are rejected; a bigger list
+//already on flash still loads in full.
 #define STORED_TEXT_BUDGET 4000
 //Results of addAndPersistScheduledMessage()/removeScheduledMessage()
 //(ServiceScheduledMessageFunctions.ino) - declared here since this file is compiled first.
@@ -817,30 +668,17 @@ int rotationItemCount = 0;
 #define JSON_ARRAY_FILE_INVALID 2
 #define JSON_ARRAY_FILE_NO_MEMORY 3
 int rotationCurrentIndex = 0;
-//Counts seconds the CURRENT rotation item was actually accepted by showText() (loop()'s
-//mode-dispatch block increments this after a successful call), not wall-clock seconds since its
-//turn started - found 2026-09-09, CODE_REVIEW_V2.md #13: a pure wall-clock timer kept
-//advancing/wrapping the index every item's durationSeconds regardless of whether the display was
-//even free to actually show it (a busy multi-line job or a temporary /api/text push both silently
-//swallow showText() calls made while they're running), so a slow-to-render or often-blocked item
-//could get skipped almost entirely while later items absorbed all the real visible time. Reset to
-//0 whenever the current item changes (checkRotation() below) or rotation restarts.
+//Seconds the current rotation item was actually accepted by showText(), not wall-clock seconds -
+//a busy display swallows showText() calls, and a wall-clock timer skipped slow or blocked items.
+//Reset when the item changes or rotation restarts.
 unsigned long rotationItemAcceptedSeconds = 0;
-//Counts EVERY tick the current item has been current, regardless of whether showText() actually
-//accepted it - unlike rotationItemAcceptedSeconds above, which only counts genuinely
-//accepted/settled ticks. Used purely as a "how long has this item been stuck" defense in
-//checkRotation() (CODE_REVIEW_V3.md #13) - a permanently-unrenderable item (too many lines,
-//whether a pre-existing text item saved before the upfront validation in
-//replaceRotationItemsFromJson() existed, or a dynamic clock/date/countdown/countup item whose
-//content unpredictably grows too long) would otherwise leave rotationItemAcceptedSeconds stuck
-//below durationSeconds forever, permanently blocking every item behind it too. Reset alongside
-//rotationItemAcceptedSeconds, at every one of its own reset points.
+//Every tick the current item has been current, accepted or not - only used to detect a stuck item
+//(too many lines, or dynamic content grown too long) that would otherwise block the rotation
+//forever. Reset with rotationItemAcceptedSeconds.
 unsigned long rotationItemElapsedRealSeconds = 0;
 //rotationItemStarted: a render of the current item was accepted since it became current (or since
-//a temporary message displaced it). rotationItemSettled: that render has finished - from then on
-//every second counts toward the item's duration, even while a clock/date item refreshes its own
-//changing content (CODE_REVIEW_V8.md #3: with HH:mm:ss every tick started a new job, so no second
-//ever counted and the item only advanced via the stuck-item grace). Reset with
+//a temporary message displaced it). rotationItemSettled: that render finished - from then on every
+//second counts, even while a clock/date item keeps refreshing. Reset with
 //rotationItemAcceptedSeconds.
 bool rotationItemStarted = false;
 bool rotationItemSettled = false;
@@ -853,10 +691,9 @@ String rotationCurrentAnimationMode = "";
 int rotationCurrentAnimationStaggerMs = -1;
 Timezone timezone;
 
-//Neither timezone.now() nor timezone.tzTime(TIME_NOW, UTC_TIME) actually return UTC despite the
-//name - both return local time. Reversing the offset by hand is the only way to get real UTC
-//seconds, needed wherever this compares against a client-supplied Unix timestamp (scheduled
-//messages, countdown/countup, rotation items).
+//timezone.now() and timezone.tzTime(TIME_NOW, UTC_TIME) both return LOCAL time despite the name -
+//real UTC needs the offset reversed by hand. Needed wherever client Unix timestamps are compared
+//(scheduled messages, countdown/countup, rotation).
 long getRealUtcNow() {
   return timezone.now() + (long)timezone.getOffset() * 60;
 }
@@ -899,13 +736,9 @@ bool firmwareUpdateAuthFailed = false;
 //AsyncWebServer callback (too little stack there).
 #define OTA_CHUNK_SIZE 4096 //must match CHUNK_SIZE in index.html's uploadFirmware()
 uint8_t* otaChunkBuffer = nullptr; //allocated only while an upload is in progress
-//Which request currently "owns" otaChunkBuffer/otaChunkLen while its body is still streaming in.
-//Two requests' bodies can stream in concurrently on this single-threaded event loop (AsyncTCP
-//services connections in whatever order packets arrive), so a simple otaPendingPhase!=NONE check
-//alone can't catch a second upload starting mid-transfer of a first. Claimed by whichever
-//request's body arrives at index==0 first, checked by every later request's own index==0, and
-//released once its owning request's outer handler runs (body fully received) or by the
-//abandoned-upload watchdog if the connection vanishes before that.
+//Request that owns otaChunkBuffer/otaChunkLen while its body streams in - bodies of two requests
+//can interleave on the event loop. Claimed at index==0, released by its outer handler or by the
+//abandoned-upload watchdog.
 AsyncWebServerRequest* otaChunkOwner = nullptr;
 volatile size_t otaChunkLen = 0;
 enum OtaPhase { OTA_PHASE_NONE, OTA_PHASE_BEGIN, OTA_PHASE_WRITE, OTA_PHASE_FINISH };
@@ -915,12 +748,9 @@ volatile uint32_t otaBeginSize = 0;
 //Bytes actually handed to Update.write() so far, tracked ourselves rather than trusting
 //Update.progress() at finish time (see the finish-phase comparison below for why).
 volatile size_t otaBytesWritten = 0;
-//A single shared "reject this chunk" flag would let a losing concurrent request's body poison a
-//legitimate owner's result (each side's outer handler could clear/set it on the other's behalf).
-//Fixed by never letting a losing request's body touch shared state at all (see the per-fragment
-//"otaChunkOwner != request" check below) and having the outer handler derive its response purely
-//from "was I still the owner when my body finished" (a request-pointer comparison) plus
-//statelessly re-checked facts (password, request->contentLength()).
+//No shared "reject this chunk" flag: a losing concurrent request's body never touches shared
+//state, and the outer handler derives its answer from "was I still the owner" plus re-checked facts
+//(password, contentLength()).
 volatile bool otaResultReady = false;
 volatile bool otaResultSuccess = false;
 String otaResultMessage = "";
@@ -931,9 +761,8 @@ volatile unsigned long otaLastActivityAt = 0; //watchdog for an abandoned upload
 PendingRequestSlot pendingFirmwareUploadSlot; //reused in turn by all three /api/firmware-* steps
 #endif
 
-//Whether a browser firmware upload is in progress - the multi-device health check/push must not
-//contend with it (see their own comments). Always false when web OTA is compiled out
-//(CODE_REVIEW_V7.md #6: those callers used to reference the OTA globals unconditionally).
+//A browser firmware upload is running - the multi-device health check/push stay out of its way.
+//Always false when web OTA is compiled out.
 bool webFirmwareUpdateInProgress() {
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
   return otaChunkBuffer != nullptr || otaPendingPhase != OTA_PHASE_NONE;
@@ -942,28 +771,14 @@ bool webFirmwareUpdateInProgress() {
 #endif
 }
 #if UNIT_BOOTLOADER_ENABLE == true
-//Set when the upload couldn't be written/moved into place (open() or write() failure, or the
-//final rename() failing) - see the temp-file+atomic-rename pattern on that handler. Safe to keep
-//global/shared: only ever SET inside the "am I the current owner" gated section of the body
-//handler, and only ever READ/cleared by the outer handler after confirming (via wasOwner) that
-//THIS request still is that same owner - reset to false the moment a new request claims ownership,
-//so a vanished previous owner's leftover true can never leak into the next one's result.
+//Upload couldn't be written or renamed into place. Only set by the current owner and only read by
+//that owner's outer handler; reset when a new request claims ownership.
 bool unitFirmwareUploadWriteFailed = false;
-//Which request currently "owns" the shared static unitFirmwareFile/temp-file state while its body
-//is still streaming in. Two AUTHENTICATED uploads (accidental double-submit, or two admin
-//sessions) could otherwise share the same static File/temp-path with no per-request isolation, so
-//their fragments interleave (A writes "AA", B starts and closes/replaces A's temp file, A's later
-//"aa" fragment writes through B's now-reassigned handle). Claimed by whichever request's body
-//arrives at index==0 first, checked by every later request's own index==0 (in addition to the
-//password check), and released once its owning request's outer handler runs (body fully received)
-//or immediately via onDisconnect if the connection vanishes before that.
-//
-//A single shared unitFirmwareUploadAuthFailed/BusyFailed flag would let any request's rejection
-//(bad password, busy) poison the result a different, legitimate owner's outer handler then reads.
-//Fixed by never touching shared state for a request that fails before claiming ownership, and by
-//deriving the outer handler's response from stateless facts (password, re-checked directly) or
-//request-scoped ones (wasOwner, a pointer comparison) instead of a flag any other request could
-//also write to.
+//Request that owns the shared unitFirmwareFile/temp-file state while its body streams in - two
+//authenticated uploads would otherwise interleave their fragments into one file. Claimed at
+//index==0 (after the password check), released by its outer handler or onDisconnect. A request
+//rejected before claiming never touches shared state; the outer handler's answer comes from
+//re-checked facts or wasOwner, not from a flag another request could write.
 AsyncWebServerRequest* unitFirmwareUploadOwner = nullptr;
 #endif
 //Same reasoning/lifetime as unitFirmwareUploadWriteFailed above.
@@ -1005,13 +820,9 @@ void setup() {
 
 #if SERIAL_ENABLE == true
   Serial.begin(SERIAL_BAUDRATE);
-#elif !defined(FAE_MOD)
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN); //ESP01 only
 #endif
 
-#ifdef FAE_MOD
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-#endif
 
   Wire.setClock(400000); //400kHz - units run at 16MHz with 4.7k pull-ups, comfortably support this
 
@@ -1024,11 +835,9 @@ void setup() {
   //Proactive bus recovery, not just reactive after a failed read - cheap, no-op if already idle.
   recoverI2CBus();
 
-  //Optional DS3231 RTC (see ServiceRtcFunctions.ino) - probed and, if present and trustworthy,
-  //used to seed the clock RIGHT HERE, before initWiFi() and unconditional on its outcome, so the
-  //clock is correct-ish independent of WiFi/NTP. Reuses ntpSyncApplyResult()'s offset math as-is.
-  //The timezone RULE isn't resolved from the network yet - same brief "shows UTC until the async
-  //timezone lookup catches up" window the NTP path already has (see startTimezoneLookup() below).
+  //Optional DS3231: seeds the clock here, before initWiFi() and regardless of its outcome
+  //(ntpSyncApplyResult()'s offset math). Shows UTC until the timezone rule is known, like the NTP
+  //path.
   probeRtc();
   if (rtcPresent) {
     time_t rtcUtc;
@@ -1044,14 +853,11 @@ void setup() {
   ledOff();
 #endif
 
-  //Anchors the safety ceiling for the unit-readiness wait below - captured here, at the earliest
-  //practical point, so the 30s ceiling is measured from boot rather than from when the SCAN phase
-  //happens to finish.
+  //Anchors the 30s readiness ceiling at boot, not at the end of the scan.
   unitReadinessStartedAt = millis();
 
-  //The I2C scan/unit-readiness wait (unitReadinessPhase) is driven synchronously further down in
-  //THIS function, right before initWiFi() - loop() cannot run until setup() returns, so deferring
-  //it to loop() would still sit behind initWiFi()'s own blocking autoConnect() call regardless.
+  //The scan/readiness wait runs synchronously further down, before initWiFi() - loop() can't run
+  //before setup() returns, and initWiFi()'s autoConnect() blocks.
   SerialPrintln(F(""));
   SerialPrintln(F("#######################################################"));
   SerialPrintln(F("..............Split Flap Display Starting.............."));
@@ -1059,28 +865,20 @@ void setup() {
   debugStatus = "Starting";
   SerialPrintln(F("DEBUG: Status = ") + debugStatus);
 
-  //Config load + crash-log persistence, unconditional and as early as possible, before initWiFi()
-  //even runs - neither function has a WiFi dependency, and loadValuesFromFileSystem() is what
-  //knows the previously configured deviceMode/inputText/rotationItems/alignment/etc., so the
-  //previously configured mode can render (once units report ready, see unitReadinessPhase below)
-  //as fast as possible regardless of WiFi outcome.
+  //Config load and crash-log persistence first (no WiFi dependency), so the configured mode can
+  //render as soon as units are ready, regardless of WiFi.
   debugStatus = "File System Init";
   SerialPrintln(F("DEBUG: Status = ") + debugStatus);
   initialiseFileSystem();
   loadValuesFromFileSystem();
   checkAndPersistCrashLog(); // see ServiceCrashLogFunctions.ino - must run after LittleFS mounts
 
-  //Show the previously configured mode BEFORE WiFi: loop() (where the display update state
-  //machine runs) cannot start until setup() returns, so nothing could ever render before
-  //initWiFi()'s blocking autoConnect() call finished, however non-blocking the code after it is.
-  //Deliberately not touching WiFiManager's own connect logic (a prior custom reconnect rewrite
-  //made things worse and had to be reverted) - instead gets the unit-readiness wait and one real
-  //display update to happen BEFORE initWiFi()'s blocking call, spun synchronously here since
-  //nothing else in setup() is waiting on this yet. Safety ceiling below matches
-  //UNIT_READINESS_MAX_WAIT_MS's own reasoning.
-  //Apply the cached POSIX rule (if any) from the LAST successful timezoned.rop.nl lookup, before
-  //rendering anything below - see cachedTimezonePosix's own comment. Skipped if empty (fresh
-  //device); Clock/Date mode then falls back to showing UTC until the real network lookup resolves.
+  //Show the configured mode BEFORE WiFi: loop() can't run until setup() returns, and initWiFi()'s
+  //autoConnect() blocks. WiFiManager's connect logic stays untouched (a custom rewrite made things
+  //worse), so the readiness wait and one display update are spun synchronously here, with the
+  //ceiling from UNIT_READINESS_MAX_WAIT_MS.
+  //Apply the cached POSIX rule first (see cachedTimezonePosix); without one, Clock/Date show UTC
+  //until the network lookup resolves.
   if (cachedTimezonePosix != "") {
     timezone.setPosix(cachedTimezonePosix);
     SerialPrintln(F("DEBUG: Applied cached timezone POSIX rule (pre-WiFi): ") + cachedTimezonePosix);
@@ -1117,14 +915,11 @@ void setup() {
     debugStatus = "NTP Sync Starting";
     SerialPrintln(F("DEBUG: Status = ") + debugStatus);
 
-    //ezTime's own auto-sync (events()-driven updateNTP()) is fully disabled - setInterval(0)
-    //makes events() a permanent no-op. Our own ServiceAsyncTimeSyncFunctions.ino (checkNtpSync())
-    //takes over that job instead, ticked from loop() - a genuinely non-blocking replacement (the
-    //original blocking DNS+UDP calls could crash the device under network stress).
+    //ezTime's own sync is off (setInterval(0)); checkNtpSync() in loop() replaces it without
+    //blocking.
     setInterval(0);
 
-    //Not setDebug(INFO) - ezTime's own internal logging fires extremely often around WiFi
-    //hiccups, wasting loop()/UART time. Our own SerialPrintln() logging is unaffected.
+    //No setDebug(INFO): ezTime logs very often around WiFi hiccups.
     setDebug(NONE);
 
     // Try to sync with timeout (non-blocking)
@@ -1133,9 +928,7 @@ void setup() {
 
     SerialPrintln(F("DEBUG: Starting NTP sync (non-blocking, 30s timeout)"));
 
-    // Wait for sync with timeout and yield - startNtpSync()/checkNtpSync() (see
-    // ServiceAsyncTimeSyncFunctions.ino) never block internally, so this loop's own delay(100)
-    // is the only wait happening here, same as before.
+    // Wait with timeout; startNtpSync()/checkNtpSync() never block, only this delay(100) does.
     startNtpSync();
     while (timeStatus() == timeNotSet && (millis() - ntpStartTime) < ntpTimeout) {
       checkNtpSync();
@@ -1153,16 +946,12 @@ void setup() {
       SerialPrintln(F("DEBUG: WARNING - NTP sync failed or timed out, continuing anyway"));
     }
 
-    //Must come after loadValuesFromFileSystem() - needs timezoneSetting, populated from there.
-    //Fire-and-forget rather than a blocking timezone.setLocation() call: checkTimezoneLookup()
-    //(ticked every loop() tick) picks it up and applies it (timezone.setPosix()) within the first
-    //couple of loop() iterations once the network's up - blocking setup() on a network round-trip
-    //can itself trip the software watchdog under network stress. The first Clock/Date render
-    //already happened before this (see the pre-WiFi display block above); with cachedTimezonePosix
-    //populated (the common case) that render is already correct LOCAL time. Only a device that has
-    //never once resolved its timezone still shows UTC until this lookup completes.
+    //After loadValuesFromFileSystem() (needs timezoneSetting). Fire-and-forget instead of a blocking
+    //setLocation(): checkTimezoneLookup() applies it from loop() once the network is up. With a
+    //cached rule the first render was already local time; only a device that never resolved its
+    //timezone shows UTC until then.
     startTimezoneLookup(timezoneSetting);
-    bootTimezoneLookupPending = true; //see its own comment - lets loop() retry this specific attempt on failure
+    bootTimezoneLookupPending = true; //lets loop() retry on failure
     SerialPrintln(F("DEBUG: Timezone lookup started (non-blocking) for: ") + timezoneSetting);
     
     //Debug mode was already loaded at the very top of setup() - just log the already-known value.
@@ -1174,11 +963,8 @@ void setup() {
     debugStatus = "Web Server Setup";
     SerialPrintln(F("DEBUG: Status = ") + debugStatus);
 
-    //A filesystem-wide static route (`webServer.serveStatic("/", LittleFS, "/")`) was removed
-    //entirely: the only real static asset is index.html(.gz), already served explicitly below
-    //(GET "/") - the favicon is an embedded base64 data URI in that same HTML. The catch-all route
-    //served no legitimate purpose beyond that and exposed every runtime config file in LittleFS
-    //root unauthenticated, including the OTA password itself in plaintext.
+    //No filesystem-wide static route: the only static asset is index.html(.gz), served below (the
+    //favicon is embedded), and a catch-all exposed every config file in LittleFS without a password.
 
     //Must stay the first handler - see RequestGuard.
     webServer.addHandler(new RequestGuard());
@@ -1247,7 +1033,7 @@ void setup() {
         html += F("    document.getElementById('crashLogSection').innerHTML = '<div class=\"error\">Network error loading crash log</div>';");
         html += F("  };");
         html += F("  xhrCrash.open('GET', '/api/crash-log', true);");
-        //Both reads need a login since OW-08 - the header lets the session cookie count.
+        //Both reads need a login - the header lets the session cookie count.
         html += F("  xhrCrash.setRequestHeader('X-Requested-With', 'splitflap');");
         html += F("  var xhrHeap = new XMLHttpRequest();");
         html += F("  xhrHeap.onreadystatechange = function() {");
@@ -1277,7 +1063,7 @@ void setup() {
         html += F("  if (sessionStorage.getItem('splitflapAdminPasswordKnown') === '1') {");
         html += F("    password = sessionStorage.getItem('splitflapAdminPassword') || '';");
         html += F("  } else {");
-        html += F("    var entered = prompt('Administrator-Passwort (leer lassen, falls keines gesetzt ist):', '');");
+        html += F("    var entered = prompt('Admin password (leave empty if none is set):', '');");
         html += F("    if (entered !== null) {");
         html += F("      password = entered;");
         html += F("      sessionStorage.setItem('splitflapAdminPassword', entered);");
@@ -1291,7 +1077,7 @@ void setup() {
         html += F("    } else if (this.readyState == 4 && this.status == 401) {");
         html += F("      sessionStorage.removeItem('splitflapAdminPassword');");
         html += F("      sessionStorage.removeItem('splitflapAdminPasswordKnown');");
-        html += F("      alert('Falsches Administrator-Passwort.');");
+        html += F("      alert('Wrong admin password.');");
         html += F("    }");
         html += F("  };");
         html += F("  xhr.open('POST', '/api/debug-mode', true);");
@@ -1307,22 +1093,16 @@ void setup() {
         return;
       }
 #endif
-      //Defensive heap guard, moved here from the now-removed serveStatic() filter that used to
-      //cover this same LittleFSImpl::open() call: a low-heap open() is one of two confirmed
-      //abort() sites on this device.
+      //Heap guard before LittleFSImpl::open() - a low-heap open() is a known abort() site.
       if (ESP.getFreeHeap() < 6000) {
         request->send(503, "text/plain", "Low memory, try again shortly");
         return;
       }
 
-      //One page delivery at a time (BUILD_INFO Punkt 237): two AsyncFileResponses streaming
-      //index.html.gz from LittleFS at the same time reproducibly hung the device (hardware
-      //watchdog reset after ~8s) or crashed it in lfs_mlist_isopen() (LittleFS's list of open
-      //files corrupted) - sequential deliveries, parallel non-file requests and uploads alone were
-      //all stable. A second visitor during a delivery gets a tiny page that reloads itself after a
-      //second. Released only when the delivering connection itself ends. A delivery still running
-      //after 30s (very slow client) is closed for the next visitor - but that visitor waits for
-      //the actual disconnect too, so two file responses never overlap (CODE_REVIEW_V8.md #2).
+      //One page delivery at a time: two AsyncFileResponses streaming index.html.gz at once hung the
+      //device (watchdog reset) or corrupted LittleFS's open-file list. A second visitor gets a tiny
+      //page that reloads after a second. Released when the delivering connection ends; one still
+      //running after 30s is closed, and the next visitor still waits for its actual disconnect.
       if (pageDeliveryActive) {
         if (millis() - pageDeliveryStartedAt >= 30000 && pageDeliveryClient != nullptr) {
           pageDeliveryClient->close(); //deferred to its next poll; its onDisconnect then releases the guard and the file
@@ -1353,7 +1133,7 @@ void setup() {
     });
 
     webServer.on("/api/settings", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
-      //Reading needs the password too (security review 2026-10-12, OW-08), unless this category is public.
+      //Reading needs the password too, unless this category is public.
       if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
       unsigned long settingsStart = millis();
       SerialPrintln(F("DEBUG: Request for Settings Received at ") + String(settingsStart) + F("ms"));
@@ -1373,10 +1153,8 @@ void setup() {
       minimalDoc["animationMode"] = animationMode;
       minimalDoc["animationStaggerMs"] = animationStaggerMs;
       minimalDoc["deviceMode"] = deviceMode;
-      //inputText is a SHARED variable every mode's own per-second update (clock/date/countdown/
-      //countup/rotation) also writes its rendered content into - only meaningful as "what the user
-      //actually typed for Text mode" while deviceMode is really "text"; the client gates its use on
-      //deviceMode too, so sending it unconditionally here is harmless.
+      //inputText is shared - every mode writes its rendered content into it. The client only uses it
+      //in Text mode, so sending it always is harmless.
       minimalDoc["inputText"] = inputText;
       minimalDoc["version"] = espVersion;
       minimalDoc["lastTimeReceivedMessageDateTime"] = lastReceivedMessageDateTime;
@@ -1390,11 +1168,10 @@ void setup() {
       minimalDoc["mdnsHostname"] = mdnsHostname; //user-editable, see POST /api/wifi's "set-hostname" action
       minimalDoc["routerHostname"] = routerHostname; //"set-router-hostname" action, same endpoint
       minimalDoc["setupApPasswordFixed"] = setupApFixedPassword != ""; //never the password itself
-      minimalDoc["deviceRole"] = deviceRole; //user-editable, see POST /api/device-role (multiple-units.md)
+      minimalDoc["deviceRole"] = deviceRole; //user-editable, see POST /api/device-role
       minimalDoc["extensionLinkMode"] = extensionLinkMode; //same endpoint, optional 'linkMode' param
 #if MQTT_ENABLE == true
-      //Folded in here too, same "one fetch covers the whole System modal" reasoning as
-      //mdnsHostname above - the password itself is never included, see POST /api/mqtt's own GET.
+      //Folded in here as well (one fetch for the System modal); never the password itself.
       minimalDoc["mqttEnabled"] = mqttEnabled;
       minimalDoc["mqttBrokerHost"] = mqttBrokerHost;
       minimalDoc["mqttBrokerPort"] = mqttBrokerPort;
@@ -1402,9 +1179,8 @@ void setup() {
       minimalDoc["mqttPasswordSet"] = mqttPassword != "";
       minimalDoc["mqttConnected"] = mqttEnabled && mqttClient.connected();
 #endif
-      //timezone included so Administration can populate from this one fetch, given this device's
-      //hard 5-connection TCP limit. The password itself is NEVER sent back - only whether one is
-      //currently set, plus the (non-secret) per-category toggle states.
+      //One fetch for the admin view (the device takes only 5 TCP connections). Never the password,
+      //only whether one is set plus the toggle states.
       minimalDoc["otaPasswordSet"] = isAdminPasswordSet();
       minimalDoc["linkPaired"] = pairedPrimaryLinkSecret != ""; //as an extension - never the secret itself
       minimalDoc["accessControlTextPublic"] = accessControlTextPublic;
@@ -1424,15 +1200,12 @@ void setup() {
       minimalDoc["quietHoursStart"] = quietHoursStart;
       minimalDoc["quietHoursEnd"] = quietHoursEnd;
 
-      //Scheduled messages used to be serialized right here and could crash the device (heap
-      //corruption via nested JsonArray [i][field] indexing, plus a yield()-inside-handler stack
-      //overflow). Moved to its own handler (GET /api/scheduled-messages) that mirrors
-      //rotation-items below: no yield() in the loop, just the item count here.
+      //Scheduled messages have their own handler (GET /api/scheduled-messages) - building them here
+      //crashed the device. Only the count.
       minimalDoc["scheduledMessageCount"] = scheduledMessages.size();
 
-      //Rotation items themselves aren't built here - looping over them in this handler caused a
-      //stack-overflow panic. Just the count (cheap); the client fetches the full list from
-      //GET /api/rotation-items only when the Rotation tab is opened.
+      //Rotation items likewise (stack overflow here) - the client loads them via
+      //GET /api/rotation-items when the Rotation tab opens.
       minimalDoc["rotationItemCount"] = rotationItemCount;
 
       //beginResponseStream() avoids building the JSON into one contiguous String first.
@@ -1448,33 +1221,22 @@ void setup() {
       webRequestActive = false;
     });
 
-    //Merging this with the GET handler above into one HTTP_GET|HTTP_POST registration (same
-    //pattern as /api/wifi etc.) was reproducibly broken on real hardware: a genuine POST request
-    //received the GET handler's JSON response instead of "OK", and invalid POST bodies got 200
-    //instead of 400. Reverted to two separate registrations, verified working again.
+    //Separate from the GET handler on purpose: merged into one HTTP_GET|HTTP_POST registration, real
+    //POSTs got the GET response.
     webServer.on("/api/settings", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
 
       SerialPrintln(F("DEBUG: Request Post of Form Received"));
 
       bool submissionError = false;
-      //Set if replaceRotationItemsFromJson() rejects invalid JSON. Kept separate from
-      //submissionError above: unlike that flag (which aborts the whole request with 400 before
-      //touching anything), the rest of this request still gets processed normally either way -
-      //only the final response wording changes.
+      //Invalid rotation JSON; unlike submissionError the rest of the request is still processed,
+      //only the response wording changes.
       bool rotationItemsUpdateRejected = false;
-      //Set if a submitted scheduled message needs more lines than fit and could therefore never
-      //actually be shown - checked at acceptance time, not just discovered (and then stuck
-      //forever) once due. Same "reject, don't silently drop/accept" pattern as
-      //rotationItemsUpdateRejected above.
+      //A scheduled message that can never be shown (too many lines) or is past due is rejected.
       bool scheduledMessageRejected = false;
-      //Distinct human-readable detail for scheduledMessageRejected, since it's set for two
-      //different reasons (too long to render, or a past-due timestamp) that deserve different
-      //explanations in the final response.
+      //Reason text for scheduledMessageRejected (too long, or past due).
       String scheduledMessageRejectionReason = "";
-      //Set if a direct (non-scheduled) text submission needs more lines than fit. Mutually
-      //exclusive with scheduledMessageRejected (gated on the same newMessageScheduleEnabledValue
-      //branch).
+      //A direct text that needs too many lines (exclusive with scheduledMessageRejected).
       bool directTextRejected = false;
 
       //Separate declarations - `bool a, b = false;` only initializes b, not a.
@@ -1489,8 +1251,7 @@ void setup() {
       String newDateFormatValue = "";
       bool hasNewRotationItems = false;
       String newRotationItemsJson = "";
-      //Distinct hasNew*/empty-allowed pattern (unlike clockFormat/dateFormat above) - "" is a
-      //meaningful, deliberate value here (show the bare day count), not "field not submitted".
+      //"" is a valid value here (bare day count), not "not submitted".
       bool hasNewCountdownPrefixValue = false;
       String newCountdownPrefixValue = "";
       bool hasNewCountdownSuffixValue = false;
@@ -1542,7 +1303,7 @@ void setup() {
             }
           }
 
-          //HTTP POST Animation mode value ("Animationen", found 2026-09-10 on user request)
+          //HTTP POST Animation mode value
           if (p->name() == PARAM_ANIMATION_MODE) {
             String receivedValue = p->value();
             if (isValidAnimationMode(receivedValue)) {
@@ -1646,8 +1407,8 @@ void setup() {
             }
           }
 
-          //HTTP POST Countdown prefix/suffix - "" is a valid, deliberate value (show the bare day
-          //count), so tracked via hasNew*/empty-allowed rather than the newX != "" pattern above.
+          //HTTP POST Countdown prefix/suffix - "" is a valid value (bare day count), so tracked via
+          //hasNew* instead of the newX != "" pattern.
           if (p->name() == PARAM_COUNTDOWN_PREFIX) {
             if (p->value().length() > 40) {
               SerialPrintln(F("countdownPrefix provided was too long (max 40 chars)"));
@@ -1667,7 +1428,7 @@ void setup() {
             }
           }
 
-          //HTTP POST Countup prefix/suffix - same "" is deliberate reasoning as Countdown above.
+          //HTTP POST Countup prefix/suffix - same as Countdown.
           if (p->name() == PARAM_COUNTUP_PREFIX) {
             if (p->value().length() > 40) {
               SerialPrintln(F("countupPrefix provided was too long (max 40 chars)"));
@@ -1687,8 +1448,7 @@ void setup() {
             }
           }
 
-          //HTTP POST Rotation Items (JSON array, the client always submits the whole list) -
-          //bounded well above any realistic sequence, still a needless-heap-pressure safeguard.
+          //HTTP POST Rotation Items (JSON array, always the whole list), bounded as a heap safeguard.
           if (p->name() == PARAM_ROTATION_ITEMS) {
             if (p->value().length() > 8000) {
               SerialPrintln(F("rotationItems provided was too long (max 8000 chars)"));
@@ -1714,7 +1474,7 @@ void setup() {
         //Only if a new alignment value
         if (newAlignmentValue != "" && alignment != newAlignmentValue) {
           alignment = newAlignmentValue;
-          displayRenderGeneration++; //see the comment on this variable - CODE_REVIEW.md #14
+          displayRenderGeneration++; //see the comment on this variable
 
           writeFile(LittleFS, alignmentPath, alignment.c_str());
           SerialPrintln(F("Alignment Updated: ") + alignment);
@@ -1728,8 +1488,7 @@ void setup() {
           SerialPrintln(F("Flap Speed Updated: ") + flapSpeed);
         }
 
-        //Doesn't bump displayRenderGeneration, same reasoning as flapSpeed above: this only
-        //affects the TIMING of future writes, not what content counts as already-shown/cached.
+        //No displayRenderGeneration bump, like flapSpeed: only affects the timing of future writes.
         if (newAnimationModeValue != "" && animationMode != newAnimationModeValue) {
           animationMode = newAnimationModeValue;
 
@@ -1744,10 +1503,8 @@ void setup() {
           SerialPrintln(F("Animation Stagger Updated: ") + newAnimationStaggerMsValue);
         }
 
-        //Only if countdown date has changed - gated to the countdown tab's own submission (its
-        //hidden field is only ever recomputed by that tab's onsubmit case; submitting from a
-        //different tab would otherwise resubmit that field's stale/default "0" and wipe the
-        //stored date, since the field is a form-wide value regardless of which tab is visible).
+        //Only from the countdown tab's own submission - its hidden field is form-wide, and another
+        //tab would resubmit a stale "0" and wipe the stored date.
         if (newDeviceModeValue == DEVICE_MODE_COUNTDOWN && newCountdownToDateUnixValue != "" && countdownToDateUnix != newCountdownToDateUnixValue) {
           countdownToDateUnix = newCountdownToDateUnixValue;
 
@@ -1801,21 +1558,12 @@ void setup() {
           SerialPrintln(F("Countup Suffix Updated: ") + countupSuffix);
         }
 
-        //Rotation items are always submitted as the complete list (see index.html) - a full
-        //replace, not an incremental add. Gated to the rotation tab's own submission, same
-        //tab-gating reasoning as Countdown/Countup above: the hidden field is only ever
-        //recomputed by collectRotationItemsForSubmit(), called only from the rotation tab's
-        //onsubmit case - submitting from any other tab resubmits its stale/default "[]" and
-        //would otherwise silently wipe an existing, loaded rotation list.
+        //Rotation items: always the full list, and only from the rotation tab's own submission
+        //(another tab would resubmit a stale "[]" and wipe the list).
         if (newDeviceModeValue == DEVICE_MODE_ROTATION && hasNewRotationItems) {
-          //Invalid rotation JSON no longer wipes the existing list, but the response below says
-          //so too rather than unconditionally claiming success. The rest of this request
-          //(scheduled messages, mode switch, etc.) still gets processed normally.
-          //An EMPTY value isn't "nothing submitted" here (the web UI always sent at least "[]"): the
-          //web server library assembles form values character by character and copies them twice,
-          //and on a fragmented heap a value of a few KB silently arrives as "". Report that instead of
-          //answering OK while keeping the old list (BUILD_INFO Punkt 235). The web UI now uses
-          //POST /api/rotation-items instead.
+          //Invalid JSON keeps the old list, and the response says so; the rest of the request is
+          //still processed. An EMPTY value is a failure too: on a fragmented heap the web server can
+          //lose a form value of a few KB entirely. The web UI uses POST /api/rotation-items now.
           if (newRotationItemsJson.length() == 0) {
             SerialPrintln(F("Rotation items arrived empty (too large for the available memory) - rejected"));
             rotationItemsUpdateRejected = true;
@@ -1836,9 +1584,8 @@ void setup() {
           } else {
             int scheduleResult = addAndPersistScheduledMessage(newInputTextValue, newMessageScheduleDateTimeUnixValue, newMessageScheduleShowIndefinitely);
             if (scheduleResult == SCHEDULE_REJECTED) {
-              //Either the timestamp is already due/in the past (can happen legitimately if a very
-              //soon deadline passes between the browser prefilling the field and this request
-              //being processed) or SCHEDULED_MESSAGES_MAX was already reached.
+              //Past due (a near deadline can pass before the request is processed) or
+              //SCHEDULED_MESSAGES_MAX reached.
               SerialPrintln(F("Scheduled Message rejected: date/time is not in the future, or too many are already scheduled"));
               scheduledMessageRejected = true;
               scheduledMessageRejectionReason = "the scheduled date/time has already passed, or the maximum number of scheduled messages is already reached - it was NOT scheduled.";
@@ -1856,18 +1603,13 @@ void setup() {
           }
         }
         else {
-          //What deviceMode will actually END UP as after this request, whether or not a new mode
-          //was explicitly submitted - needed so the too-long-text check below applies whenever
-          //Text mode is (or stays) active, not only on an explicit mode switch.
+          //The mode after this request, submitted or not - the too-long check applies whenever
+          //Text mode is (or stays) active.
           String effectiveDeviceMode = (newDeviceModeValue != "") ? newDeviceModeValue : deviceMode;
 
-          //Validated BEFORE deviceMode is assigned/persisted below (CODE_REVIEW_V6.md #6):
-          //previously the mode was already switched and written to LittleFS before this check ever
-          //ran, so a rejected too-long text left the device stuck in Text mode showing nothing new,
-          //instead of leaving whichever mode was actually running beforehand untouched. A message
-          //needing more than DisplayJob::MAX_DISPLAY_LINES lines must be rejected here too (same
-          //check as the scheduled-message branch above) - otherwise it gets applied while
-          //startDisplayJob() then refuses to ever actually render it, every single tick, forever.
+          //Validated BEFORE deviceMode is assigned/persisted, so a rejected text leaves the running
+          //mode untouched. Too many lines must be rejected here too, or startDisplayJob() would
+          //refuse it forever.
           if (hasNewInputTextValue && effectiveDeviceMode == DEVICE_MODE_TEXT && isMessageTooLongToRender(newInputTextValue)) {
             SerialPrintln(F("Direct text rejected: needs more lines than fit to display"));
             directTextRejected = true;
@@ -1896,15 +1638,11 @@ void setup() {
           }
         }
 
-        //Re-sync the boot snapshot right after this request's writes, not just on the periodic
-        //30s check - a snapshot only caught up by a background timer leaves a real, if narrow,
-        //window where a confirmed-saved change is lost to a power cut before the next tick. A
-        //no-op if nothing this request touched actually changed.
+        //Re-sync the boot snapshot now, not only on the 30s check, so a power cut can't lose a
+        //confirmed change. No-op if nothing changed.
         checkBootSnapshotFreshness();
 
-        //scheduledMessageRejected and directTextRejected can never both be true for the same
-        //request (they're set in mutually exclusive if/else branches above) - safe to fold into
-        //one combined reason.
+        //scheduledMessageRejected and directTextRejected are mutually exclusive.
         bool anyTextRejected = scheduledMessageRejected || directTextRejected;
         String textRejectionReason = scheduledMessageRejected
           ? scheduledMessageRejectionReason
@@ -1922,16 +1660,13 @@ void setup() {
       }
     });
 
-    //Own small handler, not sharing a stack frame with /api/settings - only fetched when the
-    //Rotation tab is opened.
-    //GET: the list, element by element - see sendJsonArrayChunked()'s comment for why.
-    //POST: replaces the whole list from a raw JSON array body (Content-Type: application/json) -
-    //collected into ONE buffer allocated at its final size, unlike a form field, which the web
-    //server library grows character by character and copies twice (lists of a few KB got lost that
-    //way, BUILD_INFO Punkt 235). One registration for both methods, same reason as /api/wifi's.
+    //Own small handler (own stack frame), fetched when the Rotation tab opens. GET: the list,
+    //element by element (sendJsonArrayChunked()). POST: replaces the list from a raw JSON body,
+    //collected into one buffer of its final size - a form field gets grown and copied twice by the
+    //library, and lists of a few KB got lost that way.
     webServer.on("/api/rotation-items", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (request->method() == ASYNC_HTTP_GET) {
-        if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return; //OW-08
+        if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
         if (!ensureRotationItemsComplete()) {
           request->send(503, "text/plain", "Rotation items not fully loaded (low memory), try again shortly");
           return;
@@ -1980,9 +1715,8 @@ void setup() {
         }
         rotationBodyOwner = request;
         rotationBodyLength = 0;
-        //A client that drops mid-body never reaches the request handler - release the buffer here
-        //instead of keeping it (and this endpoint) blocked forever. After a normal response the
-        //owner is already cleared, so this is a no-op then.
+        //A client dropping mid-body never reaches the handler - release the buffer here (a no-op
+        //after a normal response).
         request->onDisconnect([request]() {
           if (rotationBodyOwner == request) {
             rotationBodyOwner = nullptr;
@@ -1998,10 +1732,8 @@ void setup() {
       rotationBodyBuffer[rotationBodyLength] = '\0';
     });
 
-    //Consolidates the four pure-diagnostic endpoints (former /api/health, /api/heap,
-    ///api/tcp-status, /api/test) into one registered route, dispatched by ?type= - each
-    //registered handler costs a small permanent heap allocation that's never freed, and this
-    //device has very little room to spare.
+    //Former /api/health, /api/heap, /api/tcp-status and /api/test in one route (?type=) - every
+    //registered handler costs permanent heap.
     webServer.on("/api/diag", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
       String type = request->hasParam("type") ? request->getParam("type")->value() : "";
 
@@ -2009,22 +1741,16 @@ void setup() {
         request->send(200, "text/plain", "Healthy");
         return;
       }
-      //Everything but the health check needs the password (OW-08) - chip IDs, versions, network state.
+      //Everything but the health check needs the password - chip IDs, versions, network state.
       if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return;
 
       if (type == "heap") {
-        char buf[540]; //worst-case length checked by hand incl. the longest wifiDisconnectReason string, +100 for the temporary diag fields, +20 for iramFree
-        //getFlashChipRealSize() = physical chip's own SPI ID (ground truth); getFlashChipSize() =
-        //what the eesz board-menu choice assumes - a mismatch means the compiled layout is wrong.
-        //rtc/rtcOsf: the only way to verify the optional DS3231's detection/trustworthiness
-        //without physically observing the display. resetReason comes from
-        //ESP.getResetInfoPtr()->reason, the SDK's own boot-time record of the true last reset
-        //cause, independent of our crash reporter (which only captures genuine exceptions/panics
-        //via custom_crash_callback() - a CLEAN reset such as external/brownout/hardware-watchdog
-        //leaves no trace there). uptimeSec lets repeated external polls notice ANY reboot between
-        //two checks (crashed or clean) by seeing a smaller uptime than expected.
-        //wifiDisconnects/lastWifiDisconnectReason/lastWifiDisconnectSecAgo makes AUTH_EXPIRE/
-        //ASSOC_EXPIRE disconnects observable over HTTP without a live serial capture.
+        char buf[440]; //worst-case length checked by hand incl. the longest wifiDisconnectReason string, +20 for iramFree
+        //flashReal = the chip's own SPI ID, flashConfigured = what the eesz layout assumes (a
+        //mismatch means a wrong build). rtc/rtcOsf show the optional DS3231's state. resetReason is
+        //the SDK's record of the last reset - unlike the crash reporter it also covers clean resets
+        //(external, brownout, hardware watchdog). uptimeSec reveals any reboot between two polls.
+        //The WiFi fields make AUTH_EXPIRE/ASSOC_EXPIRE disconnects visible without a serial capture.
         const char* lastDisconnectReasonForDiag = wifiDisconnectCount > 0 ? lastWifiDisconnectReason.c_str() : "none";
         long lastDisconnectSecAgo = wifiDisconnectCount > 0 ? (long)((millis() - lastWifiDisconnectAt) / 1000) : -1;
         //iramFree: second heap in IRAM (OTA buffers), 0 if the build has none (mmu=3232 since 5.0.1).
@@ -2035,25 +1761,21 @@ void setup() {
           iramFree = ESP.getFreeHeap();
         }
 #endif
-        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s rtc=%s rtcOsf=%u resetReason=%s uptimeSec=%lu wifiDisconnects=%lu lastWifiDisconnectReason=%s lastWifiDisconnectSecAgo=%ld minFreeHeap=%u minFreeHeapAtSec=%u minMaxBlock=%u freeHeapAtLastWifiDisconnect=%u iramFree=%u")),
+        snprintf_P(buf, sizeof(buf), reinterpret_cast<PGM_P>(F("free=%u frag=%u%% maxBlock=%u flashReal=%u flashConfigured=%u flashChipId=0x%08X espChipId=0x%08X sdk=%s core=%s rtc=%s rtcOsf=%u resetReason=%s uptimeSec=%lu wifiDisconnects=%lu lastWifiDisconnectReason=%s lastWifiDisconnectSecAgo=%ld iramFree=%u")),
           ESP.getFreeHeap(), ESP.getHeapFragmentation(), ESP.getMaxFreeBlockSize(),
           ESP.getFlashChipRealSize(), ESP.getFlashChipSize(), ESP.getFlashChipId(), ESP.getChipId(),
           ESP.getSdkVersion(), ESP.getCoreVersion().c_str(),
           rtcPresent ? "present" : "absent", rtcOscillatorStopFlag ? 1 : 0,
           crashResetReasonText(ESP.getResetInfoPtr()->reason), millis() / 1000,
-          wifiDisconnectCount, lastDisconnectReasonForDiag, lastDisconnectSecAgo,
-          diagMinFreeHeap, diagMinFreeHeapAtSec, diagMinMaxBlock, diagFreeHeapAtLastWifiDisconnect, iramFree); //temporary diag, see diagMinFreeHeap
+          wifiDisconnectCount, lastDisconnectReasonForDiag, lastDisconnectSecAgo, iramFree);
         request->send(200, "text/plain", buf);
         return;
       }
 
       if (type == "tcp") {
-        //MEMP_NUM_TCP_PCB=5 in this board's lwIP build is NOT a hard cap on simultaneous
-        //connections, corrected 2026-09-12 (Punkt 207 investigation) - MEMP_MEM_MALLOC=1 means
-        //these PCBs come from malloc(), not a fixed 5-slot pool, so more than 5 can genuinely be
-        //in flight at once (verified live: a burst of 15 simultaneous connection attempts got
-        //well past 5 before the device crashed elsewhere - see connectionGateRejectedCount
-        //below for the actual defense now in place against that).
+        //MEMP_NUM_TCP_PCB=5 is no hard cap: with MEMP_MEM_MALLOC=1 the PCBs come from malloc(), so
+        //more than 5 connections can be in flight (a 15-connection burst got well past 5). The real
+        //defense is the connection gate (connectionGateRejectedCount).
         int activeCount = 0;
         for (struct tcp_pcb *p = tcp_active_pcbs; p != NULL; p = p->next) activeCount++;
         int timeWaitCount = 0;
@@ -2078,13 +1800,11 @@ void setup() {
       request->send(400, "text/plain", "Unknown 'type' - use health, heap, tcp, or test");
     });
 
-    // On-device crash log (see ServiceCrashLogFunctions.ino) - survives even without a live
-    // serial connection at the moment of a crash. One JSON object per line, oldest first.
-    // GET+DELETE merged into one registration (heap-saving pattern established for /api/wifi).
-    // DELETE (not GET) clears it, to avoid a CSRF-via-GET state change.
+    // Crash log (ServiceCrashLogFunctions.ino), one JSON object per line, oldest first. GET and
+    // DELETE in one registration; clearing needs DELETE, not GET (CSRF).
     webServer.on("/api/crash-log", ASYNC_HTTP_GET | ASYNC_HTTP_DELETE, [](AsyncWebServerRequest * request) {
       if (request->method() == ASYNC_HTTP_GET) {
-        if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return; //OW-08
+        if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return;
         if (!LittleFS.exists(CRASH_LOG_PATH)) {
           request->send(200, "application/jsonl", "");
           return;
@@ -2103,7 +1823,7 @@ void setup() {
 
     // I2C bus scanner endpoint for diagnostics
     webServer.on("/api/i2c-scan", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
-      if (rejectIfPasswordRequired(request, accessControlUnitsPublic)) return; //OW-08 - drives the I2C bus
+      if (rejectIfPasswordRequired(request, accessControlUnitsPublic)) return; //drives the I2C bus
       SerialPrintln(F("DEBUG: I2C scan requested"));
       //Deferred to loop().
       if (pendingLegacyI2CScanSlot.request != nullptr) {
@@ -2114,25 +1834,20 @@ void setup() {
     });
 
 #if UNIT_BOOTLOADER_ENABLE == true
-    // Must be registered before "/api/units" below: ESPAsyncWebServer's canHandle() treats any
-    // request path starting with "<registered uri>/" as a match too, and _attachHandler() picks
-    // the FIRST registered handler that matches - registering the more specific paths first
-    // avoids "/api/units" silently swallowing requests to "/api/units/firmware*".
+    // Registered before "/api/units": canHandle() also matches "<uri>/..." and the first matching
+    // handler wins, so "/api/units" would swallow "/api/units/firmware*".
 
     // Admin: upload a compiled Unit.ino firmware image (raw AVR .bin, NOT ESPMaster's own) to be
     // pushed to a unit via /api/units/firmware-push. Requires X-OTA-Password, same as /api/firmware.
     webServer.on("/api/units/firmware", ASYNC_HTTP_POST,
       [](AsyncWebServerRequest * request) {
-        //Capture ownership BEFORE releasing it - the one reliable, request-scoped (pointer
-        //comparison) way to know whether THIS request's body ever won the shared static file
-        //state, independent of whatever any other concurrent request's body did in the meantime.
+        //Ownership captured before releasing it - the request-scoped way to know whether THIS
+        //request's body owned the shared file state.
         bool wasOwner = (unitFirmwareUploadOwner == request);
         if (wasOwner) {
           unitFirmwareUploadOwner = nullptr;
         }
-        //Password is stateless and independently re-checked here, same as checkOtaPassword() for
-        //the ESPMaster OTA endpoints above - never gated behind a shared flag another request's
-        //callback could set or clear.
+        //Password re-checked here statelessly, never via a shared flag.
         if (isAdminPasswordSet()) {
           if (!requestIsAuthenticated(request)) { //password header or web UI login session
             request->send(401, "text/plain", "Invalid password");
@@ -2154,11 +1869,8 @@ void setup() {
         static File unitFirmwareFile;
 
         if (index == 0) {
-          //Check the password FIRST, before touching any previous-upload state at all - an
-          //unauthenticated POST hitting index==0 must not be able to interrupt/corrupt a
-          //different, still-legitimately-in-progress upload just by arriving first. On failure,
-          //just return WITHOUT touching any shared state - the outer handler re-checks the
-          //password itself and never trusts a shared flag for it.
+          //Password first, before touching any upload state - an unauthenticated request must not
+          //disturb an upload in progress. On failure return without touching shared state.
           if (isAdminPasswordSet()) {
             if (!requestIsAuthenticated(request)) { //password header or web UI login session
               SerialPrintln(F("Unit firmware upload rejected: invalid password"));
@@ -2166,48 +1878,36 @@ void setup() {
             }
           }
 
-          //Reject a second, DIFFERENT authenticated request trying to start while this channel's
-          //shared static state is already claimed by another still-in-flight upload - must come
-          //before any cleanup/touching of unitFirmwareFile below. Again, just return - no shared
-          //flag to set.
+          //A second authenticated upload while another owns the state: just return.
           if (unitFirmwareUploadOwner != nullptr && unitFirmwareUploadOwner != request) {
             SerialPrintln(F("Unit firmware upload rejected: another upload is already in progress"));
             return;
           }
           unitFirmwareUploadOwner = request;
-          //Fresh ownership period starts here - discard any leftover true from a PREVIOUS owner
-          //whose connection vanished before its own outer handler ran to consume/clear it (that
-          //handler is the only other place this gets cleared). Without this reset, a vanished
-          //owner's failure could otherwise get blamed on this brand new, unrelated request.
+          //New ownership: clear a failure left by a previous owner that vanished before its outer
+          //handler ran.
           unitFirmwareUploadWriteFailed = false;
-          //Releases this claim immediately if the connection vanishes before the outer handler
-          //ever runs to release it normally (e.g. WiFi drops mid-transfer) - otherwise every
-          //future upload would be permanently rejected as "busy" by a request that never finishes.
+          //Release the claim if the connection drops before the outer handler runs, or every later
+          //upload would be rejected as busy.
           request->onDisconnect([request]() {
             if (unitFirmwareUploadOwner == request) {
               unitFirmwareUploadOwner = nullptr;
             }
           });
 
-          //Only now, with this request's own credentials confirmed AND exclusive ownership
-          //claimed, touch the shared static upload state. If a previous upload's connection just
-          //vanished mid-transfer, "final" never fired for it and this handle was never closed
-          //(a dangling handle measurably costs heap/fragmentation across the next upload) - close
-          //it defensively before reusing the static variable for this attempt.
+          //Credentials confirmed and ownership claimed - now touch the shared state. Close a handle a
+          //vanished previous upload left open (it costs heap).
           if (unitFirmwareFile) {
             unitFirmwareFile.close();
           }
-          //Same reasoning for a leftover temp file from that vanished upload - LittleFS.open(...,
-          //"w") below truncates it anyway, but remove it explicitly so a request that fails later
-          //(e.g. a write error) doesn't leave stale bytes behind from an even earlier attempt.
+          //Also remove its leftover temp file.
           if (LittleFS.exists(unitFirmwareTmpPath)) {
             LittleFS.remove(unitFirmwareTmpPath);
           }
 
           SerialPrintln(F("DEBUG: Unit firmware upload starting: ") + filename);
-          //Write to a temp path, atomically rename() onto the real path only once the whole
-          //upload is confirmed complete and error-free - an aborted/failed upload must never
-          //leave the previously-stored (working) firmware truncated or corrupted.
+          //Write to a temp path and rename() it into place only when complete - a failed upload
+          //never damages the stored firmware.
           unitFirmwareFile = LittleFS.open(unitFirmwareTmpPath, "w");
           if (!unitFirmwareFile) {
             SerialPrintln(F("Unit firmware upload: failed to open ") + String(unitFirmwareTmpPath) + F(" for writing"));
@@ -2215,9 +1915,8 @@ void setup() {
           }
         }
 
-        //A per-fragment ownership check, not a shared "was rejected" flag - without this, a LATER
-        //fragment (index>0) of a rejected request would fall straight through to
-        //unitFirmwareFile.write() below, writing its bytes into the WINNING request's file.
+        //Per-fragment ownership check: a rejected request's later fragments would otherwise be
+        //written into the winning request's file.
         if (unitFirmwareUploadOwner != request) {
           return;
         }
@@ -2234,8 +1933,8 @@ void setup() {
           if (unitFirmwareFile) {
             unitFirmwareFile.close();
           }
-          //Authorized again right before the file replaces the stored one - a password change or
-          //revoked session during the transfer must not still let it through (CR-03).
+          //Re-authorized before replacing the stored file - a password change or revoked session
+          //during the transfer must stop it.
           if (!unitFirmwareUploadWriteFailed && isAdminPasswordSet() && !requestIsAuthenticated(request)) {
             SerialPrintln(F("Unit firmware upload: no longer authorized at the end - discarding it"));
             unitFirmwareUploadWriteFailed = true;
@@ -2253,12 +1952,9 @@ void setup() {
       }
     );
 
-    //Pushes the currently stored unit firmware to a single unit over I2C (twiboot), or just probes
-    //which I2C address it answers on without writing anything - both deferred to loop(), both take
-    //the same 'id' param, so merged into one registration dispatched by 'action' (heap-saving
-    //pattern established for /api/wifi etc.). Deliberately its own path, not merged into
-    //"/api/units/firmware" - that's a multipart upload registration (different ESPAsyncWebServer
-    //callback signature), and that upload route would otherwise intercept a sub-path anyway.
+    //Pushes the stored unit firmware to one unit over I2C (twiboot), or only probes its address -
+    //both deferred to loop(), one registration dispatched by 'action'. Separate from
+    //"/api/units/firmware" (a multipart upload route with a different callback signature).
     webServer.on("/api/units/firmware-push", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       String action = request->hasParam("action", true) ? request->getParam("action", true)->value() : "";
 
@@ -2273,12 +1969,8 @@ void setup() {
         return;
       }
 
-      //Bounds against UNITS_AMOUNT_MAX (the structural 6-bit-DIP address ceiling), not the cached
-      //unitsAmount - unlike every other unit-id check in this file, this endpoint's whole point is
-      //to reach a unit that's already stuck in the bootloader, which by definition doesn't answer
-      //at its app address and drops out of unitsAmount on the next scan. scanForBootloaderAddress()
-      //below is the real safety net regardless (refuses unless exactly one unit answers as a
-      //bootloader).
+      //Bounded by UNITS_AMOUNT_MAX, not unitsAmount: this endpoint exists to reach a unit stuck in
+      //the bootloader, which drops out of unitsAmount. The bootloader probe is the real safety net.
       int unitId = idValue.toInt();
       if (unitId < 0 || unitId >= UNITS_AMOUNT_MAX) {
         request->send(400, "text/plain", "Unit id out of range. Valid range: 0 to " + String(UNITS_AMOUNT_MAX - 1));
@@ -2312,10 +2004,8 @@ void setup() {
       }
 
       if (action == "probe") {
-        //Same always-required password check as "push" above, NOT the toggleable
-        //accessControlUnitsPublic - this calls requestUnitEnterBootloader(), which genuinely
-        //reboots the unit's running app exactly like "push" does. A read-only-sounding "probe"
-        //name doesn't make it a safe, unauthenticated diagnostic.
+        //Always needs the password, not accessControlUnitsPublic: "probe" reboots the unit's app
+        //just like "push".
         if (isAdminPasswordSet()) {
           if (!requestIsAuthenticated(request)) { //password header or web UI login session
             SerialPrintln(F("Unit bootloader probe rejected: invalid password"));
@@ -2338,16 +2028,12 @@ void setup() {
     });
 #endif
 
-    // Admin: read live status + calibration offset for every unit (GET, deferred to loop()), or
-    // trigger a unit write-action (POST, dispatched by ?action=: rescan/offset/reset - former
-    // /api/units/rescan, /api/units/offset, /api/units/reset). Merged into one registration
-    // (heap-saving pattern established for /api/wifi etc.) - the two branches stay structurally
-    // small and independent (unlike the failed /api/settings merge attempt), so the same
-    // size-related risk doesn't apply here.
+    // GET: live status + calibration offset of every unit (deferred to loop()). POST ?action=
+    // rescan/offset/reset. One registration; both branches are small (unlike /api/settings).
     webServer.on("/api/units", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (request->method() == ASYNC_HTTP_GET) {
-        //Stays readable without the password (OW-08 exception): a primary polls its extensions'
-        //unit count here and sends no credentials for that.
+        //Readable without password: a primary polls its extensions' unit count here without
+        //credentials.
         SerialPrintln(F("DEBUG: Admin units request received"));
         if (pendingUnitsInfoSlot.request != nullptr) {
           request->send(503, "text/plain", "Another units request is already in progress, try again shortly");
@@ -2363,7 +2049,7 @@ void setup() {
       String action = request->hasParam("action") ? request->getParam("action")->value() : "";
 
       if (action == "rescan") {
-        if (rejectIfPasswordRequired(request, accessControlUnitsPublic)) return; //OW-08 - drives the I2C bus
+        if (rejectIfPasswordRequired(request, accessControlUnitsPublic)) return; //drives the I2C bus
         SerialPrintln(F("DEBUG: Admin rescan-units request received"));
         if (pendingRescanSlot.request != nullptr) {
           request->send(503, "text/plain", "Another rescan is already in progress, try again shortly");
@@ -2424,10 +2110,7 @@ void setup() {
 
         SerialPrintln(F("Request to Reset Units Received"));
         isPendingUnitsReset = true; //picked up in loop()
-        //updateUnitsResetSequence() writes its own blank1/pause/blank2 sequence directly, bypassing
-        //showText()/lastWrittenText entirely - without this, the cache would still believe
-        //whatever text was shown before the reset is still correctly displayed. See
-        //displayRenderGeneration's comment - CODE_REVIEW.md #14.
+        //The reset sequence bypasses showText()/lastWrittenText, so invalidate the cache.
         displayRenderGeneration++;
         request->send(200, "text/plain", "Units are resetting/recalibrating now.");
         return;
@@ -2440,14 +2123,12 @@ void setup() {
     //would wipe runtime settings files). Filename allowlisted, not an arbitrary path.
     webServer.on("/api/web-file", ASYNC_HTTP_POST,
       [](AsyncWebServerRequest * request) {
-        //Capture ownership BEFORE releasing it - same request-scoped derivation as
-        ///api/units/firmware above.
+        //Ownership captured before releasing it, as for /api/units/firmware.
         bool wasOwner = (webFileUploadOwner == request);
         if (wasOwner) {
           webFileUploadOwner = nullptr;
         }
-        //Password is stateless and independently re-checked here - never gated behind a shared
-        //flag another request's callback could set or clear.
+        //Password re-checked here statelessly, never via a shared flag.
         if (isAdminPasswordSet()) {
           if (!requestIsAuthenticated(request)) { //password header or web UI login session
             request->send(401, "text/plain", "Invalid password");
@@ -2455,11 +2136,8 @@ void setup() {
           }
         }
         if (!wasOwner) {
-          //Distinguish "this request's OWN filename was invalid" from "genuinely lost the
-          //ownership race to a concurrent upload" - re-derive the uploaded filename statelessly
-          //from this request's own file param (ESPAsyncWebServer adds one with isFile()==true
-          //during multipart parsing) rather than relying on any shared flag, to avoid a double
-          //response (400 from the body handler AND a generic 503 from here).
+          //Tell "own filename invalid" from "lost the ownership race" from this request's own file
+          //param, not a shared flag - avoids a double response (400 and 503).
           String uploadedFilename = "";
           for (size_t i = 0; i < request->params(); i++) {
             const AsyncWebParameter* p = request->getParam(i);
@@ -2487,11 +2165,8 @@ void setup() {
         static String webUploadTmpPath;
 
         if (index == 0) {
-          //Check the password FIRST, before touching any previous-upload state at all - same
-          //reasoning as /api/units/firmware above: an unauthenticated POST hitting index==0 must
-          //not be able to close/delete a different, still-legitimately-in-progress upload's file
-          //just by arriving first. On failure, just return - no shared flag to set, the outer
-          //handler re-checks the password itself.
+          //Password first, as for /api/units/firmware: an unauthenticated request must not disturb an
+          //upload in progress. On failure just return.
           if (isAdminPasswordSet()) {
             if (!requestIsAuthenticated(request)) { //password header or web UI login session
               SerialPrintln(F("Web file upload rejected: invalid password"));
@@ -2499,31 +2174,23 @@ void setup() {
             }
           }
 
-          //Reject a second, DIFFERENT authenticated request trying to start while this channel's
-          //shared static state is already claimed by another still-in-flight upload (same
-          //underlying issue as /api/units/firmware above) - must come before any cleanup/touching
-          //of webUploadFile below. Again, just return - no shared flag.
+          //A second authenticated upload while another owns the state: just return.
           if (webFileUploadOwner != nullptr && webFileUploadOwner != request) {
             SerialPrintln(F("Web file upload rejected: another upload is already in progress"));
             return;
           }
           webFileUploadOwner = request;
-          //Fresh ownership period - discard any leftover true from a previous owner whose
-          //connection vanished before its own outer handler ran to consume/clear it (same
-          //reasoning as unitFirmwareUploadWriteFailed's reset above).
+          //New ownership: clear a failure left by a vanished previous owner.
           webFileUploadWriteFailed = false;
-          //Releases this claim immediately if the connection vanishes before the outer handler
-          //ever runs to release it normally - see the identical /api/units/firmware comment above.
+          //Release the claim if the connection drops before the outer handler runs.
           request->onDisconnect([request]() {
             if (webFileUploadOwner == request) {
               webFileUploadOwner = nullptr;
             }
           });
 
-          //Only now, with this request's own credentials confirmed AND exclusive ownership
-          //claimed, touch the shared static upload state. Same defensive cleanup as
-          ///api/units/firmware above, for a previous upload whose connection vanished mid-transfer
-          //("final" never fired, so this never ran) - see that handler's comment.
+          //Credentials confirmed and ownership claimed - now touch the shared state, closing anything a
+          //vanished previous upload left open.
           if (webUploadFile) {
             webUploadFile.close();
           }
@@ -2531,13 +2198,9 @@ void setup() {
             LittleFS.remove(webUploadTmpPath);
           }
 
-          //"index.html.gz" is the only valid target - the whole UI is one gzip-compressed file,
-          //served automatically with Content-Encoding: gzip. An invalid filename gives up
-          //ownership again immediately (ownership alone fully covers it, since a request that
-          //never keeps ownership automatically fails every later fragment's
-          //"webFileUploadOwner != request" check below too). Does NOT send a response itself -
-          //the separate outer (onRequest) handler above also runs once the body finishes
-          //arriving, and re-derives "was my own filename invalid" itself to send the one reply.
+          //Only "index.html.gz" is valid (the whole UI, served with Content-Encoding: gzip). An
+          //invalid name gives up ownership at once, so every later fragment fails the ownership
+          //check too. No response here - the outer handler sends the one reply.
           if (filename != "index.html.gz") {
             SerialPrintln(F("Web file upload rejected: filename not in allowlist: ") + filename);
             webFileUploadOwner = nullptr;
@@ -2545,10 +2208,8 @@ void setup() {
           }
 
           SerialPrintln(F("DEBUG: Web file upload starting: ") + filename);
-          //Same temp-file + atomic rename() pattern as /api/units/firmware above - an
-          //aborted/failed upload must never leave the live web UI file truncated. The stale-
-          //"/index.html"-removal below happens right before the swap too, so a failed upload
-          //can't leave neither file in place.
+          //Temp file + atomic rename(), as for /api/units/firmware - a failed upload never truncates
+          //the live UI file.
           webUploadTmpPath = "/" + filename + ".tmp";
           webUploadFile = LittleFS.open(webUploadTmpPath, "w");
           if (!webUploadFile) {
@@ -2557,8 +2218,7 @@ void setup() {
           }
         }
 
-        //Per-fragment ownership check, not a sticky flag - see the identical /api/units/firmware
-        //comment above for why this must compare live ownership on every fragment.
+        //Per-fragment ownership check, as for /api/units/firmware.
         if (webFileUploadOwner != request) {
           return;
         }
@@ -2575,7 +2235,7 @@ void setup() {
           if (webUploadFile) {
             webUploadFile.close();
           }
-          //Authorized again right before the swap - see /api/units/firmware (CR-03).
+          //Re-authorized right before the swap, as for /api/units/firmware.
           if (!webFileUploadWriteFailed && isAdminPasswordSet() && !requestIsAuthenticated(request)) {
             SerialPrintln(F("Web file upload: no longer authorized at the end - discarding it"));
             webFileUploadWriteFailed = true;
@@ -2584,15 +2244,11 @@ void setup() {
             LittleFS.remove(webUploadTmpPath); //don't leave a corrupt temp file lying around
             SerialPrintln(F("DEBUG: Web file upload failed, previous file (if any) left untouched"));
           } else {
-            //Rename the new file into place FIRST, only remove the old uncompressed "/index.html"
-            //AFTER that's confirmed - if the rename failed first (e.g. a power cut between the
-            //two removal-then-rename steps), the previously-working uncompressed UI would already
-            //be gone while the new ".gz" never landed. The two paths never collide with each
-            //other, so there's no need to clear the old one first.
+            //Rename the new file into place first and only then remove the old "/index.html" - the
+            //other order could leave no UI file at all after a power cut.
             if (LittleFS.rename(webUploadTmpPath, "/" + filename)) {
               SerialPrintln(F("DEBUG: Web file upload finished: ") + filename + F(", total bytes: ") + String(index + len));
-              //A leftover uncompressed "/index.html" would take precedence over "/index.html.gz" -
-              //only remove it now that the new file is confirmed safely in place.
+              //A leftover "/index.html" would take precedence over "/index.html.gz".
               if (LittleFS.exists("/index.html")) {
                 LittleFS.remove("/index.html");
               }
@@ -2647,9 +2303,7 @@ void setup() {
     //the next one, giving natural backpressure.
     webServer.on("/api/firmware-chunk", ASYNC_HTTP_POST,
       [checkOtaPassword](AsyncWebServerRequest * request) {
-        //Capture ownership BEFORE releasing it - this reliably tells THIS specific outer-handler
-        //invocation whether its own body ever got to claim the shared buffer, independent of
-        //anything any other concurrent request's body did (see otaChunkOwner's declaration comment).
+        //Ownership captured before releasing it (see otaChunkOwner).
         bool wasOwner = (otaChunkOwner == request);
         if (wasOwner) {
           otaChunkOwner = nullptr;
@@ -2663,10 +2317,8 @@ void setup() {
           return;
         }
         if (!wasOwner) {
-          //This request's body never claimed the shared buffer - either its declared size (Content-
-          //Length) exceeded OTA_CHUNK_SIZE, or another chunk was already mid-transfer/still pending
-          //when it arrived. Distinguish the two from data this request owns outright
-          //(contentLength()), not from any shared mutable flag another request could have touched.
+          //This body never claimed the buffer: either Content-Length exceeded OTA_CHUNK_SIZE or
+          //another chunk was in flight - told apart via contentLength(), not a shared flag.
           if (request->contentLength() > OTA_CHUNK_SIZE) {
             request->send(400, "text/plain", "Chunk too large");
           } else {
@@ -2674,9 +2326,7 @@ void setup() {
           }
           return;
         }
-        //Reject an overlapping request outright rather than silently overwriting the still-pending
-        //one's state - same "already busy" pattern used for every other pending-request slot in
-        //this file.
+        //An overlapping request is rejected, not allowed to overwrite the pending one.
         if (otaPendingPhase != OTA_PHASE_NONE) {
           request->send(503, "text/plain", "Still processing the previous chunk, try again shortly");
           return;
@@ -2688,56 +2338,38 @@ void setup() {
       nullptr, //no multipart upload needed - this is a plain raw-body request
       [checkOtaPassword](AsyncWebServerRequest * request, uint8_t *data, size_t len, size_t index, size_t total) {
         if (index == 0) {
-          //Check auth HERE too, not just in the request handler above - that one only runs once
-          //the ENTIRE body has already streamed in, but this body handler runs incrementally AS
-          //each piece of the raw POST body arrives, writing straight into the shared, global
-          //otaChunkBuffer. On failure, just return WITHOUT touching any shared state - this
-          //request simply never becomes otaChunkOwner, which the per-fragment check below and the
-          //outer handler's wasOwner re-derivation are both built to handle on their own.
+          //Auth checked here too: this body handler writes into the shared otaChunkBuffer as data
+          //arrives, before the request handler runs. On failure just return - this request never
+          //becomes otaChunkOwner.
           if (!checkOtaPassword(request)) {
             return;
           }
-          //Reject an overlapping chunk's body HERE too, before touching otaChunkLen/otaChunkBuffer
-          //at all - not just in the outer request handler above, which only runs once this ENTIRE
-          //body has already streamed in and overwritten them.
+          //Reject an overlapping chunk before it touches otaChunkLen/otaChunkBuffer.
           if (otaPendingPhase != OTA_PHASE_NONE) {
             return;
           }
-          //Reject a SECOND body that's ALSO still mid-transfer, not just one whose outer handler
-          //has already run - the otaPendingPhase check above only ever changes once a body is
-          //FULLY received, so two bodies that are BOTH still streaming in concurrently (fragments
-          //interleaved by AsyncTCP servicing multiple open connections) could otherwise pass both
-          //checks and corrupt each other - see otaChunkOwner's own declaration comment.
+          //Also reject a second body still mid-transfer - otaPendingPhase only changes once a body is
+          //complete, so two interleaved bodies would pass both checks (see otaChunkOwner).
           if (otaChunkOwner != nullptr && otaChunkOwner != request) {
             return;
           }
           if (otaChunkBuffer == nullptr || total > OTA_CHUNK_SIZE) {
-            //This request's own chunk is invalid (no upload started, or too large) - never claim
-            //ownership for it; the outer handler re-derives the precise reason from
-            //request->contentLength() once this body finishes arriving.
+            //Invalid chunk (no upload started, or too large): never claim ownership; the outer
+            //handler derives the reason from contentLength().
             return;
           }
           otaChunkOwner = request;
           otaChunkLen = 0;
         }
-        //Per-fragment ownership check (not a shared "rejected" flag) - a request that never
-        //claimed ownership above, or that has since lost it (watchdog timeout, or its own
-        //overflow guard below), always fails this and is silently dropped.
+        //Per-fragment ownership check: a request that never claimed (or lost) ownership is dropped.
         if (otaChunkOwner != request) {
           return;
         }
-        //Re-check on EVERY fragment, not just index==0: the abandoned-upload watchdog (loop(),
-        //see otaLastActivityAt below) could otherwise free/null otaChunkBuffer mid-transfer,
-        //between two fragments of one slow-arriving body, since otaLastActivityAt was only
-        //updated once the FULL chunk had completed. Updating it on every fragment also means a
-        //genuinely still-arriving, slow-but-active body no longer looks "abandoned" in the first
-        //place.
+        //Refreshed on every fragment, so the abandoned-upload watchdog can't free otaChunkBuffer
+        //between two fragments of a slow but active body.
         otaLastActivityAt = millis();
         if (otaChunkBuffer == nullptr || otaChunkLen + len > OTA_CHUNK_SIZE) {
-          //Shouldn't happen given the total check at index==0 above, but never overflow the buffer.
-          //Give up ownership outright rather than setting a shared flag - the outer handler's
-          //wasOwner check then correctly reports this request as rejected (503) without needing
-          //any extra state, and a fresh request is free to claim the slot immediately after.
+          //Never overflow the buffer: give up ownership, the outer handler then answers 503.
           otaChunkOwner = nullptr;
           return;
         }
@@ -2790,8 +2422,7 @@ void setup() {
     });
 #endif
     
-    //This and reset-units/ota/reset-wifi below are POST, not GET - a GET link is triggerable
-    //cross-site (e.g. an <img> tag on any page) without user interaction (CSRF-via-GET).
+    //POST, not GET (also reset-units/ota/reset-wifi): a GET link can be triggered cross-site.
     webServer.on("/api/reboot", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return;
 
@@ -2810,23 +2441,20 @@ void setup() {
       html += F("</div>");
       
       request->send(200, "text/html", html);
-      checkBootSnapshotFreshness(); //see its own comment further down - keep the snapshot fresh before every intentional reboot
+      checkBootSnapshotFreshness(); //keep the snapshot fresh before rebooting
       isPendingReboot = true;
     });
 
-    //Mirrors GET /api/rotation-items exactly (own small JsonDocument,
-    //.to<JsonArray>()+.add<JsonObject>(), deliberately no yield() in the loop - a yield() here
-    //previously overflowed the AsyncWebServer callback's small stack). Deliberately a separate
-    //registration, not merged with DELETE below.
+    //Like GET /api/rotation-items: own small JsonDocument, no yield() in the loop (it overflowed the
+    //callback's stack). Separate from DELETE below.
     webServer.on("/api/scheduled-messages", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
-      if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return; //OW-08
-      //An incomplete list (see scheduledMessagesComplete) isn't served as if it were the whole
-      //schedule - checkScheduledMessages() keeps retrying the load from loop().
+      if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
+      //An incomplete list isn't served as the whole schedule; loop() keeps retrying the load.
       if (!scheduledMessagesComplete) {
         request->send(503, "text/plain", "Scheduled messages not fully loaded (low memory), try again shortly");
         return;
       }
-      //Element by element - see sendJsonArrayChunked()'s comment for why.
+      //Element by element (sendJsonArrayChunked()).
       sendJsonArrayChunked(request, scheduledMessages.size(), fillScheduledMessageJson, &scheduledMessagesGeneration);
     });
 
@@ -2864,9 +2492,8 @@ void setup() {
       }
     });
 
-    //Lightweight text-push endpoint for automations (webhooks, Home Assistant, shortcuts, etc.) -
-    //just a message and an optional hold time, instead of the full /api/settings form. Same
-    //unauthenticated design as /api/settings (this device has no separate login system).
+    //Lightweight text push for automations (webhooks, Home Assistant, shortcuts): a message and an
+    //optional hold time instead of the full /api/settings form.
     webServer.on("/api/text", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlTextPublic)) return;
 
@@ -2902,51 +2529,41 @@ void setup() {
         return;
       }
 
-      //Checked up front, before either branch below - the permanent branch never looks at
-      //showText()'s result at all, so a too-long text would otherwise silently get "OK" back and
-      //be retried forever, uselessly, by the normal 1s mode-dispatch loop.
+      //Checked up front: the permanent branch ignores showText()'s result, so a too-long text would
+      //get "OK" and be retried forever.
       if (isMessageTooLongToRender(newText)) {
         request->send(400, "text/plain", "text needs more lines than fit to display - shorten it or add fewer line breaks");
         return;
       }
 
       if (durationSeconds > 0) {
-        //Temporary: deviceMode/inputText are deliberately left untouched, same pattern
-        //checkScheduledMessages() already uses for a non-indefinite scheduled message - once the
-        //hold time elapses, the next 1s tick's normal mode loop redisplays whatever deviceMode
-        //currently is on its own. Unlike the permanent branch below, no other code path will ever
-        //retry this specific call - a busy display here means the message is genuinely lost, so
-        //report that honestly instead of claiming success. The "too many lines" reason is already
-        //ruled out above - a false here can only mean a busy display.
+        //Temporary: deviceMode/inputText stay untouched (like a non-indefinite scheduled message);
+        //after the hold the normal mode loop takes over. Nothing retries this call, so a busy display
+        //means the message is lost - reported as such.
         if (!showText(newText, (int)(durationSeconds * 1000))) {
           request->send(503, "text/plain", "Nothing was displayed - the display is busy right now. Try again shortly.");
           return;
         }
       } else {
-        //Permanent: switches the display into Text mode, same net effect as submitting the main
-        //form with deviceMode=text&inputText=<text>. Unlike the temporary branch above, a busy
-        //display here isn't a loss - deviceMode/inputText are set regardless, so the normal 1s
-        //mode-dispatch loop keeps retrying this exact message on its own until it succeeds.
+        //Permanent: switches to Text mode like the main form. A busy display isn't a loss - the
+        //mode loop keeps retrying.
         if (deviceMode != DEVICE_MODE_TEXT) {
           deviceMode = DEVICE_MODE_TEXT;
           writeFile(LittleFS, deviceModePath, deviceMode.c_str());
         }
         inputText = newText;
         showText(newText);
-        checkBootSnapshotFreshness(); //see its own comment (ESPMaster.ino) - re-sync right after a confirmed deviceMode change, not just on the periodic 30s check
+        checkBootSnapshotFreshness(); //re-sync now, not only on the 30s check
       }
 
       request->send(200, "text/plain", "OK");
     });
 
-    //Extension-side receiver for a primary's already-sliced, already-aligned display segment plus
-    //animation context - see multiple-units.md and ServiceExtensionFunctions.ino's own comments
-    //(pushSegmentToExtension()/applyExtensionDisplaySegment()). Plain form-urlencoded POST, same
-    //as every other endpoint in this file.
+    //Extension side: receives a primary's sliced, aligned segment plus animation context (see
+    //ServiceExtensionFunctions.ino). Plain form-urlencoded POST.
     webServer.on("/api/extension-display", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
-      //Pairing request from a primary (runPendingExtensionPairing()) - shares this route, each
-      //registered handler costs permanent heap. Needs this device's own admin password, never
-      //public; accepted in any role, so pairing can come before the role switch.
+      //Pairing request from a primary (runPendingExtensionPairing()) - same route to save heap. Needs
+      //this device's admin password; accepted in any role, so pairing can precede the role switch.
       if (request->hasParam("pairSecret", true)) {
         if (isAdminPasswordSet()) {
           String providedPassword = request->hasHeader("X-OTA-Password") ? request->getHeader("X-OTA-Password")->value() : "";
@@ -2970,7 +2587,7 @@ void setup() {
         request->send(200, "text/plain", F("Paired"));
         return;
       }
-      //Display push: signed with the pairing secret, never the admin password (OW-10/OW-02).
+      //Display push: signed with the pairing secret, never the admin password.
       int linkCheck = checkExtensionLinkSignature(request);
       if (linkCheck == 409) {
         request->send(409, "text/plain", currentLinkNonce());
@@ -2997,11 +2614,9 @@ void setup() {
       String staggerMsRaw = request->hasParam("staggerMs", true) ? request->getParam("staggerMs", true)->value() : "0";
       String globalOffsetRaw = request->hasParam("globalOffset", true) ? request->getParam("globalOffset", true)->value() : "0";
       String combinedWidthRaw = request->hasParam("combinedWidth", true) ? request->getParam("combinedWidth", true)->value() : String(unitsAmount);
-      //Optional (older primaries don't send it) - how far the primary's line already is, see
-      //pushSegmentToExtension().
+      //Optional (older primaries don't send it): how far the primary's line already is.
       String startOffsetMsRaw = request->hasParam("startOffsetMs", true) ? request->getParam("startOffsetMs", true)->value() : "0";
-      //Same bounds the primary itself is held to (CODE_REVIEW_V7.md #3) - an unchecked staggerMs or
-      //width could otherwise schedule a unit's start hours into the future.
+      //Same bounds as on the primary - unchecked values could schedule a start hours ahead.
       if (!isValidAnimationMode(animationMode) || !isNumber(staggerMsRaw) || !isNumber(globalOffsetRaw) || !isNumber(combinedWidthRaw) || !isNumber(startOffsetMsRaw)) {
         request->send(400, "text/plain", "Invalid animationMode/staggerMs/globalOffset/combinedWidth/startOffsetMs");
         return;
@@ -3016,8 +2631,7 @@ void setup() {
         request->send(400, "text/plain", "staggerMs/globalOffset/combinedWidth/startOffsetMs out of range");
         return;
       }
-      //Clamped, not rejected: a late push (e.g. 0ms stagger, slow network) is still valid - every
-      //unit is simply already due. Anything past the longest possible stagger means the same.
+      //Clamped, not rejected: a late push is still valid, every unit is simply due.
       startOffsetMs = min(startOffsetMs, staggerMs * combinedWidth);
 
       //Queued for loop() and acknowledged right away - see pendingExtensionDisplayQueued's comment.
@@ -3031,13 +2645,11 @@ void setup() {
       request->send(200, "text/plain", currentLinkNonce()); //the nonce the next push has to name
     });
 
-    //Primary-side extension host list (multiple-units.md) - GET returns the configured hosts plus
-    //their last-known health-check status, POST replaces the whole list (same "client always
-    //submits the complete list" convention as /api/rotation-items).
+    //Primary-side extension host list: GET returns hosts plus last health-check status, POST
+    //replaces the whole list.
     webServer.on("/api/extension-devices", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
-      //Changing the list always needs the password, whatever "settings public" says: pairing sends
-      //the link secret to a listed host, and a host an outsider adds would receive the display
-      //content (security review 2026-10-12, CR-01).
+      //Changing the list always needs the password: pairing sends the link secret to a listed host,
+      //and an added host would receive the display content.
       if (rejectIfPasswordRequired(request, request->method() == ASYNC_HTTP_GET && accessControlSettingsPublic)) return;
 
       if (request->method() == ASYNC_HTTP_GET) {
@@ -3068,9 +2680,8 @@ void setup() {
 
       // HTTP_POST
       if (request->hasParam("action") && request->getParam("action")->value() == "pair") {
-        //Queued for loop() (runPendingExtensionPairing()) - a blocking HTTP request doesn't
-        //belong in this callback. 'password' is the extension's own admin password, held in RAM
-        //only until that one request is sent; empty if the extension has none.
+        //Queued for loop() (runPendingExtensionPairing()). 'password' is the extension's admin
+        //password, kept in RAM only until that request is sent; empty if it has none.
         String indexRaw = request->hasParam("index", true) ? request->getParam("index", true)->value() : "";
         int index = isNumber(indexRaw) ? indexRaw.toInt() : -1;
         if (index < 0 || index >= extensionDeviceCount) {
@@ -3099,9 +2710,7 @@ void setup() {
       request->send(200, "text/plain", "OK");
     });
 
-    //Device role (multiple-units.md) - own small endpoint, same pattern as mDNS hostname/quiet
-    //hours/MQTT rather than folding a fourth, independent concern into the already-large
-    ///api/settings handler.
+    //Device role - own small endpoint instead of growing /api/settings.
     webServer.on("/api/device-role", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return;
       if (!request->hasParam("role", true)) {
@@ -3133,27 +2742,19 @@ void setup() {
       }
       if (changed) {
         checkBootSnapshotFreshness();
-        //combinedUnitsAmount() changes the moment this device stops/starts counting extensions,
-        //and a link-mode switch changes what every extension gets sent - see
-        //displayRenderGeneration's own comment (CODE_REVIEW_V6.md #3).
+        //Changes the combined width and what extensions get - see displayRenderGeneration.
         displayRenderGeneration++;
       }
       request->send(200, "text/plain", "OK");
     });
 
 #if WIFI_USE_DIRECT == false
-    //Consolidates all five former WiFi endpoints (/api/wifi/reset, /api/wifi/scan,
-    ///api/wifi/scan-result, /api/wifi/connect, /api/wifi/connect-status) into a single registered
-    //route - GET dispatches by ?type=, POST by ?action=. One registration handling both methods,
-    //rather than two separate GET/POST registrations on the same path (tried that first; GET
-    //requests were reproducibly routed to the POST handler instead - not chasing that library
-    //quirk down, this single-registration form sidesteps it and saves even more).
+    //All five former WiFi endpoints in one route: GET by ?type=, POST by ?action=. One registration
+    //for both methods - separate GET/POST registrations on this path routed GETs to the POST handler.
     webServer.on("/api/wifi", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (request->method() == ASYNC_HTTP_GET) {
-        //Gated same as every POST action on this endpoint - these GET polling reads would
-        //otherwise leak nearby-network scan results and the device's own currently-connected
-        //SSID/IP to anyone unauthenticated on the LAN. The same browser/session that started a
-        //scan or connect via the (already-gated) POST action already has the password.
+        //Gated like the POST actions - scan results and the current SSID/IP aren't for anyone on the
+        //LAN; the session that started the scan already has the password.
         if (rejectIfPasswordRequired(request, accessControlWifiPublic)) return;
 
         String type = request->hasParam("type") ? request->getParam("type")->value() : "";
@@ -3173,8 +2774,7 @@ void setup() {
             doc["scanning"] = false;
             JsonArray networks = doc["networks"].to<JsonArray>();
 
-            //Dedupe by SSID (the same network can show up once per BSSID/channel/repeater) - keep
-            //only the strongest-signal entry for each name, sorted strongest-first by scan order.
+            //Dedupe by SSID (one entry per BSSID/channel/repeater), keeping the strongest.
             for (int i = 0; i < scanResult; i++) {
               String ssid = WiFi.SSID(i);
               if (ssid == "") {
@@ -3264,8 +2864,7 @@ void setup() {
       }
 
       if (action == "scan") {
-        //Kicks off an async network scan - see wifiScanRequested's comment above. Just sets a
-        //flag, the actual WiFi.scanNetworksAsync() call happens in loop().
+        //Only sets a flag; loop() starts WiFi.scanNetworksAsync().
         if (WiFi.scanComplete() == WIFI_SCAN_RUNNING || wifiScanRequested) {
           request->send(409, "text/plain", "A scan is already in progress");
           return;
@@ -3277,9 +2876,8 @@ void setup() {
       }
 
       if (action == "connect") {
-        //Connects to a new WiFi network without rebooting - drops the current connection
-        //immediately, before the new credentials are known to work; checkWifiConnectAttempt()
-        //reverts on failure.
+        //Connects without rebooting - the current connection drops at once;
+        //checkWifiConnectAttempt() reverts on failure.
         if (wifiConnectPhase != WIFI_CONNECT_NONE) {
           request->send(409, "text/plain", "A connection attempt is already in progress");
           return;
@@ -3289,8 +2887,7 @@ void setup() {
           return;
         }
 
-        //Captured now, fast/synchronous - by the time loop() actually calls WiFi.begin() with the
-        //new credentials, WiFi.SSID()/psk() would already reflect them, not the old ones anymore.
+        //Captured now - by the time loop() calls WiFi.begin(), SSID()/psk() already show the new ones.
         wifiConnectOldSsid = WiFi.SSID();
         wifiConnectOldPassword = WiFi.psk();
         wifiConnectNewSsid = request->getParam("ssid", true)->value();
@@ -3303,10 +2900,7 @@ void setup() {
       }
 
       if (action == "set-hostname") {
-        //Shares this endpoint's registration rather than getting a dedicated route - each
-        //registered handler costs a small permanent heap allocation that's never freed. Gated by
-        //the same accessControlWifiPublic as every other action on this route - the hostname
-        //isn't a secret, but changing it is a device-state change like the others here.
+        //Same registration to save heap, gated by accessControlWifiPublic like the other actions.
         if (!request->hasParam("hostname", true)) {
           request->send(400, "text/plain", "'hostname' is required");
           return;
@@ -3322,9 +2916,7 @@ void setup() {
         writeFile(LittleFS, mdnsHostnamePath, mdnsHostname.c_str());
 
 #if USE_MULTICAST == true
-        //MDNS.begin() only sets up the responder once, in setup() - calling it again without
-        //end()ing the previous one first would just silently keep answering under the old name
-        //alongside (or instead of) the new one, depending on the library's internal state.
+        //MDNS.begin() only runs once in setup(); calling it again without end() keeps the old name.
         MDNS.end();
         if (MDNS.begin(mdnsHostname.c_str())) {
           SerialPrintln(F("mDNS hostname changed - now reachable as ") + mdnsHostname + F(".local"));
@@ -3333,7 +2925,7 @@ void setup() {
         }
 #endif
 
-        checkBootSnapshotFreshness(); //see its own comment (ESPMaster.ino) - re-sync right after this confirmed change, not just on the periodic 30s check
+        checkBootSnapshotFreshness(); //re-sync now, not only on the 30s check
         request->send(200, "text/plain", "Hostname updated");
         return;
       }
@@ -3378,17 +2970,11 @@ void setup() {
     });
 #endif
 
-    //This endpoint has no GET - a password must never be returned in plaintext. The per-category
-    //access-control toggle STATES (not the password) are public, non-secret info and are read via
-    //GET /api/settings instead (see minimalDoc there).
-    //
-    //POST changes the password and/or the access-control toggles together, always gated behind
-    //the CURRENT password matching - this is the one place in the whole access-control system
-    //that is never itself toggleable-public (see accessControlTextPublic's comment in
-    //ESPMaster.ino), otherwise a category opened via "settings public" could reopen every other
-    //category including firmware/flash through this same endpoint.
-    //Web UI login (see ServiceAccessControlFunctions.ino's session comment). GET /api/session is
-    //public: it only says whether the page should show its login dialog.
+    //No GET - a password is never returned (the toggle states come with GET /api/settings). POST
+    //changes the password and/or toggles and always needs the CURRENT password - this endpoint is
+    //never toggleable-public, or "settings public" could reopen every category, firmware included.
+    //Web UI login (see ServiceAccessControlFunctions.ino): GET /api/session is public; it only says
+    //whether the page should show its login dialog.
     webServer.on("/api/session", ASYNC_HTTP_GET, [](AsyncWebServerRequest * request) {
       String json = String(F("{\"loginRequired\":")) + (isLoginRequired() ? F("true") : F("false")) +
         F(",\"loggedIn\":") + (isAdminPasswordSet() && requestIsAuthenticated(request) ? F("true") : F("false")) + F("}");
@@ -3425,7 +3011,7 @@ void setup() {
 
     webServer.on("/api/logout", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       endLoginSession(request);
-      //Saved before answering - see /api/ota-password (CR-02). The cookie is cleared either way.
+      //Saved before answering (see /api/ota-password); the cookie is cleared either way.
       bool saved = saveLoginSessionsNow();
       AsyncWebServerResponse *response = request->beginResponse(saved ? 200 : 500, "text/plain", saved ? "OK" : "Logout could not be saved");
       response->addHeader("Set-Cookie", F(LOGIN_SESSION_COOKIE "=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict"));
@@ -3450,21 +3036,18 @@ void setup() {
         return;
       }
 
-      //newPassword is optional and MAY be empty - an empty value deliberately disables password
-      //protection globally (CODE_REVIEW.md #29's "muss komplett deaktivierbar sein" requirement).
-      //Omitting the param entirely (not present at all) leaves the password unchanged, so a
-      //request that only wants to update the access-control toggles doesn't have to resend it.
+      //newPassword is optional: empty switches protection off completely, absent leaves the password
+      //unchanged (so toggle-only updates needn't resend it).
       if (request->hasParam("newPassword", true)) {
-        //Empty still switches protection off; anything else needs 8+ characters (security review
-        //2026-10-12, OW-04). Checked before any session is revoked.
+        //Empty switches protection off; anything else needs 8+ characters. Checked before any
+        //session is revoked.
         size_t newPasswordLength = request->getParam("newPassword", true)->value().length();
         if (newPasswordLength > 0 && newPasswordLength < 8) {
           request->send(400, "text/plain", F("New password must be at least 8 characters (or empty to switch protection off)"));
           return;
         }
-        //No session may outlive the password it was created with - revoked and saved BEFORE the
-        //new password is, so a power cut or failed write can't leave old sessions on flash that
-        //a reboot would accept again (security review 2026-10-12, CR-02).
+        //Sessions are revoked and saved BEFORE the new password, so a power cut can't leave old
+        //sessions on flash that a reboot would accept.
         endAllLoginSessions();
         if (!saveLoginSessionsNow()) {
           request->send(500, "text/plain", "Could not revoke existing sessions - password not changed");
@@ -3474,9 +3057,8 @@ void setup() {
         SerialPrintln(!isAdminPasswordSet() ? F("OTA password cleared - protection now globally OFF") : F("OTA password changed"));
       }
 
-      //Every accessControl* toggle is optional per-request (a plain checkbox form only submits
-      //checked boxes) - an ABSENT param means "unchecked"/false, matching normal HTML form
-      //semantics, not "leave unchanged". The frontend always sends the full set together.
+      //Toggles follow checkbox semantics: an absent param means false, not "unchanged". The
+      //frontend always sends the full set.
       accessControlTextPublic = request->hasParam("accessControlText", true);
       accessControlSettingsPublic = request->hasParam("accessControlSettings", true);
       accessControlUnitsPublic = request->hasParam("accessControlUnits", true);
@@ -3490,15 +3072,14 @@ void setup() {
       writeFile(LittleFS, accessControlTimezonePublicPath, accessControlTimezonePublic ? "true" : "false");
       writeFile(LittleFS, accessControlSystemPublicPath, accessControlSystemPublic ? "true" : "false");
 
-      //Especially important here (Code_REVIEW_V5.md #01) - without this, a power cut shortly after
-      //a confirmed password change could let the OLD password become valid again on the next boot.
+      //A power cut right after a password change must not bring the old password back.
       checkBootSnapshotFreshness();
       request->send(200, "text/plain", "Security settings updated");
     });
 
     webServer.on("/api/timezone", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (request->method() == ASYNC_HTTP_GET) {
-        if (rejectIfPasswordRequired(request, accessControlTimezonePublic)) return; //OW-08
+        if (rejectIfPasswordRequired(request, accessControlTimezonePublic)) return;
         JsonDocument doc;
         doc["timezone"] = timezoneSetting;
         AsyncResponseStream *response = request->beginResponseStream("application/json");
@@ -3521,37 +3102,30 @@ void setup() {
         return;
       }
 
-      //isTimezoneLookupBusy() covers a PREVIOUS request whose slot was already taken but whose
-      //async lookup (checkTimezoneLookup(), ServiceAsyncTimeSyncFunctions.ino) hasn't finished
-      //yet - pendingTimezoneSlot.request alone would miss that window. timezoneLookupDeferredRequest
-      //additionally covers the narrow gap AFTER the lookup finishes but BEFORE loop()'s own finish
-      //block below has actually persisted the result and responded, so a request accepted during
-      //exactly that gap can't overwrite pendingTimezoneValue before the first result is saved under it.
+      //isTimezoneLookupBusy() covers a previous request still in its async lookup;
+      //timezoneLookupDeferredRequest covers the gap until loop() has saved and answered it - so a new
+      //request can't overwrite pendingTimezoneValue before the first result is saved.
       if (pendingTimezoneSlot.request != nullptr || isTimezoneLookupBusy() || timezoneLookupDeferredRequest != nullptr) {
         request->send(503, "text/plain", "Another timezone change is already in progress, try again shortly");
         return;
       }
 
-      //The actual lookup is deferred to loop() (see pendingTimezoneSlot's comment) via a
-      //genuinely non-blocking state machine (ServiceAsyncTimeSyncFunctions.ino), not run here.
+      //Deferred to loop() (non-blocking lookup, ServiceAsyncTimeSyncFunctions.ino).
       pendingTimezoneValue = newTimezoneValue;
       pendingTimezoneSlot.accept(request);
     });
 
 #if MQTT_ENABLE == true
-    //Own registration, like /api/timezone above - a genuinely new settings category, no existing
-    //route it naturally shares with (each registered handler costs a small permanent heap
-    //allocation that's never freed, see /api/quiet-hours below - a deliberate, not-free choice).
+    //Own registration for this settings category (each costs a little permanent heap).
     webServer.on("/api/mqtt", ASYNC_HTTP_GET | ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (request->method() == ASYNC_HTTP_GET) {
-        if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return; //OW-08
+        if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
         JsonDocument doc;
         doc["mqttEnabled"] = mqttEnabled;
         doc["mqttBrokerHost"] = mqttBrokerHost;
         doc["mqttBrokerPort"] = mqttBrokerPort;
         doc["mqttUsername"] = mqttUsername;
-        //Password itself never sent back, same convention as the admin password - only whether one is
-        //set at all is exposed, not the value.
+        //The password is never sent back, only whether one is set.
         doc["mqttPasswordSet"] = mqttPassword != "";
         doc["mqttConnected"] = mqttEnabled && mqttClient.connected();
         AsyncResponseStream *response = request->beginResponseStream("application/json");
@@ -3563,13 +3137,9 @@ void setup() {
       // request->method() == HTTP_POST
       if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
 
-      //Validate EVERYTHING into local temporaries before touching any persisted/live state: a
-      //partial mutate-then-validate (e.g. host applied, then port rejected) would leave
-      //applyMqttSettingsChange() never called, so the live PubSubClient keeps a raw pointer into
-      //mqttBrokerHost's OLD buffer - a String reassignment elsewhere can reallocate that buffer,
-      //leaving the client holding a dangling pointer. On any validation failure, nothing changes
-      //at all; on success, every field is applied and persisted together, immediately followed by
-      //the one applyMqttSettingsChange() call that refreshes the pointer against the final buffer.
+      //Validate everything into temporaries first: a partial update (host applied, port rejected)
+      //would skip applyMqttSettingsChange() and leave PubSubClient pointing into mqttBrokerHost's old,
+      //possibly reallocated buffer. All or nothing, then one applyMqttSettingsChange().
       bool newMqttEnabled = request->hasParam("enabled", true); //same checkbox semantics as accessControl*
       String newBrokerHost = request->hasParam("brokerHost", true) ? request->getParam("brokerHost", true)->value() : mqttBrokerHost;
       uint16_t newBrokerPort = mqttBrokerPort;
@@ -3582,8 +3152,7 @@ void setup() {
         newBrokerPort = rawPort.toInt();
       }
       String newUsername = request->hasParam("username", true) ? request->getParam("username", true)->value() : mqttUsername;
-      //Same "present decides, absent means unchanged, empty explicitly clears" convention as
-      //otaPassword's newPassword - see that comment.
+      //Present = set, absent = unchanged, empty = clear (like newPassword).
       bool passwordProvided = request->hasParam("password", true);
       String newPassword = passwordProvided ? request->getParam("password", true)->value() : mqttPassword;
 
@@ -3601,16 +3170,13 @@ void setup() {
       }
 
       applyMqttSettingsChange();
-      checkBootSnapshotFreshness(); //see its own comment (ESPMaster.ino) - re-sync right after this confirmed change, not just on the periodic 30s check
+      checkBootSnapshotFreshness(); //re-sync now, not only on the 30s check
       request->send(200, "text/plain", "MQTT settings updated");
     });
 #endif
 
-    //No dedicated GET here - quietHoursEnabled/Start/End are already folded into GET /api/settings
-    //(see minimalDoc above). Adding a second registered route on top of that one reproducibly
-    //broke /api/settings' own response handling on this heap-constrained device - every registered
-    //handler costs a small permanent heap allocation that's never freed, and there's very little
-    //room to spare.
+    //No GET: the quiet-hours fields come with GET /api/settings. A second route here broke
+    ///api/settings on this heap-constrained device (every handler costs permanent heap).
     webServer.on("/api/quiet-hours", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
 
@@ -3637,13 +3203,12 @@ void setup() {
       writeFile(LittleFS, quietHoursEndPath, quietHoursEnd.c_str());
       SerialPrintln(F("Quiet Hours updated: enabled=") + String(quietHoursEnabled ? F("true") : F("false")) +
         F(" start=") + quietHoursStart + F(" end=") + quietHoursEnd);
-      checkBootSnapshotFreshness(); //see its own comment (ESPMaster.ino) - re-sync right after this confirmed change, not just on the periodic 30s check
+      checkBootSnapshotFreshness(); //re-sync now, not only on the 30s check
       request->send(200, "text/plain", "Quiet Hours updated");
     });
 
-    //Without this, ESPAsyncWebSrv's catch-all handler returns 500 instead of 404 for unknown routes.
-    //Same low-heap guard as GET "/"'s index.html serving (see its own comment) for consistency,
-    //though nothing else in this file serves a LittleFS file from a route that could land here.
+    //Without this, ESPAsyncWebSrv's catch-all returns 500 instead of 404. Same low-heap guard as
+    //GET "/".
     webServer.onNotFound([](AsyncWebServerRequest * request) {
       if (ESP.getFreeHeap() < 6000) {
         request->send(503, "text/plain", "Low memory, try again shortly");
@@ -3653,8 +3218,7 @@ void setup() {
     });
 
     delay(250);
-    //Established BEFORE the server starts accepting connections - see
-    //ServiceMemoryReserveFunctions.cpp's own comment (Punkt 207).
+    //Before the server accepts connections - see ServiceMemoryReserveFunctions.cpp.
     maintainEmergencyMemoryReserve();
     webServer.begin();
 
@@ -3676,9 +3240,7 @@ void setup() {
     SerialPrintln(F("#######################################################"));
   }
   else {
-    //Config load + crash-log persistence is handled unconditionally before WiFi is even
-    //attempted (see the single call site right before initWiFi() above), so nothing is needed
-    //here for this branch - neither has any WiFi dependency.
+    //Config load and crash-log persistence already ran before initWiFi().
 
     if (isPendingReboot) {
       SerialPrintln(F("Reboot is pending to be able to continue device function. Hold please..."));
@@ -3699,20 +3261,13 @@ void setup() {
   }
 }
 
-//Adaptive unit-readiness wait, replacing a fixed 30s post-boot wait - the RTC fix solved "does the
-//software know the right time", not "when can it physically show it".
-//
-//Factored out of loop() so setup() can also drive it synchronously, right before initWiFi() -
-//loop() itself cannot run until setup() returns, and initWiFi()'s blocking autoConnect() call
-//sits in setup() BEFORE loop() ever gets a chance to, so anything "non-blocking" written into
-//loop() alone was always gated behind it regardless. A function called from both setup() (blocking
-//here is fine - nothing else is waiting on setup() yet) and loop() (ticked once per iteration, a
-//no-op once DONE) decouples unit readiness/the first display from however long WiFi ends up taking.
+//Adaptive unit-readiness wait instead of a fixed 30s. Called from setup() (synchronously, right
+//before initWiFi(), whose autoConnect() blocks - loop() can't run before setup() returns) and from
+//loop() (a no-op once DONE), so the first display doesn't wait for WiFi.
 void tickUnitReadiness() {
   if (unitReadinessPhase == UNIT_READINESS_SCAN) {
-    //One scan attempt (with its own internal not-found retry, unchanged) to learn which
-    //addresses are actually present, before switching to lightweight per-unit polling below -
-    //repeating the full 64-address sweep on every poll tick would be needlessly slow.
+    //One scan to learn which addresses exist, then cheap per-unit polling instead of repeated
+    //64-address sweeps.
     SerialPrintln(F(""));
     SerialPrintln(F("=== I2C Bus Scan on Startup ==="));
     for (int scanAttempt = 0; scanAttempt < 3 && unitsAmount == 0; scanAttempt++) {
@@ -3728,8 +3283,7 @@ void tickUnitReadiness() {
       unitReadinessPhase = UNIT_READINESS_POLLING;
       unitReadinessLastPollAt = millis();
     } else {
-      //Nothing found at all - nothing to poll/wait ready for (showText() already no-ops with 0
-      //units regardless, same as before this change).
+      //Nothing found - nothing to wait for (showText() is a no-op with 0 units).
       unitReadinessPhase = UNIT_READINESS_DONE;
     }
   } else if (unitReadinessPhase == UNIT_READINESS_POLLING) {
@@ -3741,8 +3295,7 @@ void tickUnitReadiness() {
       bool anyBusy = false;
       for (int address = 0; address < unitsAmount; address++) {
         int status, offset;
-        //No response yet counts as "not ready" too - a unit whose Wire responder only just came
-        //up (or is deep in its own blocking calibrate() call) can legitimately miss a beat here.
+        //No response counts as not ready - a unit just starting or in calibrate() can miss a poll.
         if (!readUnitInfo(address, status, offset) || status == 1) { //1 = BUSY/MOVING, see scanI2CBus()'s status comment
           anyBusy = true;
           break;
@@ -3756,12 +3309,9 @@ void tickUnitReadiness() {
   }
 }
 
-//Periodic, throttled check (see BOOT_SNAPSHOT_CHECK_INTERVAL_MS) - rewrites the boot snapshot only
-//if something actually changed since the last write, bounding how stale it can get after an
-//UNCONTROLLED reset (crash, power loss - no isPendingReboot involved) without wearing this
-//device's already-confirmed-slow flash chip with unconditional periodic writes. Also called
-//directly right before every existing `isPendingReboot = true` site, so an INTENTIONAL reboot
-//never loses a change from within the last check interval either.
+//Throttled check (BOOT_SNAPSHOT_CHECK_INTERVAL_MS): rewrites the boot snapshot only if something
+//changed, bounding staleness after a crash or power loss without wearing the slow flash. Also
+//called right before every intentional reboot.
 unsigned long lastBootSnapshotCheckAt = 0;
 void checkBootSnapshotFreshness() {
   String currentSignature = computeSettingsSignature();
@@ -3770,18 +3320,12 @@ void checkBootSnapshotFreshness() {
   }
 }
 
-//One tick of the mode-driven display update - scheduled messages, countdown/countup text
-//recompute, rotation advance, then showText() for whichever deviceMode is active. Factored out of
-//loop() so setup() can also run it once, synchronously, BEFORE initWiFi() - see
-//tickUnitReadiness()'s comment for why that's necessary to actually show anything before WiFi
-//connects. Deliberately excludes checkWifiScanRequest()/checkWifiConnectAttempt()/checkMqttState()
-//- all meaningless before WiFi/the web server exist, and still called separately from loop().
+//One tick of the mode-driven display update (scheduled messages, countdown/countup, rotation, then
+//showText() for the active mode). Also run once from setup() before initWiFi() - see
+//tickUnitReadiness(). WiFi scan/connect and MQTT checks stay in loop().
 void performOneSecondDisplayTick() {
-  //An extension's own display content decisions are entirely ceded to whichever primary is
-  //configured to reach it (multiple-units.md) - its units are driven only by
-  //POST /api/extension-display, never by this device's own deviceMode/scheduled-messages/
-  //rotation/etc. Everything below this stays fully live for every other role, and an extension's
-  //own web UI/API remain fully usable - only this one per-second content-decision loop is skipped.
+  //An extension's content comes only from POST /api/extension-display - skip the content loop. Its
+  //web UI/API stay fully usable.
   if (deviceRole == DEVICE_ROLE_EXTENSION) {
     return;
   }
@@ -3796,13 +3340,10 @@ void performOneSecondDisplayTick() {
   if (!webRequestActive) {
     //Mode Selection
     if (deviceMode == DEVICE_MODE_ROTATION) {
-      //rotationCurrentAlignment ("" = inherit the default) is set every tick by checkRotation().
-      //Counts this second toward the current item's duration only once its first render has
-      //SETTLED - showText() already returns true the moment a job merely STARTS, well before the
-      //flaps have finished moving, and that movement time isn't readable display time. A
-      //temporary message (only those hold, finalPauseMs > 0) displaces the item: it has to be
-      //rendered and settle again afterwards. See rotationItemSettled's comment for why a running
-      //job alone doesn't stop the count once settled.
+      //rotationCurrentAlignment ("" = inherit) is set by checkRotation(). A second counts toward the
+      //item's duration only once its render has SETTLED - showText() returns true when a job merely
+      //starts, and flap movement isn't reading time. A temporary message (finalPauseMs > 0) displaces
+      //the item; it then has to render and settle again.
       bool foreignJob = isTemporaryMessageJobBusy();
       if (foreignJob) {
         rotationItemStarted = false;
@@ -3837,17 +3378,6 @@ void performOneSecondDisplayTick() {
 }
 
 void loop() {
-  //TEMPORARY DIAGNOSTIC - see diagMinFreeHeap's comment.
-  uint32_t diagFreeHeapNow = ESP.getFreeHeap();
-  if (diagFreeHeapNow < diagMinFreeHeap) {
-    diagMinFreeHeap = diagFreeHeapNow;
-    diagMinFreeHeapAtSec = millis() / 1000;
-  }
-  uint32_t diagMaxBlockNow = ESP.getMaxFreeBlockSize();
-  if (diagMaxBlockNow < diagMinMaxBlock) {
-    diagMinMaxBlock = diagMaxBlockNow;
-  }
-
 #if USE_MULTICAST == true
   MDNS.update();
 #endif
@@ -3866,8 +3396,7 @@ void loop() {
   //any deferred-request handling below, so an in-progress display update can't block loop().
   updateDisplayJob();
 
-  //I2C admin requests deferred here by the web handlers (see pendingRescanSlot's comment near
-  //unitsAmount) - checked first so a pending request gets served as soon as possible.
+  //I2C requests deferred by the web handlers (see PendingRequestSlot) - served first.
   if (pendingRescanSlot.request != nullptr) {
     std::shared_ptr<std::atomic<bool>> disconnected;
     AsyncWebServerRequest* deferredRequest = pendingRescanSlot.take(disconnected);
@@ -3889,9 +3418,7 @@ void loop() {
     AsyncWebServerRequest* deferredRequest = pendingUnitOffsetSlot.take(disconnected);
 
     bool writeOk = writeOffsetToUnit(pendingUnitOffsetUnitId, pendingUnitOffsetValue);
-    //Recalibration re-homes the unit - its previously-displayed letter is no longer
-    //guaranteed correct even though the cache's text/alignment are unchanged. See
-    //displayRenderGeneration's comment - CODE_REVIEW.md #14.
+    //Recalibration re-homes the unit - invalidate the display cache.
     displayRenderGeneration++;
 
     if (PendingRequestSlot::stillConnected(disconnected)) {
@@ -3911,17 +3438,11 @@ void loop() {
   //Login sessions created/renewed/ended by web requests - persisted here, not in the callbacks.
   saveLoginSessionsIfDirty();
 
-  //A direct timezone.setLocation() call (blocking DNS+UDP) could trip the software watchdog under
-  //real network stress, so this uses a genuinely non-blocking implementation
-  //(checkTimezoneLookup(), ServiceAsyncTimeSyncFunctions.ino) instead - the lookup spans multiple
-  //loop() ticks, so the deferred request has to be held across that whole span (
-  //timezoneLookupDeferredRequest/_Generation, declared near pendingTimezoneSlot).
-  //checkTimezoneLookup() itself already ran earlier this loop() tick, so tzLookupDone may already
-  //be true for the SAME tick a lookup finishes on.
+  //Finishes a POST /api/timezone: the non-blocking lookup (checkTimezoneLookup(), already run this
+  //tick) spans several ticks, so the request is held in timezoneLookupDeferredRequest meanwhile.
   if (pendingTimezoneSlot.request != nullptr && timezoneLookupDeferredRequest == nullptr && !isTimezoneLookupBusy()) {
     timezoneLookupDeferredRequest = pendingTimezoneSlot.take(timezoneLookupDeferredFlag);
-    //Snapshot NOW, not re-read from the shared pendingTimezoneValue global at finish time below -
-    //see timezoneLookupDeferredValue's own comment.
+    //Snapshot now (see timezoneLookupDeferredValue).
     timezoneLookupDeferredValue = pendingTimezoneValue;
     startTimezoneLookup(timezoneLookupDeferredValue);
   }
@@ -3936,10 +3457,9 @@ void loop() {
       timezoneSetting = timezoneLookupDeferredValue;
       writeFile(LittleFS, timezonePath, timezoneSetting.c_str());
       SerialPrintln(F("Timezone changed to: ") + timezoneSetting);
-      //The active rule is now confirmed resolved regardless of how the original boot attempt
-      //went - stops a still-pending boot-retry from redundantly re-resolving an already-correct value.
+      //The rule is resolved now - cancel any pending boot retry.
       bootTimezoneRuleResolved = true;
-      checkBootSnapshotFreshness(); //see its own comment (ESPMaster.ino) - re-sync right after this confirmed change, not just on the periodic 30s check
+      checkBootSnapshotFreshness(); //re-sync now, not only on the 30s check
     } else {
       SerialPrintln(F("Timezone change rejected: '") + timezoneLookupDeferredValue + F("' not recognized"));
     }
@@ -3953,10 +3473,8 @@ void loop() {
     }
   }
 
-  //Consumes the boot-time (or a retry of it) lookup's own result exactly once. Only reacts to a
-  //completion that has NO associated HTTP request (timezoneLookupDeferredRequest == nullptr) - an
-  //explicit POST /api/timezone's own outcome is fully handled by the block directly above and
-  //must never be reinterpreted as a boot/retry result here.
+  //Consumes the boot lookup's (or its retry's) result once - only a completion without an HTTP
+  //request; a POST /api/timezone result is handled above.
   if (bootTimezoneLookupPending && timezoneLookupDeferredRequest == nullptr && tzLookupDone) {
     bootTimezoneLookupPending = false;
     if (tzLookupResult) {
@@ -3968,10 +3486,8 @@ void loop() {
     }
   }
 
-  //Fires the scheduled retry once due - deliberately steps aside if a real user-initiated
-  ///api/timezone request is currently pending (harmless either way, isTimezoneLookupBusy() would
-  //also block it, but avoiding the race entirely means a real request never has to wait behind an
-  //automatic background retry it didn't ask for).
+  //Fires the scheduled retry when due, but steps aside while a real /api/timezone request is
+  //pending.
   if (!bootTimezoneRuleResolved && !bootTimezoneLookupPending && nextBootTimezoneRetryAt != 0 &&
       millisReached(nextBootTimezoneRetryAt) && !isTimezoneLookupBusy() && pendingTimezoneSlot.request == nullptr) {
     SerialPrintln(F("Retrying boot timezone lookup for: ") + timezoneSetting);
@@ -3994,10 +3510,7 @@ void loop() {
       int status = -2;
       int offset = -1;
       bool online;
-      //Default is the light 3-byte status+offset read, not the 8-byte one with phase/progress/
-      //diagnostics - the Administration page never displays those. ?detail=1 opts into the heavy
-      //read (added the two diagnostic counters 2026-09-10 alongside phase/progress, rather than a
-      //separate query param - two extra I2C bytes is negligible next to the existing 6).
+      //Light 3-byte read by default; ?detail=1 adds phase/progress and the diagnostic counters.
       if (pendingUnitsInfoRequestDetail) {
         int phase = -1;
         int progress = -1;
@@ -4011,8 +3524,7 @@ void loop() {
         doc["units"][unitIndex]["progress"] = progress;
         doc["units"][unitIndex]["unexpectedHomeTriggerCount"] = unexpectedHomeTriggerCount;
         doc["units"][unitIndex]["slowHomeSearchCount"] = slowHomeSearchCount;
-        //255/255/255 means "unit firmware predates version reporting" (idle-bus read, not a real
-        //version) - see readUnitInfo()'s 10-arg overload comment. Reported as null, not "v255.255.255".
+        //255/255/255 = firmware without version reporting (idle-bus read) - reported as null.
         bool versionKnown = !(fwVersionMajor == 255 && fwVersionMinor == 255 && fwVersionPatch == 255) && fwVersionMajor >= 0;
         if (versionKnown) {
           doc["units"][unitIndex]["firmwareVersion"] = String(fwVersionMajor) + "." + String(fwVersionMinor) + "." + String(fwVersionPatch);
@@ -4093,13 +3605,11 @@ void loop() {
     uint32_t rounded = (otaBeginSize + 0xFFF) & 0xFFFFF000; //round up to a flash sector
     uint32_t updateSize = (rounded > 0 && rounded < maxSketchSpace) ? rounded : maxSketchSpace;
 
-    //Both 4KB OTA buffers (Update's internal sector buffer, allocated inside begin(), and
-    //otaChunkBuffer) go to a second heap in IRAM if the build has one (code-review-V7 Punkt C) - an upload
-    //is started from the open web UI, exactly when DRAM is tightest. The heap selection is global,
-    //so these scopes stay yield-free and allocate nothing else. Falls back to DRAM if IRAM has no
-    //room, or without one: mmu=3232 since 5.0.1, as 4816H's half-size flash cache stalled outgoing
-    //connections (BUILD_INFO Punkt 260) - HeapSelectIram is a no-op there. free()/delete[] find the
-    //right heap by address, so nothing else changes.
+    //Both 4KB OTA buffers (Update's sector buffer and otaChunkBuffer) go to a second IRAM heap if
+    //the build has one - uploads start from the open web UI, when DRAM is tightest. The heap
+    //selection is global, so these scopes stay yield-free and allocate nothing else. With mmu=3232
+    //(since 5.0.1) there is no IRAM heap and HeapSelectIram is a no-op; free()/delete[] find the
+    //right heap by address.
     bool ok;
     {
       HeapSelectIram iramHeap;
@@ -4110,8 +3620,7 @@ void loop() {
     }
     if (ok) {
       otaBytesWritten = 0;
-      //Allocated here, not statically - free heap on this device is chronically tight, no reason
-      //to hold 4KB for a rarely-used feature the other 99% of the time.
+      //Allocated only while uploading - free heap is tight.
       if (otaChunkBuffer != nullptr) {
         delete[] otaChunkBuffer; //shouldn't happen (always freed below before this runs again), don't leak if it somehow does
       }
@@ -4125,7 +3634,7 @@ void loop() {
       ok = (otaChunkBuffer != nullptr);
       if (!ok) {
         SerialPrintln(F("Firmware upload: could not allocate chunk buffer"));
-        Update.end(false); //release Update's internal "running" lock - see the #79-era lesson below
+        Update.end(false); //release Update's "running" lock (see below)
       }
     } else {
       SerialPrintln(F("Firmware upload: Update.begin() failed"));
@@ -4139,16 +3648,13 @@ void loop() {
     otaPendingPhase = OTA_PHASE_NONE;
 
   } else if (otaPendingPhase == OTA_PHASE_WRITE) {
-    //otaPendingPhase only ever transitions to OTA_PHASE_WRITE from the /api/firmware-chunk outer
-    //handler above, which only does so once it has confirmed THIS request was the buffer's sole,
-    //still-current owner.
+    //OTA_PHASE_WRITE is only set once the chunk's request was confirmed as the buffer's owner.
     bool ok = (Update.write(otaChunkBuffer, otaChunkLen) == otaChunkLen);
     if (!ok) {
       SerialPrintln(F("Firmware upload: chunk write failed"));
       Update.printError(Serial);
-      //Must still call end() here (ignoring its result): Update.begin() refuses to start a new
-      //update while the previous one is still marked "running" internally, and only end() clears
-      //that - skipping this leaves every subsequent upload failing until a full reboot.
+      //end() is still needed (result ignored): begin() refuses while the previous update is marked
+      //"running", and only end() clears that.
       Update.end(false);
       delete[] otaChunkBuffer; //abort the whole upload - a missing chunk buffer makes the other
       otaChunkBuffer = nullptr; //two endpoints cleanly reject anything further
@@ -4163,20 +3669,11 @@ void loop() {
     otaPendingPhase = OTA_PHASE_NONE;
 
   } else if (otaPendingPhase == OTA_PHASE_FINISH) {
-    //Verify every declared byte actually arrived before accepting this as a complete update -
-    //Update.end(true)'s evenIfRemaining=true deliberately skips the library's own isFinished()
-    //check (see Updater.cpp), which alone would let /api/firmware-finish activate a truncated
-    //image if called early. evenIfRemaining still has to stay true for the real end() call below,
-    //though - Update.begin() rounds its internal target size UP to the next flash sector, always
-    //larger than the exact byte count actually transferred, so isFinished() would never be
-    //satisfied even for a genuinely complete, correctly-sized upload.
-    //
-    //Deliberately otaBytesWritten here, NOT Update.progress(): Updater.cpp's write() only advances
-    //progress() when a full SPI_FLASH_SEC_SIZE (4096) buffer gets flushed to flash; a trailing
-    //partial sector stays in Updater's internal _buffer and is only flushed inside end() - so
-    //Update.progress() legitimately under-reports for any image whose size isn't an exact
-    //multiple of 4096 (effectively every real image). otaBytesWritten instead counts bytes
-    //actually handed to (and accepted by) Update.write() call-by-call.
+    //Verify every declared byte arrived: end(true)'s evenIfRemaining skips the library's
+    //isFinished() check, so an early finish would activate a truncated image. evenIfRemaining stays
+    //true because begin() rounds the target up to a full sector. Counted with otaBytesWritten, not
+    //Update.progress() - that only advances per flushed 4096-byte sector, and the last partial
+    //sector is only flushed inside end().
     size_t received = otaBytesWritten;
     bool sizeMatches = (received == otaBeginSize);
     bool ok = false;
@@ -4210,27 +3707,18 @@ void loop() {
     Update.end(false);
     delete[] otaChunkBuffer;
     otaChunkBuffer = nullptr;
-    //A body that claimed ownership but then vanished mid-transfer (connection dropped before its
-    //outer handler ever ran) would otherwise leave otaChunkOwner permanently stuck, since only
-    //that request's own outer handler normally clears it - the same watchdog window that already
-    //frees the buffer for this case releases the claim too.
+    //A body that claimed ownership and then vanished would block otaChunkOwner forever - released
+    //by the same watchdog.
     otaChunkOwner = nullptr;
   }
 
-  // Separate from the block above on purpose: the flash-side result and the deferred request can
-  // become ready in either order.
-  //
-  // Gated on otaResultReady ALONE, not also on pendingFirmwareUploadSlot.request != nullptr:
-  // /api/firmware-finish's client can disconnect right after the request is accepted but before
-  // this loop() tick runs (PendingRequestSlot's own onDisconnect callback already nulls the
-  // slot's request pointer at that point) - reboot-flagging must still happen even then, since the
-  // flash write itself doesn't care whether anyone is still listening for its result. Whether to
-  // actually SEND the HTTP response is the only thing that legitimately depends on the request
-  // still being there.
+  // Separate from the block above: flash result and deferred request can be ready in either
+  // order. Gated on otaResultReady alone - the reboot must happen even if the client already
+  // disconnected; only sending the response depends on the request.
   if (otaResultReady) {
     if (otaResultSuccess && otaCompletedPhase == OTA_PHASE_FINISH) {
       SerialPrintln(F("Firmware update successful, rebooting..."));
-      checkBootSnapshotFreshness(); //see its own comment further down - keep the snapshot fresh before every intentional reboot
+      checkBootSnapshotFreshness(); //keep the snapshot fresh before rebooting
       isPendingReboot = true;
     } else if (!otaResultSuccess) {
       SerialPrintln(F("Firmware update failed"));
@@ -4259,14 +3747,10 @@ void loop() {
 
     SerialPrintln(F("Pushing firmware to Unit ") + String(unitIndex) + F("..."));
     String resultJson;
-    //Always runs to completion regardless of whether the client is still listening - see the
-    //comment on the onDisconnect handler for /unit-firmware-push above.
+    //Runs to completion even if the client left (see the onDisconnect handler).
     bool success = pushFirmwareToUnit(unitIndex, resultJson);
-    //Invalidate the display cache unconditionally, not just on success - pushFirmwareToUnit()'s
-    //very first step (requestUnitEnterBootloader()) already interrupts the unit's running app and
-    //reboots it into the bootloader regardless of whether the push that follows ultimately
-    //succeeds, so the unit's actual physical position may no longer match the cache either way.
-    //Same reasoning as forceUnitRecoveryReset()'s identical fix (ServiceI2CRecoveryFunctions.ino).
+    //Invalidate the display cache either way: the push already rebooted the unit into the
+    //bootloader, success or not.
     displayRenderGeneration++;
 
     if (PendingRequestSlot::stillConnected(disconnected)) {
@@ -4283,13 +3767,9 @@ void loop() {
     JsonDocument doc;
     doc["unitIndex"] = unitIndex;
 
-    //Same structural-collision guard as pushFirmwareToUnit() - see its comment
-    //(ServiceUnitFirmwareFunctions.ino). This probe is NOT actually read-only:
-    //requestUnitEnterBootloader() below genuinely reboots whatever answers at this address, and
-    //twibootReadChipInfo() itself is a 4-byte WRITE (register-pointer + address bytes) before its
-    //read. A colliding address is a real hazard here, not just "silently-wrong garbage" - also
-    //checked against the separate, fixed RTC collision (isReservedI2CAddress()), independent of
-    //unitsAmount.
+    //Same collision guard as pushFirmwareToUnit(): this probe isn't read-only -
+    //requestUnitEnterBootloader() reboots whatever answers there and twibootReadChipInfo() writes
+    //first. Also checked against the fixed RTC collision (isReservedI2CAddress()).
     bool collisionRisk = (expectedBootAddress < unitsAmount) || isReservedI2CAddress(expectedBootAddress);
 
     if (collisionRisk) {
@@ -4301,16 +3781,11 @@ void loop() {
       unsigned long bootloaderSearchStart = millis();
       uint8_t enterBootloaderResult = requestUnitEnterBootloader(unitIndex);
       SerialPrintln(F("  requestUnitEnterBootloader() Wire.endTransmission() = ") + String(enterBootloaderResult) + F(" (0 = success)"));
-      //Invalidate the display cache - this interrupts and reboots the unit's running app
-      //regardless of whether the probe below actually finds it in the bootloader afterward - see
-      //the identical fix/comment on pushFirmwareToUnit()'s call site above. Not reached in the
-      //collisionRisk branch above, which deliberately never sends this command at all.
+      //Invalidate the display cache - the unit's app is rebooted either way (not reached for a
+      //collision, which never sends the command).
       displayRenderGeneration++;
 
-      //Same retry/backoff as pushFirmwareToUnit() - give the watchdog reset + twiboot startup
-      //time to happen. Probes ONLY unitIndex's own expected address, not a full scan of the whole
-      //bootloader address range - see findExpectedBootloaderAddress()'s comment
-      //(ServiceUnitFirmwareFunctions.ino).
+      //Same retry/backoff as pushFirmwareToUnit(); probes only unitIndex's own address.
       TwibootChipInfo chipInfo;
       int bootAddress = findExpectedBootloaderAddress(unitIndex, chipInfo, bootloaderSearchStart) ? expectedBootAddress : -1;
 
@@ -4328,10 +3803,8 @@ void loop() {
       doc["pageSize"] = chipInfo.pageSize;
       doc["bootloaderStart"] = chipInfo.bootloaderStart;
 
-      //Reads twiboot's own version string while still in the bootloader - cheap (one more small
-      //I2C transaction) and this is already the one place this project talks to the bootloader on
-      //demand. Reports the SF-TWIBOOT vX.Y string from VERSION_STRING (see twibootReadVersion()'s
-      //comment) - tells you which fork build the unit was flashed with.
+      //Reads twiboot's version string (SF-TWIBOOT vX.Y) while in the bootloader - shows which build
+      //the unit was flashed with.
       char bootloaderVersion[17];
       if (twibootReadVersion(bootAddress, bootloaderVersion, sizeof(bootloaderVersion))) {
         doc["bootloaderVersion"] = bootloaderVersion;
@@ -4347,8 +3820,8 @@ void loop() {
       Wire.setClockStretchLimit(25000);
 #endif
 
-      //Explicitly ask to return to the app - twiboot's own ~1000ms idle-timeout wasn't reliable in
-      //practice (unit stayed in the bootloader 44+s once, needed a power cycle).
+      //Explicitly return to the app - twiboot's ~1000ms idle timeout wasn't reliable (a unit once
+      //stayed 44+s in the bootloader).
       bool returnedToApp = twibootStartApplication(bootAddress);
       doc["returnedToApp"] = returnedToApp;
       doc["note"] = returnedToApp
@@ -4365,7 +3838,7 @@ void loop() {
   }
 #endif
 
-  //Reboot in here as if we restart within a request handler, no response is returned
+  //Reboot from loop() - rebooting inside a request handler would never send the response
   if (isPendingReboot) {
     SerialPrintln(F("Rebooting Now... Fairwell!"));
     SerialPrintln(F("#######################################################"));
@@ -4382,22 +3855,17 @@ void loop() {
     wifiManager.resetSettings();
     delay(100);
 
-    checkBootSnapshotFreshness(); //see its own comment further down - keep the snapshot fresh before every intentional reboot
+    checkBootSnapshotFreshness(); //keep the snapshot fresh before rebooting
     isPendingReboot = true;
     return;
   }
 #endif
 
-  //isWifiConfigured only ever LATCHES true, once, inside initWiFi() (setup()) - it never gets
-  //corrected back if the initial connect attempt genuinely failed (a brief drop after a
-  //successful connect is instead handled by the SDK's own auto-reconnect). A router/AP outage
-  //overlapping THIS device's boot window would otherwise leave it stuck showing "OFFLINE" until a
-  //manual power cycle. Fixed in two parts: (1) render "OFFLINE" as a transient overlay via
-  //showText()'s own alignment-override parameter instead of mutating the user's real settings -
-  //the original deviceMode is never touched; (2) periodically retry the STA connection ourselves
-  //in the background (WiFiManager's own portal has already given up for good by the time control
-  //reaches loop() - see initWiFi()'s comment) and, on success, perform a single controlled reboot
-  //to run the exact same successful-boot sequence a normal connect would have.
+  //isWifiConfigured only latches true once in initWiFi(); if the first connect failed (e.g. router
+  //down during boot), the device would show "OFFLINE" until a power cycle. So "OFFLINE" is a
+  //transient overlay (deviceMode untouched), and the STA connection is retried in the background
+  //(WiFiManager's portal has given up by now); on success the device reboots once to run the
+  //normal boot sequence.
   if (!isWifiConfigured) {
     showText("OFFLINE", 0, ALIGNMENT_MODE_CENTER);
     delay(100);
@@ -4406,7 +3874,7 @@ void loop() {
       lastOfflineReconnectAttempt = millis();
       SerialPrintln(F("Still offline - retrying WiFi with the stored credentials..."));
       WiFi.mode(WIFI_STA); //in case autoConnect()'s own now-abandoned portal left AP_STA behind
-      WiFi.begin(); //no args = reconnect with whatever the SDK already has persisted (WiFi.persistent(true) is the core default)
+      WiFi.begin(); //no args = reconnect with the credentials persisted by the SDK
       unsigned long retryStart = millis();
       while (WiFi.status() != WL_CONNECTED && !millisReached(retryStart + 15000)) {
         delay(250);
@@ -4414,7 +3882,7 @@ void loop() {
       }
       if (WiFi.status() == WL_CONNECTED) {
         SerialPrintln(F("WiFi recovered - rebooting to complete normal startup"));
-        checkBootSnapshotFreshness(); //see its own comment further down - keep the snapshot fresh before every intentional reboot
+        checkBootSnapshotFreshness(); //keep the snapshot fresh before rebooting
         delay(100);
         ESP.restart();
       } else {
@@ -4435,11 +3903,8 @@ void loop() {
     isPendingUnitsReset = false; //nothing to reset, don't leave this stuck pending
   }
   
-  //ezTime's own auto-sync is disabled (setInterval(0) in setup()) - events() is now a permanent
-  //no-op, not called here anymore. checkNtpSync() (ServiceAsyncTimeSyncFunctions.ino) replaces it
-  //with a genuinely non-blocking implementation. checkTimezoneLookup() is the equivalent
-  //replacement for the /api/timezone endpoint's own network lookup - see pendingTimezoneSlot's
-  //processing block further down for how it's driven. Neither call below ever blocks.
+  //ezTime's events() isn't called - its sync is off (setInterval(0)); checkNtpSync() and
+  //checkTimezoneLookup() replace its network calls without blocking.
   checkNtpSync();
   checkTimezoneLookup();
 
@@ -4458,10 +3923,8 @@ void loop() {
 
     performOneSecondDisplayTick();
 
-    //No-op for every role except primary (and even then, only once per
-    //EXTENSION_HEALTH_CHECK_INTERVAL_MS) - see ServiceExtensionFunctions.ino's own top comment for
-    //why a short-bounded blocking call here is an accepted exception to the usual "no blocking
-    //network calls" rule.
+    //No-op except on a primary (once per EXTENSION_HEALTH_CHECK_INTERVAL_MS); a short blocking
+    //call, see ServiceExtensionFunctions.ino.
     checkExtensionHealth();
 
     if (millisReached(lastBootSnapshotCheckAt + BOOT_SNAPSHOT_CHECK_INTERVAL_MS)) {
@@ -4469,7 +3932,7 @@ void loop() {
       checkBootSnapshotFreshness();
     }
 
-    //Cheap (no-op unless actually empty) - see ServiceMemoryReserveFunctions.cpp's own comment.
+    //Cheap no-op unless the reserve is empty (ServiceMemoryReserveFunctions.cpp).
     maintainEmergencyMemoryReserve();
   }
 }
@@ -4537,11 +4000,8 @@ int scanI2CBus() {
     detectedAmount++;
   }
   unitsAmount = detectedAmount;
-  //A rescan can mean a unit restarted and lost its displayed letter (or the unit count itself
-  //changed) - either way the physical display may no longer match the text-content cache, even
-  //though the cache's own text/alignment never changed. See displayRenderGeneration's comment.
-  //Bumped unconditionally rather than only when detectedAmount differs, since a unit restarting
-  //mid-scan with the SAME final count is exactly the case this needs to catch.
+  //A rescan can mean a unit restarted and lost its letter, even with the same count - always bump
+  //displayRenderGeneration.
   displayRenderGeneration++;
 
   // Summary report
@@ -4592,10 +4052,10 @@ int scanI2CBus() {
   SerialPrintln(F(""));
   if (unitsAmount == 0) {
     SerialPrintln(F("⚠ WARNING: No units detected at address 0. Display functionality is unavailable until this is fixed. Check:"));
-    SerialPrintln(F("  1. DIP switch settings (address 0 must be assigned to a unit)"));
+    SerialPrintln(F("  1. Address jumpers on J4 (address 0 must be assigned to a unit)"));
     SerialPrintln(F("  2. I2C wiring (SDA/SCL connections)"));
     SerialPrintln(F("  3. Power connections"));
-    SerialPrintln(F("  Use the Admin page's \"Rescan Units\" button once fixed, no reboot required."));
+    SerialPrintln(F("  Use the Units page's \"Rescan Units\" button once fixed, no reboot required."));
   } else {
     SerialPrintln(F("✓ ") + String(unitsAmount) + F(" unit(s) detected and ready."));
   }

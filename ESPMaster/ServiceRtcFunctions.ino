@@ -1,13 +1,8 @@
-//Optional DS3231 RTC module - lets Clock/Date modes show a correct time almost immediately after
-//power-on instead of waiting for WiFi/NTP, and keeps the clock correct through WiFi outages.
-//Entirely optional and auto-detected (probeRtc()).
-//
-//Plain direct I2C via Wire, no external RTC library - the DS3231 is a simple register-addressed
-//peripheral (7 contiguous BCD time registers at 0x00-0x06, status register at 0x0F). makeTime()/
-//breakTime()/tmElements_t come from ezTime itself.
+//Optional DS3231 RTC (auto-detected by probeRtc()): Clock/Date show the right time right after
+//power-on and through WiFi outages. Plain Wire access, no RTC library; makeTime()/breakTime() come
+//from ezTime.
 
-//rtcPresent/rtcOscillatorStopFlag are declared in ESPMaster.ino, not here - globals used by code
-//in that file must live there, since Arduino concatenates the main sketch file first.
+//rtcPresent/rtcOscillatorStopFlag live in ESPMaster.ino - the main sketch file comes first.
 
 uint8_t bcdToDec(uint8_t bcd) {
   return ((bcd >> 4) * 10) + (bcd & 0x0F);
@@ -17,10 +12,7 @@ uint8_t decToBcd(uint8_t dec) {
   return ((dec / 10) << 4) | (dec % 10);
 }
 
-//The DS3231 hours register can be factory/previously configured in 12h mode (bit6=1, bit5=AM/PM)
-//or 24h mode (bit6=0) - handle both on read, regardless of how the module happens to arrive.
-//writeRtcTime() below always writes in 24h mode going forward, so this only matters for however
-//the very first read (before this firmware ever wrote to it) finds it.
+//The hours register may still be in 12h mode from the factory; writeRtcTime() always writes 24h.
 uint8_t decodeRtcHours(uint8_t reg) {
   if (reg & 0x40) { //12-hour mode
     bool pm = (reg & 0x20) != 0;
@@ -32,8 +24,7 @@ uint8_t decodeRtcHours(uint8_t reg) {
   return bcdToDec(reg & 0x3F); //24-hour mode
 }
 
-//Cheap presence check - a bare address ping, no register read. Call once at boot before relying
-//on readRtcTime()/writeRtcTime() anywhere else.
+//Presence check (address ping only). Call once at boot.
 void probeRtc() {
   Wire.beginTransmission(RTC_I2C_ADDRESS);
   rtcPresent = (Wire.endTransmission(true) == 0); //real STOP, see readRtcTime()'s own comment for why
@@ -42,10 +33,8 @@ void probeRtc() {
     : F("RTC: no DS3231 detected - feature inactive, boot relies purely on WiFi/NTP as before"));
 }
 
-//Reads the DS3231's current time into outUtc (real UTC, exactly as stored - this project always
-//writes UTC to the RTC, never local time, avoiding any DST-ambiguity on read). Returns false (and
-//leaves outUtc untouched) if the RTC isn't present, a bus error occurs, or the Oscillator Stop
-//Flag is set (time not trustworthy) - callers must not seed the clock in that case.
+//Reads the RTC time (always stored as UTC) into outUtc. Returns false without touching outUtc if
+//the RTC is missing, the bus fails or the Oscillator Stop Flag says the time can't be trusted.
 bool readRtcTime(time_t &outUtc) {
   if (!rtcPresent) {
     return false;
@@ -99,16 +88,13 @@ bool readRtcTime(time_t &outUtc) {
   uint8_t month = bcdToDec(regMonth & 0x1F); //bit7 is the century flag, ignored - valid until 2099
   uint16_t year = 2000 + bcdToDec(regYear);
 
-  //makeTime() (ezTime, unqualified via its own `using namespace ezt;`) accepts a full calendar
-  //year directly and returns real UTC seconds - exactly what this project already stores in the
-  //RTC (see writeRtcTime() below).
+  //makeTime() (ezTime) takes the full year and returns UTC seconds.
   outUtc = makeTime(hour, minute, second, date, month, year);
   return true;
 }
 
-//Writes utc (real UTC, same convention as readRtcTime()) to the DS3231, always in 24h mode, and
-//explicitly clears the Oscillator Stop Flag afterward - some DS3231 clones don't clear it
-//automatically just because valid time was written. No-op if the RTC isn't present.
+//Writes utc to the RTC in 24h mode and clears the Oscillator Stop Flag explicitly (some clones
+//don't clear it on a time write). No-op without RTC.
 void writeRtcTime(time_t utc) {
   if (!rtcPresent) {
     return;
@@ -129,18 +115,14 @@ void writeRtcTime(time_t utc) {
   Wire.write(decToBcd(tm.Month));
   Wire.write(decToBcd(rawYear));
   if (Wire.endTransmission(true) != 0) {
-    //Time write itself failed - don't even attempt the status-register clear below against a bus
-    //that just NACKed, and give the next caller (Unit I2C traffic, or the next writeRtcTime()) a
-    //clean bus to start from instead of whatever state this transaction left it in.
+    //Bus NACKed: skip the status register and recover the bus for the next transaction.
     recoverI2CBus();
     return;
   }
   delayMicroseconds(500);
 
-  //Read-modify-write the status register rather than blindly writing 0x00 - registers 0x0E/0x0F
-  //also carry alarm/square-wave bits this project doesn't use but shouldn't silently reset.
-  //rtcOscillatorStopFlag is only cleared below once EVERY one of these three transactions
-  //actually succeeded, not unconditionally.
+  //Read-modify-write: 0x0E/0x0F also hold alarm/square-wave bits. rtcOscillatorStopFlag is only
+  //cleared once all three transactions succeeded.
   bool statusClearOk = false;
   Wire.beginTransmission(RTC_I2C_ADDRESS);
   Wire.write((uint8_t)0x0F);
@@ -165,6 +147,5 @@ void writeRtcTime(time_t utc) {
   if (statusClearOk) {
     rtcOscillatorStopFlag = false;
   }
-  //else: leave rtcOscillatorStopFlag exactly as readRtcTime() last found it - unknown-but-possibly-
-  //still-set is the honest answer, not a false "cleared".
+  //else: keep rtcOscillatorStopFlag as last read - it may still be set.
 }

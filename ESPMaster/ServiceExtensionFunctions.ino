@@ -1,18 +1,14 @@
-//Primary<->Extension communication (multiple-units.md) - lets a "primary" device stretch its
-//display logic across its own units plus one or more configured "extension" devices' units.
+//Primary<->extension link: a primary spreads its display across its own units plus the units of
+//configured extension devices.
 //
-//DELIBERATE, DOCUMENTED DEVIATION from this project's "no blocking network calls" lesson
-//(ServiceAsyncTimeSyncFunctions.ino's non-blocking DNS+UDP rewrite, Punkt 172): the health check,
-//display push, and extension-readiness poll below all use HTTPClient with a SHORT, bounded timeout
-//(EXTENSION_HTTP_TIMEOUT_MS, declared in ESPMaster.ino - see its own comment for why). Materially
-//different from that earlier anti-pattern: opt-in only (deviceRole==primary with a configured
-//host), ~10x shorter bound, and the health check runs on its own timer separate from the display
-//push, so an unreachable extension is already known before a push happens and is simply skipped.
+//Deliberate exception to the "no blocking network calls" rule (see ServiceAsyncTimeSyncFunctions.ino):
+//health check, push and readiness poll use HTTPClient with a short timeout
+//(EXTENSION_HTTP_TIMEOUT_MS, ESPMaster.ino). Acceptable because it's opt-in, ~10x shorter, and the
+//health check runs on its own timer, so an unreachable extension is skipped before any push.
 unsigned long lastExtensionHealthCheckAt = 0;
 
-//The effective display width for the Primary's own text-composition pipeline - own units plus
-//every currently-reachable configured extension's own unitsAmount. Returns plain unitsAmount
-//unchanged for every other role, and in mirror link mode (mirrors don't widen the display).
+//Effective display width for the primary: own units plus every reachable extension's units. Plain
+//unitsAmount in every other role and in mirror mode.
 int combinedUnitsAmount() {
   int total = unitsAmount;
   if (deviceRole != DEVICE_ROLE_PRIMARY || extensionLinkMode == EXTENSION_LINK_MODE_MIRROR) {
@@ -26,16 +22,13 @@ int combinedUnitsAmount() {
   return total;
 }
 
-//Polls every configured extension's existing GET /api/units once per
-//EXTENSION_HEALTH_CHECK_INTERVAL_MS. Ticked from loop()'s per-second block.
+//Polls each extension's GET /api/units every EXTENSION_HEALTH_CHECK_INTERVAL_MS (from loop()).
 void checkExtensionHealth() {
   if (deviceRole != DEVICE_ROLE_PRIMARY || extensionDeviceCount == 0) {
     return;
   }
   if (webFirmwareUpdateInProgress()) {
-    return; //don't contend with an active OTA update - a blocking HTTPClient call here hung the
-    //device solid (no crash-log entry, needed a power cycle) when it collided with an incoming
-    //firmware-chunk upload
+    return; //a blocking HTTPClient call during an OTA upload hung the device solid
   }
   if (!millisReached(lastExtensionHealthCheckAt + EXTENSION_HEALTH_CHECK_INTERVAL_MS)) {
     return;
@@ -76,22 +69,17 @@ void checkExtensionHealth() {
     SerialPrintln(F("Extension device \"") + ext.Host + F("\": ") + (ok ? (F("reachable, ") + String(ext.UnitsAmount) + F(" units"))
       : (F("unreachable (HTTP ") + String(httpCode) + (failure != "" ? F(", ") + failure : String()) + F(")"))));
 
-    //combinedUnitsAmount() only reflects THIS extension's units while Reachable - a transition
-    //either way, or a changed unit count while already reachable, changes the effective combined
-    //width even though the requested text itself never changed. See displayRenderGeneration's own
-    //comment (CODE_REVIEW_V6.md #3).
+    //Reachability or unit count changes alter the combined width - see displayRenderGeneration.
     if (ext.Reachable != wasReachable || ext.UnitsAmount != previousUnitsAmount) {
       displayRenderGeneration++;
     }
   }
 }
 
-//Signed pushes (security review 2026-10-12, OW-10/OW-02). A push used to carry the primary's admin
-//password in plaintext. Now the primary signs it with HMAC-SHA256 under the secret both devices
-//share since pairing, and only the signature travels. Replays: the extension hands out a random
-//nonce (in every answer, and a 409 when the push used a stale one) that each push has to name,
-//plus the primary's per-boot id and a counter - a seen counter is refused, and the extension
-//picks a new nonce whenever a new primary boot shows up, so nothing captured earlier matches.
+//Signed pushes: the primary signs each push with HMAC-SHA256 under the secret both devices share
+//since pairing; no password travels. Replays: every push names the extension's current random nonce
+//(sent in every answer, and with a 409 for a stale one) plus the primary's per-boot id and a
+//counter. A seen counter is refused, and a new primary boot gets a new nonce.
 uint32_t linkBootId = 0; //primary side, random per boot
 uint32_t linkSeq = 0;
 char linkNonce[17] = ""; //extension side, 16 hex chars
@@ -142,9 +130,9 @@ String linkSignature(const String &secretHex, const String &message) {
   return bytesToHex(mac, sizeof(mac));
 }
 
-//Extension side: checks a POST /api/extension-display push and advances the replay state.
-//Returns the HTTP status to answer with: 200, 401 (bad signature), 403 (not paired) or 409 (stale
-//nonce/counter - the answer names the current nonce, the primary retries with it).
+//Extension side: checks a POST /api/extension-display push and advances the replay state. Returns
+//200, 401 (bad signature), 403 (not paired) or 409 (stale nonce/counter; the answer names the
+//current nonce and the primary retries with it).
 int checkExtensionLinkSignature(AsyncWebServerRequest *request) {
   if (pairedPrimaryLinkSecret == "") {
     //Unpaired: only a device without an admin password still takes unsigned pushes, as before.
@@ -180,20 +168,15 @@ int checkExtensionLinkSignature(AsyncWebServerRequest *request) {
   return 200;
 }
 
-//Sends one already-sliced, already-aligned segment to one configured extension's POST
-///api/extension-display, along with animation context (globalOffset/combinedWidth) so the
-//extension can compute its own units' stagger delay with the same formula the primary uses
-//locally. Best-effort - a failed push is lost, the next showText() call simply retries. The one
-//exception is a 409 (stale nonce, e.g. right after either device restarted): retried once at once
-//with the nonce that answer named.
-//Does NOT re-check reachability itself - callers only invoke this for extensions the last
-//checkExtensionHealth() sweep found reachable.
+//Sends one sliced, aligned segment to an extension's POST /api/extension-display, with the
+//animation context (globalOffset/combinedWidth) so it staggers its units with the same formula.
+//Best effort - a failed push is lost and the next showText() retries; only a 409 (stale nonce, e.g.
+//after a restart) is retried at once with the named nonce. Callers only pass extensions the last
+//health check found reachable.
 bool pushSegmentToExtension(ExtensionDevice &ext, const String &segment, int globalOffset, int combinedWidth) {
-  //How far this line's animation already is on this device when the push arrives over there:
-  //time since the line started here (local unit writes, pushes to earlier extensions) plus an
-  //estimate of the network delay - so the extension's units start on the same shared clock instead
-  //of whenever the push happened to arrive (CODE_REVIEW_V7.md, common start time). Capped, since a
-  //round trip that included a slow TCP connect would otherwise skew the estimate.
+  //How far this line's animation already is here when the push arrives: time since the line started
+  //plus an estimated network delay, so both devices animate on one clock. Capped, since a slow TCP
+  //connect would skew the round-trip estimate.
   unsigned long startOffsetMs = (millis() - displayJob.lineWriteStartMillis) + min(ext.LastPushRoundTripMs / 2, 250UL);
   while (linkBootId == 0) {
     linkBootId = ESP.random();
@@ -242,10 +225,9 @@ bool pushSegmentToExtension(ExtensionDevice &ext, const String &segment, int glo
   return false;
 }
 
-//Primary side, ticked from loop(): runs a pairing queued by POST /api/extension-devices?action=pair.
-//Sends this device's link secret (created here on the first pairing) to the extension, authorized
-//by the extension's own admin password the user typed in. Both travel over the network this one
-//time, like any login; afterwards neither password is ever sent between the devices again.
+//Primary side, from loop(): runs a pairing queued by POST /api/extension-devices?action=pair. Sends
+//this device's link secret (created on first pairing), authorized by the extension's admin password.
+//Both cross the network this one time, like a login; afterwards no password is sent between them.
 void runPendingExtensionPairing() {
   if (!pendingExtensionPairing || webFirmwareUpdateInProgress()) {
     return;
@@ -291,23 +273,18 @@ void runPendingExtensionPairing() {
   }
 }
 
-//Called once per newly-written display line - slices displayJob.currentAlignedLine into one
-//segment per configured, reachable extension, in configuration order, starting right after this
-//device's own unitsAmount characters. In mirror link mode every extension instead gets this
-//device's own characters (offset 0, own width as the animation width, so each mirror unit starts
-//exactly when the primary's unit at the same index does) - applyExtensionDisplaySegment() on the
-//receiving side already cuts off or blank-pads a segment that doesn't match its unit count. The
-//push itself is a one-shot request; the receiving extension staggers its own writes using the
-//animation context sent along with it.
+//Per newly written line: slices displayJob.currentAlignedLine into one segment per reachable
+//extension (configuration order, after this device's own characters). In mirror mode every
+//extension gets this device's characters instead (offset 0, own width, so mirrored units start in
+//step); the receiver cuts or pads to its own unit count. One request per extension - the extension
+//staggers its own writes.
 void pushExtensionSegments() {
   if (deviceRole != DEVICE_ROLE_PRIMARY) {
     return;
   }
   if (webFirmwareUpdateInProgress()) {
-    //Same OTA-collision guard as checkExtensionHealth() above - any reachable extension is left
-    //undelivered this tick. Flag it the same as a failed push below so finishDisplayJob() forces a
-    //retry once OTA is done, instead of silently caching this render as complete
-    //(CODE_REVIEW_V6.md #4).
+    //OTA running: nothing is delivered this tick. Flagged like a failed push, so finishDisplayJob()
+    //retries after OTA instead of caching the render as complete.
     for (int i = 0; i < extensionDeviceCount; i++) {
       if (extensionDevices[i].Host != "" && extensionDevices[i].Reachable) {
         displayJob.hadWriteFailure = true;
@@ -322,32 +299,25 @@ void pushExtensionSegments() {
   for (int i = 0; i < extensionDeviceCount; i++) {
     ExtensionDevice &ext = extensionDevices[i];
     if (ext.Host == "" || !ext.Reachable) {
-      continue; //fail-soft: skip, don't block/retry inline - see this function's own top comment
+      continue; //skip, no inline retry
     }
     String segment = mirror
       ? displayJob.currentAlignedLine.substring(0, min(unitsAmount, ext.UnitsAmount))
       : displayJob.currentAlignedLine.substring(offset, offset + ext.UnitsAmount);
     if (!pushSegmentToExtension(ext, segment, mirror ? 0 : offset, combinedWidth)) {
-      //Leaves this extension showing stale content - mark the same write-failure flag
-      //writeDueAnimatedUnits() uses for a failed local I2C write, so finishDisplayJob() forces a
-      //retry on the next showText() call for the same text instead of caching this as delivered
-      //(CODE_REVIEW_V6.md #4).
+      //Stale content on that extension - flag it like a failed local write, so the next showText()
+      //with the same text retries.
       displayJob.hadWriteFailure = true;
     }
     offset += ext.UnitsAmount;
   }
 }
 
-//Extension-side receiver state: a pushed segment is written to this device's own units, bypassing
-//showText()/DisplayJob entirely - an extension has no line-wrap/alignment logic of its own, the
-//primary already did that against the combined width. Uses this device's OWN flapSpeed.
-//
-//globalOffset/combinedWidth let this device compute each unit's delay with the same
-//computeUnitAnimationDelayMs() formula the primary uses, so e.g. "outside-in" reads as one
-//continuous animation across devices. Run as a non-blocking per-tick state machine, exactly like
-//the primary's own writeDueAnimatedUnits(): every pass writes whichever units are due, in any
-//order - a plain "wait for unit 0, then unit 1, ..." loop wrote right-to-left/outside-in/inside-out
-//in the wrong order and blocked loop() for the whole animation (CODE_REVIEW_V7.md #2/#3).
+//Extension side: a pushed segment is written straight to this device's units, bypassing
+//showText()/DisplayJob (the primary already wrapped and aligned it), with this device's own
+//flapSpeed. globalOffset/combinedWidth give each unit the same computeUnitAnimationDelayMs() delay
+//as on the primary, so an animation reads as one across devices. Non-blocking per-tick state
+//machine like writeDueAnimatedUnits(), writing whichever units are due.
 struct ExtensionDisplayState {
   bool active = false;
   String segment;
@@ -359,16 +329,14 @@ struct ExtensionDisplayState {
   //Set back by the push's startOffsetMs, so delays count from the primary's line start.
   unsigned long startedAt = 0;
   uint64_t writtenMask = 0;
-  //Same semantics as the primary's displayJob.hadWriteFailure: one attempt per unit, a failed
-  //write is reported (GET /api/units' displayWriteFailed) so the primary re-sends the whole line
-  //instead of counting it as shown (CODE_REVIEW_V7.md #4).
+  //Like displayJob.hadWriteFailure: one attempt per unit; a failure is reported via GET /api/units
+  //(displayWriteFailed) so the primary re-sends the line.
   bool writeFailed = false;
 };
 ExtensionDisplayState extensionDisplay;
 
-//Ticked from loop() on every pass. Picks up a newly queued push (POST /api/extension-display),
-//replacing whatever was still animating - only the latest content matters. Only an extension
-//writes pushed content (cancelDisplayControllers() also drops it on a role change).
+//From loop(): picks up a newly queued push, replacing anything still animating. Only an extension
+//writes pushed content (a role change drops it via cancelDisplayControllers()).
 void tickExtensionDisplay() {
   if (deviceRole != DEVICE_ROLE_EXTENSION) {
     return;
@@ -419,11 +387,9 @@ void tickExtensionDisplay() {
   }
 }
 
-//The device role changed (POST /api/device-role, run from loop()): neither the local display job
-//nor a push received as an extension may keep writing for the old role - a staggered push from the
-//old primary or a local multi-line job would interleave with the new role's writes
-//(CODE_REVIEW_V8.md #6). The role handler bumped displayRenderGeneration, so the new role redraws
-//in full instead of trusting lastWrittenText.
+//Role changed (POST /api/device-role, from loop()): stop both the local job and any received push,
+//so nothing from the old role interleaves. displayRenderGeneration was bumped, so the new role
+//redraws in full.
 void cancelDisplayControllers() {
   if (isDisplayJobBusy()) {
     SerialPrintln(F("Cancelling the running display job (role change or WiFi setup)"));
@@ -439,9 +405,7 @@ void cancelDisplayControllers() {
   displayRenderGeneration++;
 }
 
-//Still has letters to send (or a push waiting to start) - GET /api/units reports this as
-//displayBusy, so the primary's readiness poll doesn't take idle motors for "done" between a push
-//and the moment the last staggered unit actually got its letter.
+//Still writing a push - reported as displayBusy, so the primary doesn't take idle motors for done.
 bool extensionDisplayBusy() {
   return pendingExtensionDisplayQueued || extensionDisplay.active;
 }
@@ -450,9 +414,8 @@ bool extensionDisplayWriteFailed() {
   return extensionDisplay.writeFailed;
 }
 
-//Persists a new extension host list - full replace, same convention as
-//replaceRotationItemsFromJson(). Resets Reachable/UnitsAmount for every entry so a changed list
-//doesn't carry over a previous entry's stale status.
+//Replaces the extension host list (full replace, like replaceRotationItemsFromJson()) and resets
+//every entry's Reachable/UnitsAmount.
 bool replaceExtensionDevicesFromJson(String json) {
   JsonDocument doc;
   if (deserializeJson(doc, json) || !doc.is<JsonArray>()) {
@@ -482,8 +445,7 @@ bool replaceExtensionDevicesFromJson(String json) {
     extensionDevices[extensionDeviceCount].Host = host;
     extensionDeviceCount++;
   }
-  //Release any leftover String heap buffers in now-unused slots - same reasoning as
-  //replaceRotationItemsFromJson()'s own identical cleanup loop.
+  //Free String buffers in now-unused slots (see replaceRotationItemsFromJson()).
   for (int i = extensionDeviceCount; i < EXTENSION_DEVICES_MAX; i++) {
     extensionDevices[i] = ExtensionDevice();
   }
@@ -497,8 +459,7 @@ bool replaceExtensionDevicesFromJson(String json) {
   serializeJson(outDoc, extensionDevicesJsonOut);
   writeFile(LittleFS, extensionDevicesPath, extensionDevicesJsonOut.c_str());
 
-  //The configured host list is part of the effective combined width/topology - see
-  //displayRenderGeneration's own comment (CODE_REVIEW_V6.md #3).
+  //The host list is part of the combined width - see displayRenderGeneration.
   displayRenderGeneration++;
   return true;
 }

@@ -36,10 +36,8 @@ String urlEncodeForFormBody(String value) {
   return encoded;
 }
 
-//Converts UTF-8 ä/ö/ü/Ä/Ö/Ü byte sequences to the internal single-byte placeholder codes ($/&/#)
-//that the physical letters[] array (ESPMaster.ino) actually has flaps for. Runs once, centrally,
-//in showText() - so every input path (Rotation, scheduled messages, /api/text) gets the same
-//handling, and raw 2-byte UTF-8 sequences never shift later characters' flap positions.
+//UTF-8 ä/ö/ü/Ä/Ö/Ü -> the single-byte placeholders ($/&/#) the flaps have. Runs once in
+//showText(), so every input path is handled alike and 2-byte sequences never shift flap positions.
 String normalizeUmlautsForDisplay(const String &text) {
   String result = "";
   result.reserve(text.length());
@@ -64,13 +62,10 @@ String normalizeUmlautsForDisplay(const String &text) {
   return result;
 }
 
-//Aligns string on center of array and fills empty chars with spaces. Callers pass unitsAmount or
-//combinedUnitsAmount() for a primary device with reachable extensions. No default value here
-//deliberately: Arduino's auto-prototype generator re-emits this signature as a forward
-//declaration, and a default argument in two places is a C++ redefinition error.
+//Centers the message in `width` (unitsAmount or combinedUnitsAmount()), padding with spaces. No
+//default argument: the generated prototype would repeat it (redefinition error).
 String centerString(String message, int width) {
-  //message.length() is unsigned - cast to int first, or a too-long message wraps the subtraction
-  //to a huge positive pad amount instead of negative, driving the loop below into an OOM crash.
+  //message.length() is unsigned - cast first, or an over-long message wraps to a huge pad (OOM).
   int padTotal = width - (int)message.length();
   if (padTotal > 0) {
     //Takes care of the left side
@@ -99,8 +94,7 @@ String createRepeatingString(char character) {
   return newMessage;  
 }
 
-//Aligns string on right side of array and fills empty chars with spaces. width - see
-//centerString()'s own comment.
+//Right-aligns the message in `width` (see centerString()).
 String rightString(String message, int width) {
   //Same unsigned-underflow issue as centerString() above.
   int rightSpaceAmount = width - (int)message.length();
@@ -113,8 +107,7 @@ String rightString(String message, int width) {
   return message;
 }
 
-//Aligns string on left side of array and fills empty chars with spaces. width - see
-//centerString()'s own comment.
+//Left-aligns the message in `width` (see centerString()).
 String leftString(String message, int width) {
   //Same unsigned-underflow issue as centerString() above.
   int leftSpaceAmount = width - (int)message.length();
@@ -139,24 +132,17 @@ int convertSpeed(const String &flapSpeed) {
   flapSpeedInt = flapSpeed.toInt();
   flapSpeedInt = map(flapSpeedInt, 1, 100, MIN_SPEED, MAX_SPEED);
 
-  //map() extrapolates, doesn't clamp - an out-of-range result maps to stepperSpeed=0 on the Unit,
-  //which divides by zero and spins the motor loop forever. Clamp defensively regardless of input.
+  //map() extrapolates; stepperSpeed=0 makes the unit divide by zero and spin forever - so clamp.
   flapSpeedInt = constrain(flapSpeedInt, MIN_SPEED, MAX_SPEED);
 
   return flapSpeedInt;
 }
 
-//Word-wraps `sentenceIn` into display lines of at most `width` characters (explicit "\n" breaks,
-//"-"-hyphenated over-long words) and returns only line number `wantedLine` (0-based; "" if there is
-//no such line, -1 to just count), setting `lineCount` to the total. Computed again for every line
-//instead of keeping a list of all lines: the display job only ever needs one line at a time, and a
-//500-character message no longer sits in memory a second time as words plus lines
-//(CODE_REVIEW_V7.md B). The lines aren't plain substrings of the input - hyphens get inserted and
-//whitespace collapsed - so positions/lengths into the original text wouldn't be enough.
-//
-//Same algorithm as the former processSentenceToLines() (host-tested line for line against it),
-//just walking the words in place and handing each finished line to emitLine below.
-//width - see centerString()'s own comment (same reasoning, same no-default-argument caveat).
+//Word-wraps `sentenceIn` into lines of at most `width` characters (explicit "\n" breaks,
+//hyphenated over-long words) and returns line `wantedLine` (0-based; "" if missing, -1 to count
+//only), setting `lineCount`. Recomputed per line instead of keeping all lines, so a long message
+//isn't held twice in memory. Lines aren't substrings of the input (hyphens added, whitespace
+//collapsed). No default argument for `width`, see centerString().
 String sentenceLine(const String &sentenceIn, int width, int wantedLine, int &lineCount) {
   String sentence = sentenceIn;
   String result;
@@ -212,7 +198,7 @@ String sentenceLine(const String &sentenceIn, int width, int wantedLine, int &li
     //Only measure the word up until the first newline
     int indexOfFirstNewline = wordItem.indexOf('\n');
 
-    //If the first characeter is not a newline see if we can fit it on the current line, otherwise don't bother
+    //If the first character is not a newline see if we can fit it on the current line, otherwise don't bother
     if (indexOfFirstNewline != 0)
     {
       //Determine the word length up till the first newline as to see if it will fit on the current line
@@ -240,9 +226,8 @@ String sentenceLine(const String &sentenceIn, int width, int wantedLine, int &li
 
       if (wordItemLetter == '\n')
       {
-        //Guard against a spurious empty line: a word filling the display width EXACTLY, right
-        //before an explicit line break, already flushed inProgressLine one letter earlier via the
-        //width-length check below - adding it again here would insert an empty line.
+        //A word filling the width exactly before an explicit break was already flushed - don't
+        //add an empty line.
         if (inProgressLine != "")
         {
           emitLine(inProgressLine);
@@ -251,9 +236,7 @@ String sentenceLine(const String &sentenceIn, int width, int wantedLine, int &li
       }
       else
       {
-        //If we need to break up the word as its too long, then we need to add a "-" - but NOT if
-        //the very next character is just this word's own trailing line break (reaching the
-        //display width one letter before an explicit newline isn't genuinely needing to break).
+        //Hyphenate an over-long word - but not right before the word's own line break.
         bool moreWordContentFollows = (letterIndex < currentWordLength - 1) && (wordItem[letterIndex + 1] != '\n');
         if (inProgressLine.length() == width - 1 && moreWordContentFollows)
         {
@@ -272,7 +255,7 @@ String sentenceLine(const String &sentenceIn, int width, int wantedLine, int &li
       }
     }
 
-    //Don't forgot the last processed item...
+    //Don't forget the last processed item
     if (isLastWord && inProgressLine != "")
     {
       emitLine(inProgressLine);
@@ -329,8 +312,7 @@ String convertUserDateFormatToEzTime(String userFormat) {
 
 //Used for ensuring a string is a number
 bool isNumber(const String &str) {
-  //An empty string must be rejected explicitly - strtol("", &endPtr, 10) consumes no digits but
-  //still leaves endPtr at the terminator, so the end-of-string check below would trivially pass.
+  //Reject "" explicitly - strtol() would leave endPtr at the terminator and pass the check below.
   if (str.length() == 0) {
     return false;
   }
@@ -387,9 +369,8 @@ bool isValidMdnsHostname(String hostname) {
   return true;
 }
 
-//An extension device address: an IPv4 address or a hostname (dot-separated DNS labels), optionally
-//followed by ":port". Rejects paths, queries, credentials and spaces - the value is pasted straight
-//into "http://<host>/api/..." (security review 2026-10-12, OW-11).
+//Extension address: IPv4 or hostname, optionally ":port". Rejects paths, queries, credentials and
+//spaces - the value goes straight into "http://<host>/api/...".
 bool isValidExtensionHost(String host) {
   int colon = host.indexOf(':');
   if (colon != -1) {

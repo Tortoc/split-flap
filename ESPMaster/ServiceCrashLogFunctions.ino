@@ -1,8 +1,7 @@
-//On-device crash reporter - makes crash diagnosis independent of a live serial connection.
-//custom_crash_callback() (called by the ESP8266 core right before its automatic reset) captures
-//the exception + stack into RTC memory, which survives a reset. checkAndPersistCrashLog() (setup(),
-//every boot) copies a fresh capture into a rotating LittleFS log so it survives a power cycle too;
-//GET /crash-log serves that to any browser.
+//On-device crash reporter, independent of a serial connection: custom_crash_callback() (called by
+//the core right before its reset) stores exception + stack in RTC memory, which survives a reset;
+//checkAndPersistCrashLog() copies it into a rotating LittleFS log at boot, served by
+//GET /api/crash-log.
 
 //custom_crash_callback() itself lives in ServiceCrashLogFunctions.cpp - see that file.
 #include "CrashLog.h"

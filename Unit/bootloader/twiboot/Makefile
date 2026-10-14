@@ -48,24 +48,13 @@ BOOTLOADER_START=0x3C00
 endif
 
 ifeq ($(MCU), atmega328p)
-# atmega328p - values below are CORRECTED for the split-flap project's actual hardware
-# (bare ATmega328P on the fae-pcb, https://github.com/codingcatgirl/split-flap-fae-pcb, with a
-# real 16MHz crystal - see Unit/BOOTLOADER_SETUP.md), NOT twiboot's own generic upstream example
-# below, which assumes a bare chip on the internal 8MHz RC oscillator. Verified against a
-# pristine, factory-fused unit (2026-08-10) - do not change without re-verifying against real
-# hardware, a wrong lfuse/F_CPU combination runs the chip at the wrong real clock speed with no
-# error message, silently breaking all timing-dependent code (stepper motor control, in our case).
-#
-# Upstream's own example (bare chip, internal 8MHz RC - WRONG for this project's hardware):
-#   Fuse L: 0xc2 (8Mhz internal RC-Osz.)
-#   Fuse H: 0xdc (512 words bootloader)
+# atmega328p on the fae-pcb with a real 16MHz crystal (see Unit/BOOTLOADER_SETUP.md) - NOT
+# upstream's example for a bare chip on the internal 8MHz RC oscillator (0xc2/0xdc/0xfd). Verified
+# on a factory-fused unit. A wrong lfuse/F_CPU pair runs the chip at the wrong clock without any
+# error (F_CPU/TIMER_IRQFREQ_MS in main.c match these values):
+#   Fuse L: 0xff (external crystal)
+#   Fuse H: 0xda (1024 words bootloader)
 #   Fuse E: 0xfd (2.7V BOD)
-#
-# Verified correct for this project (external 16MHz crystal, matching the factory-programmed
-# fuses this hardware already ships with - F_CPU/TIMER_IRQFREQ_MS in main.c are tuned to match):
-#   Fuse L: 0xff (external crystal, matches nano.build.f_cpu=16000000L in Arduino's own boards.txt)
-#   Fuse H: 0xda (1024 words bootloader - matches the factory-programmed boot section size)
-#   Fuse E: 0xfd (2.7V BOD, unchanged)
 AVRDUDE_MCU=m328p -F
 AVRDUDE_FUSES=lfuse:w:0xff:m hfuse:w:0xda:m efuse:w:0xfd:m
 

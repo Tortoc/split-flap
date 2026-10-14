@@ -7,10 +7,8 @@ void initialiseFileSystem() {
   SerialPrintln(F("LittleFS mounted successfully"));
 }
 
-//Load variables that are saved to the file system - tries the combined boot-snapshot cache first
-//(ONE file open; see bootSnapshotPath's own comment for why), falling back to the original
-//~30-individual-file path when the snapshot is missing or unparseable, which also (re)writes a
-//fresh snapshot for later boots.
+//Loads the persisted settings - from the boot snapshot (one file open, see bootSnapshotPath) or,
+//if it's missing or broken, from the ~30 individual files, which also writes a fresh snapshot.
 void loadValuesFromFileSystem() {
   bool snapshotNeedsWrite = false;
   if (!loadValuesFromBootSnapshot()) {
@@ -18,8 +16,8 @@ void loadValuesFromFileSystem() {
     loadValuesFromIndividualFiles();
     snapshotNeedsWrite = true;
   }
-  //A plaintext password from a firmware before 5.0.0 (or none at all) was just hashed - store the
-  //hash and remove every plaintext copy: its own file, and the snapshot rewritten below.
+  //A plaintext password from a firmware before 5.0.0 (or none) was just hashed - store the hash
+  //and remove every plaintext copy (its own file and the snapshot rewritten below).
   if (adminPasswordMigrated) {
     SerialPrintln(F("Admin password: now stored as a hash, plaintext copy removed"));
     writeFile(LittleFS, adminPasswordHashPath, adminPasswordHash.c_str());
@@ -34,13 +32,11 @@ void loadValuesFromFileSystem() {
   SerialPrintln(F("Loading Scheduled Messages"));
   loadScheduledMessagesFromFile();
 
-  //Loaded directly, not via replaceRotationItemsFromJson() - that also resets playback position
-  //and re-persists the file, which shouldn't happen on a plain boot load.
+  //Not via replaceRotationItemsFromJson() - that resets playback and re-saves the file.
   SerialPrintln(F("Loading Rotation Items"));
   loadRotationItemsFromFile();
 
-  //Extension device list - own file, not part of the boot snapshot. Loaded regardless of
-  //deviceRole, so a role switch doesn't require re-entering the list.
+  //Extension list: own file, not in the snapshot; loaded in every role so a role switch keeps it.
   String extensionDevicesJson = readFile(LittleFS, extensionDevicesPath, "[]");
   if (extensionDevicesJson != "" && extensionDevicesJson != "[]") {
     SerialPrintln(F("Loading Extension Devices"));
@@ -72,16 +68,13 @@ void loadValuesFromFileSystem() {
   SerialPrint(F("   Rotation Item Count: "));
   SerialPrintln(rotationItemCount);
 
-  //Baseline for the periodic dirty-check in loop() (checkBootSnapshotFreshness(), ESPMaster.ino) -
-  //without this, the very first check after boot would see "changed" (comparing against an empty
-  //starting signature) and do an unnecessary extra flash write moments after boot already wrote
-  //one (fallback path) or confirmed one was current (snapshot path).
+  //Baseline for checkBootSnapshotFreshness(), so the first check after boot doesn't see a change
+  //and write the snapshot again.
   lastSavedSettingsSignature = computeSettingsSignature();
 }
 
-//Attempts the fast path: one combined JSON file instead of ~30 individual ones. Returns false (and
-//touches nothing) if the file doesn't exist yet or fails to parse - the caller then falls back to
-//loadValuesFromIndividualFiles(). Either the whole snapshot is trusted, or none of it is.
+//Fast path: one combined JSON file instead of ~30. Returns false and touches nothing if it's
+//missing or doesn't parse - all of the snapshot or none of it.
 bool loadValuesFromBootSnapshot() {
   String snapshotJson = readFile(LittleFS, bootSnapshotPath, "");
   if (snapshotJson == "") {
@@ -104,8 +97,8 @@ bool loadValuesFromBootSnapshot() {
   deviceMode = String((const char*)(doc["deviceMode"] | DEVICE_MODE_TEXT));
   deviceRole = String((const char*)(doc["deviceRole"] | DEVICE_ROLE_STANDALONE));
   extensionLinkMode = String((const char*)(doc["extensionLinkMode"] | EXTENSION_LINK_MODE_EXTEND));
-  //"otaPassword" is only ever written by a firmware before 5.0.0 (plaintext, also after a
-  //downgrade and back) - it wins over a hash from earlier and gets migrated.
+  //"otaPassword" is only written by firmware before 5.0.0 (plaintext) - it wins over an older hash
+  //and gets migrated.
   if (doc["adminPasswordHash"].is<const char*>() && !doc["otaPassword"].is<const char*>()) {
     adminPasswordHash = doc["adminPasswordHash"].as<String>();
   } else {
@@ -148,8 +141,7 @@ bool loadValuesFromBootSnapshot() {
   return true;
 }
 
-//One readFile() per individual setting. Only reached as a fallback when no valid boot snapshot
-//exists yet (see loadValuesFromFileSystem()).
+//One readFile() per setting - fallback when there is no valid boot snapshot.
 void loadValuesFromIndividualFiles() {
   //Load values saved in LittleFS
   countdownToDateUnix = readFile(LittleFS, countdownPath, "0");
@@ -162,9 +154,8 @@ void loadValuesFromIndividualFiles() {
   deviceMode = readFile(LittleFS, deviceModePath, DEVICE_MODE_TEXT);
   deviceRole = readFile(LittleFS, deviceRolePath, DEVICE_ROLE_STANDALONE);
   extensionLinkMode = readFile(LittleFS, extensionLinkModePath, EXTENSION_LINK_MODE_EXTEND);
-  //Same precedence as the snapshot path: a plaintext file only exists if a firmware before 5.0.0
-  //wrote it, so it is newer than any hash file. exists() costs a file open each, but this path
-  //only runs without a usable snapshot.
+  //Same precedence as the snapshot path: a plaintext file can only come from a firmware before
+  //5.0.0, so it's newer than any hash file.
   bool legacyPasswordExists = LittleFS.exists(legacyOtaPasswordPath);
   if (legacyPasswordExists || !LittleFS.exists(adminPasswordHashPath)) {
     adminPasswordHash = hashAdminPassword(legacyPasswordExists ? readFile(LittleFS, legacyOtaPasswordPath, "") : String(F("splitflap")));
@@ -174,7 +165,7 @@ void loadValuesFromIndividualFiles() {
   }
   primaryLinkSecret = readFile(LittleFS, primaryLinkSecretPath, "");
   pairedPrimaryLinkSecret = readFile(LittleFS, pairedPrimaryLinkSecretPath, "");
-  mdnsHostname = readFile(LittleFS, mdnsHostnamePath, "split-flap"); //persisted, not a compile-time constant
+  mdnsHostname = readFile(LittleFS, mdnsHostnamePath, "split-flap");
   routerHostname = readFile(LittleFS, routerHostnamePath, "");
   setupApFixedPassword = readFile(LittleFS, setupApFixedPasswordPath, "");
 #if MQTT_ENABLE == true
@@ -185,12 +176,11 @@ void loadValuesFromIndividualFiles() {
   mqttUsername = readFile(LittleFS, mqttUsernamePath, "");
   mqttPassword = readFile(LittleFS, mqttPasswordPath, "");
 #endif
-  timezoneSetting = readFile(LittleFS, timezonePath, "Europe/Berlin"); //persisted, not a compile-time constant
-  cachedTimezonePosix = readFile(LittleFS, timezonePosixCachePath, ""); //"" = no successful lookup yet, see its own comment
+  timezoneSetting = readFile(LittleFS, timezonePath, "Europe/Berlin");
+  cachedTimezonePosix = readFile(LittleFS, timezonePosixCachePath, ""); //"" = no successful lookup yet
   clockFormat = readFile(LittleFS, clockFormatPath, clockFormat);
   dateFormat = readFile(LittleFS, dateFormatPath, dateFormat);
-  //readFile()'s defaultValue only applies if the file doesn't exist yet - a deliberately saved ""
-  //stays "" on later boots.
+  //The default only applies while the file doesn't exist - a saved "" stays "".
   countdownPrefix = readFile(LittleFS, countdownPrefixPath, countdownPrefix);
   countdownSuffix = readFile(LittleFS, countdownSuffixPath, countdownSuffix);
   countupPrefix = readFile(LittleFS, countupPrefixPath, countupPrefix);
@@ -210,13 +200,9 @@ void loadValuesFromIndividualFiles() {
   SerialPrintln(F("Loaded individual setting files (fallback path)"));
 }
 
-//Serializes every scalar setting loadValuesFromBootSnapshot() knows how to read back into
-//bootSnapshotPath, in ONE write. scheduledMessagesPath/rotationItemsPath are NOT included -
-//already their own single files, written by their own existing code paths.
-//
-//Returns whether the write actually succeeded - lastSavedSettingsSignature only advances on
-//confirmed success, so a failed write keeps looking "dirty" and gets retried on the next check
-//instead of silently going quiet.
+//Writes every scalar setting loadValuesFromBootSnapshot() reads back into bootSnapshotPath, in
+//one write (scheduled messages and rotation items have their own files). Returns whether it
+//succeeded; lastSavedSettingsSignature only advances on success, so a failure is retried.
 bool saveBootSnapshot() {
   JsonDocument doc;
   doc["countdownToDateUnix"] = countdownToDateUnix;
@@ -259,9 +245,8 @@ bool saveBootSnapshot() {
   doc["accessControlTimezonePublic"] = accessControlTimezonePublic;
   doc["accessControlSystemPublic"] = accessControlSystemPublic;
 
-  //Not atomic: a missing/broken snapshot just makes the next boot take the slow individual-files
-  //path, which rewrites it - but an incomplete one (overflowed) would load with silently missing
-  //settings, so that is refused (CODE_REVIEW_V7.md #1).
+  //Not atomic: a missing/broken snapshot only makes the next boot slower, but an overflowed one would
+  //load with settings silently missing, so that is refused.
   if (!writeJsonDocumentFile(bootSnapshotPath, doc, false)) {
     SerialPrintln(F("Boot snapshot: write FAILED - will retry on the next freshness check"));
     return false;
@@ -271,9 +256,8 @@ bool saveBootSnapshot() {
   return true;
 }
 
-//Cheap (no flash access) string built from every field saveBootSnapshot() persists - lets
-//checkBootSnapshotFreshness() detect "did any boot-relevant setting actually change" without a
-//dedicated dirty flag at each settings-POST handler.
+//Cheap (no flash access) string of every field saveBootSnapshot() persists - lets
+//checkBootSnapshotFreshness() detect changes without a dirty flag in every settings handler.
 String computeSettingsSignature() {
   String sig;
   sig.reserve(256);
@@ -319,10 +303,8 @@ String computeSettingsSignature() {
   return sig;
 }
 
-//Shared tail of the two JSON writers below: drop the temp file on failure, otherwise move it into
-//place (atomic) - and log how long the whole write took, since this device's flash chip is
-//unusually slow at file opens (see bootSnapshotPath's comment) and rename() timing on it was
-//never measured.
+//Shared tail of the JSON writers: drop the temp file on failure, otherwise rename it into place
+//(atomic), and log how long the write took (this flash chip is slow at file opens).
 bool finishJsonFileWrite(const String &writtenPath, const char *path, bool ok, unsigned long startedAt) {
   if (ok && writtenPath != path && !LittleFS.rename(writtenPath.c_str(), path)) {
     SerialPrintln(F("- rename() into place failed"));
@@ -336,12 +318,10 @@ bool finishJsonFileWrite(const String &writtenPath, const char *path, bool ok, u
   return ok;
 }
 
-//Persists one JSON document. Refuses when ArduinoJson ran out of memory while building it -
-//overflowed() means fields were silently dropped, and the result would still serialize as valid
-//but incomplete JSON (CODE_REVIEW_V7.md #1). Streams straight into the file instead of building
-//the whole JSON text as a String first. atomic: write "<path>.tmp" and rename() it over `path`
-//only once every byte made it, so a failure or power loss mid-write never truncates the existing
-//file - costs one extra rename(). Non-atomic is meant for derived caches that rebuild themselves.
+//Persists one JSON document, streamed into the file. Refuses if ArduinoJson ran out of memory while
+//building it (overflowed() = fields silently dropped). atomic: write "<path>.tmp" and rename() it
+//over `path` only once complete, so a failure never truncates the existing file. Non-atomic is for
+//caches that rebuild themselves.
 bool writeJsonDocumentFile(const char *path, JsonDocument &doc, bool atomic) {
   unsigned long startedAt = millis();
   if (doc.overflowed()) {
@@ -362,11 +342,9 @@ bool writeJsonDocumentFile(const char *path, JsonDocument &doc, bool atomic) {
   return finishJsonFileWrite(writtenPath, path, out.accepted() == expected, startedAt);
 }
 
-//Persists a JSON array one element at a time - only one small element document is ever alive,
-//instead of a document holding the whole list plus the whole serialized String (the two together
-//could exceed the free heap with 20 long scheduled messages, CODE_REVIEW_V7.md #1). Always atomic,
-//for the same reason as writeJsonDocumentFile(): these files hold user data that nothing else can
-//rebuild. fillElement() fills one element; an element that overflowed aborts the whole write.
+//Persists a JSON array one element at a time, so only one small element document is alive (a whole
+//list document plus its serialized String could exceed the free heap). Always atomic: these files
+//hold user data. An element that overflowed aborts the whole write.
 bool writeJsonArrayFile(const char *path, int count, void (*fillElement)(int index, JsonDocument &element)) {
   unsigned long startedAt = millis();
   String writtenPath = String(path) + F(".tmp");
@@ -400,18 +378,13 @@ bool writeJsonArrayFile(const char *path, int count, void (*fillElement)(int ind
   return finishJsonFileWrite(writtenPath, path, ok && out.accepted() == expected, startedAt);
 }
 
-//Answers a request with a JSON array generated one element at a time as a chunked response - the
-//HTTP counterpart of writeJsonArrayFile(), using the same fillElement() functions. Building the
-//whole array as a JsonDocument plus an AsyncResponseStream buffer needed the full content in RAM
-//twice on top of the list itself; with 20 long scheduled messages that aborted the device on every
-//page load (operator new in AsyncResponseStream's cbuf). Only one serialized element is held at a
-//time now.
+//Sends a JSON array as a chunked response, one element at a time - the HTTP counterpart of
+//writeJsonArrayFile(). Building it as a whole needed the content in RAM twice and aborted the device
+//with 20 long scheduled messages.
 //
-//The response must never look like a complete list when it isn't one - a client (the rotation
-//editor) submits what it got back as the full replacement (CODE_REVIEW_V8.md #4/#5). So instead of
-//skipping an element that can't be built (out of memory), or mixing old and new entries when the
-//list changes between two chunks (*generation moved on), the response just ends there without the
-//closing "]": invalid JSON the client rejects.
+//The response must never look complete when it isn't - the rotation editor submits what it got as
+//the full replacement. So if an element can't be built or the list changes mid-response
+//(*generation moved on), it just ends without the closing "]": invalid JSON the client rejects.
 void sendJsonArrayChunked(AsyncWebServerRequest *request, int count, void (*fillElement)(int index, JsonDocument &element), uint32_t *generation) {
   struct ChunkState {
     int nextElement = 0;
@@ -450,9 +423,7 @@ void sendJsonArrayChunked(AsyncWebServerRequest *request, int count, void (*fill
               state->aborted = true;
               break;
             }
-            //serializeJson() into a String replaces its content, it doesn't append - the
-            //separator is added afterwards. Every earlier element was emitted (an unbuildable one
-            //aborts above), so the index decides the comma.
+            //serializeJson() into a String replaces its content; the comma is added afterwards.
             serializeJson(element, state->pending);
             if (state->nextElement > 0) {
               state->pending = "," + state->pending;
@@ -475,11 +446,9 @@ void sendJsonArrayChunked(AsyncWebServerRequest *request, int count, void (*fill
   request->send(response);
 }
 
-//Reads a JSON array file one element at a time, handing each to handleElement() - the read-side
-//counterpart of writeJsonArrayFile(): neither the whole file as a String nor a document holding
-//every element is ever in memory. Elements already handed over before an error stay handed over.
-//NO_MEMORY is kept apart from INVALID so a caller never throws away a perfectly good file just
-//because this one read attempt ran out of heap.
+//Reads a JSON array file element by element into handleElement() - the counterpart of
+//writeJsonArrayFile(). NO_MEMORY is kept apart from INVALID, so a good file is never thrown away
+//just because one read ran out of heap.
 int readJsonArrayFile(const char *path, void (*handleElement)(JsonVariant element)) {
   File file = LittleFS.open(path, "r");
   if (!file) {
@@ -533,8 +502,7 @@ String readFile(fs::FS &fs, const char * path, String defaultValue) {
   return fileContent;
 }
 
-//Write file to LittleFS. Returns whether the FULL message was actually written - a short/partial
-//write (flash full, unplugged mid-write) is not success.
+//Write file to LittleFS. Returns whether the FULL message was written (a short write is a failure).
 bool writeFile(fs::FS &fs, const char * path, const char * message) {
   SerialPrintf(F("Writing file: %s\r\n"), path);
 

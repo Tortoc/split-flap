@@ -1,19 +1,10 @@
-//Non-blocking replacement for ezTime's own network operations (Timezone::setLocation() and the
-//NTP sync normally driven by events()/updateNTP()) - see CODE_REVIEW.md #30: the original,
-//still-vendored ezTime calls do a blocking DNS-then-UDP round-trip that can exceed the software
-//watchdog's patience under real network stress - live-reproduced as a genuine device crash.
+//Non-blocking replacement for ezTime's network calls (Timezone::setLocation() and the NTP sync of
+//events()/updateNTP()): those do a blocking DNS + UDP round-trip that crashed the device via the
+//software watchdog under network stress. Uses lwIP's callback-based dns_gethostbyname() and
+//non-blocking WiFiUDP::parsePacket() instead. ezTime's own NTP sync is off (setInterval(0) in
+//setup()); checkNtpSync() and checkTimezoneLookup() take over.
 //
-//This file avoids the blocking calls entirely instead of working around them, using lwIP's own
-//callback-based dns_gethostbyname() and WiFiUDP::parsePacket()'s already-non-blocking mode. Neither
-//state machine below ever blocks loop() for longer than a cheap, immediate check.
-//
-//ezTime's own NTP auto-sync is fully disabled (setInterval(0) in setup()) - checkNtpSync() below
-//takes over that job instead. Timezone changes go through checkTimezoneLookup().
-//
-//IMPORTANT - NOT just calling the obvious-looking public setTime(t): ezTime's own
-//now()/getRealUtcNow() have a well-documented sign-inversion quirk - naively calling
-//Timezone::setTime() with a raw UTC value reproduces the exact double-offset-conversion bug class
-//already fixed once in this project. See ntpSyncApplyResult()'s comment below.
+//Don't apply NTP time with a plain Timezone::setTime(utc) - see ntpSyncApplyResult().
 
 #include <lwip/dns.h>
 
@@ -23,15 +14,12 @@ enum AsyncDnsState { ASYNC_DNS_IDLE, ASYNC_DNS_PENDING, ASYNC_DNS_DONE };
 
 struct AsyncDnsLookup {
   AsyncDnsState state = ASYNC_DNS_IDLE;
-  //lwIP invokes dnsFoundCallback() from its own timer/event processing, a different call stack
-  //than this struct's own isDone()/tick() callers - volatile keeps the compiler from caching a
-  //stale value across that boundary.
+  //Written by dnsFoundCallback() from lwIP's own call stack - volatile avoids stale cached reads.
   volatile bool callbackFired = false;
   volatile bool found = false;
   IPAddress resultIp;
 
-  //Only call this when state == ASYNC_DNS_IDLE (or after isDone() returned true) - starting a new
-  //lookup while one is still pending would leave the old callback writing into this same struct.
+  //Only call when idle (or after isDone()) - a pending lookup's callback would write into this struct.
   void start(const char* hostname) {
     state = ASYNC_DNS_PENDING;
     callbackFired = false;
@@ -80,9 +68,7 @@ AsyncDnsLookup tzDnsLookup;
 WiFiUDP tzLookupUdp;
 unsigned long tzLookupPhaseStartedAt = 0;
 String tzLookupLocation;
-//tzLookupResult/tzLookupDone (valid once tzLookupDone == true, polled by ESPMaster.ino's
-//pendingTimezoneSlot handling) are declared in ESPMaster.ino instead of here - see the comment
-//there.
+//tzLookupResult/tzLookupDone are declared in ESPMaster.ino (see the comment there).
 
 #define TZ_LOOKUP_STEP_TIMEOUT_MS 2000UL //matches ezTime's own TIMEZONED_TIMEOUT
 #define TIMEZONED_HOST "timezoned.rop.nl" //matches ezTime.h's TIMEZONED_REMOTE_HOST
@@ -144,9 +130,8 @@ void checkTimezoneLookup() {
         }
         return;
       }
-      //Only trust a reply from the exact IP/port this request was actually sent to - not
-      //cryptographic authentication, just rules out random/unrelated traffic on this fixed local
-      //port. Ignore and keep waiting rather than treating it as a hard failure.
+      //Only accept a reply from the IP/port the request went to (not authentication, just filters
+      //unrelated traffic on this port); ignore anything else and keep waiting.
       if (tzLookupUdp.remoteIP() != tzDnsLookup.resultIp || tzLookupUdp.remotePort() != TIMEZONED_PORT) {
         SerialPrintln(F("Timezone lookup: ignoring UDP packet from an unexpected sender"));
         while (tzLookupUdp.available()) tzLookupUdp.read(); //discard it, keep the socket open for the real reply
@@ -158,8 +143,8 @@ void checkTimezoneLookup() {
       while (tzLookupUdp.available()) recv += (char)tzLookupUdp.read();
       tzLookupUdp.stop();
 
-      //Same "OK <olson> <posix>"/"ERROR <msg>" protocol as ezTime's own setLocation() - see its
-      //comment. setPosix() (public API) applies the result without a second network round-trip.
+      //Same "OK <olson> <posix>"/"ERROR <msg>" protocol as ezTime's setLocation(); setPosix()
+      //applies the result without another round-trip.
       if (recv.substring(0, 3) == "OK ") {
         String posix = recv.substring(recv.indexOf(" ", 4) + 1);
         tzLookupResult = timezone.setPosix(posix);
@@ -207,19 +192,12 @@ void startNtpSync() {
   ntpSyncState = NTP_SYNC_RESOLVING;
 }
 
-//Applies a raw NTP-derived UTC unix timestamp to ezTime's internal clock, producing the SAME
-//_last_sync_time state ezTime's own updateNTP() would have - only the public
-//Timezone::setPosix()/setTime()/getOffset() API is available here (ezTime is a shared system
-//library, not vendored in-repo).
-//
-//Timezone::setTime(t, ms) computes: offset = getOffset(t) [treats t AS local]; _last_sync_time =
-//t + offset*60. ezTime's offset is POSIX-sign-inverted (NEGATIVE for zones ahead of UTC), so
-//calling setTime(rawUtc) directly would NOT reproduce _last_sync_time = rawUtc.
-//
-//Fix: pre-compensate by computing offsetGuess = getOffset(rawUtc, UTC_TIME) - the offset AS IF
-//rawUtc were genuine UTC - then call setTime(rawUtc - offsetGuess*60). setTime()'s own internal
-//getOffset(t) then recomputes the SAME offsetGuess, so _last_sync_time ends up = rawUtc, matching
-//updateNTP(). Self-checked below via getRealUtcNow(), the mathematical inverse of this relationship.
+//Applies a raw NTP UTC timestamp so ezTime ends up in the same state as after its own updateNTP().
+//Timezone::setTime(t) treats t as local time and stores t + getOffset(t)*60, with ezTime's
+//POSIX-inverted offset sign - so setTime(rawUtc) would be off by the zone offset. Instead,
+//pre-compensate with offsetGuess = getOffset(rawUtc, UTC_TIME) and call setTime(rawUtc -
+//offsetGuess*60); setTime() recomputes the same offset and stores rawUtc. Checked below via
+//getRealUtcNow().
 void ntpSyncApplyResult(time_t rawUtc) {
   int16_t offsetGuess = timezone.getOffset(rawUtc, UTC_TIME);
   timezone.setTime(rawUtc - (long)offsetGuess * 60);
@@ -227,8 +205,7 @@ void ntpSyncApplyResult(time_t rawUtc) {
   long checkUtc = getRealUtcNow();
   long driftSeconds = checkUtc - (long)rawUtc;
   if (driftSeconds < -5 || driftSeconds > 5) {
-    //Self-check failed by more than plausible round-trip time - logged loudly rather than
-    //silently trusting a possibly-wrong clock, since every time-dependent feature depends on it.
+    //Log loudly instead of silently trusting a possibly wrong clock.
     SerialPrintln(F("WARNING: NTP sync self-check drift ") + String(driftSeconds) + F("s - getRealUtcNow() doesn't match the raw NTP value as expected, double-check ntpSyncApplyResult()'s offset math"));
   }
 }
@@ -287,8 +264,7 @@ void checkNtpSync() {
         return;
       }
 
-      //Same sender check as the timezone lookup's own UDP receive - an accepted NTP reply here is
-      //applied directly as the system time, which every time-dependent feature then trusts.
+      //Same sender check as the timezone lookup - the reply becomes the system time.
       if (ntpSyncUdp.remoteIP() != ntpDnsLookup.resultIp || ntpSyncUdp.remotePort() != 123) {
         SerialPrintln(F("NTP sync: ignoring UDP packet from an unexpected sender"));
         while (ntpSyncUdp.available()) ntpSyncUdp.read(); //discard it, keep the socket open for the real reply
@@ -297,9 +273,8 @@ void checkNtpSync() {
 
       byte buffer[NTP_SYNC_PACKET_SIZE]; //deliberately NOT pre-zeroed - see the length check below
       int bytesRead = ntpSyncUdp.read(buffer, NTP_SYNC_PACKET_SIZE);
-      //A short/malformed datagram must be dropped, not parsed - a nonzero-but-short packet would
-      //otherwise leave uninitialized stack garbage read from fixed offsets below, which could
-      //plausibly pass the plausibility checks further down and get accepted as a real time sync.
+      //Drop short datagrams: the fixed-offset reads below would otherwise parse uninitialized stack
+      //memory, which could pass the plausibility checks.
       if (packetSize < NTP_SYNC_PACKET_SIZE || bytesRead < NTP_SYNC_PACKET_SIZE) {
         SerialPrintln(F("NTP sync: ignoring short/malformed packet (") + String(packetSize) + F(" bytes)"));
         return;
@@ -329,8 +304,7 @@ void checkNtpSync() {
 
       time_t rawUtc = secsSince1900 - 2208988800UL; //subtract 70 years: NTP epoch -> Unix epoch
       ntpSyncApplyResult(rawUtc);
-      //Keep the optional DS3231 RTC drift-corrected and its Oscillator Stop Flag cleared - a
-      //no-op if none is present.
+      //Keep the optional DS3231 drift-corrected and its Oscillator Stop Flag cleared.
       if (rtcPresent) {
         writeRtcTime(rawUtc);
       }

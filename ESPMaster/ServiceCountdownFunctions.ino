@@ -1,7 +1,5 @@
-//Builds "<prefix> <days> <suffix>", any empty part omitted. Falls back to the bare number if the
-//full text doesn't fit. Shared by standalone Countdown/Countup mode (via buildCountdownText()/
-//buildCountupText() below) and Rotation's countdown/countup items (called directly with the
-//item's own Prefix/Suffix).
+//Builds "<prefix> <days> <suffix>" (empty parts omitted), falling back to the bare number if it
+//doesn't fit. Used by standalone Countdown/Countup and by rotation items with their own prefix/suffix.
 String buildDayCountText(long days, String prefix, String suffix) {
   String daysText = String(days);
   if (prefix != "") {
@@ -11,11 +9,7 @@ String buildDayCountText(long days, String prefix, String suffix) {
     daysText = daysText + " " + suffix;
   }
 
-  //Compare the NORMALIZED length (umlauts collapse to 1 char each, see
-  //normalizeUmlautsForDisplay()) against the effective COMBINED width, not raw UTF-8 byte length
-  //against local unitsAmount - otherwise a label with umlauts could be dropped as "too long" even
-  //though it fits once normalized, and a primary with reachable extensions would drop a label that
-  //fits the actual combined display (CODE_REVIEW_V6.md #8).
+  //Normalized length (umlauts count as 1) against the combined width including extensions.
   if ((int)normalizeUmlautsForDisplay(daysText).length() > combinedUnitsAmount()) {
     SerialPrintln(F("Day count text was too long, cutting down to just the number..."));
     //Must be String(days), not `"" + days` - "" is a const char*, so `+ days` would do pointer

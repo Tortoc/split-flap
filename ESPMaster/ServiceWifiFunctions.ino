@@ -2,12 +2,9 @@
 //once a local variable inside initWiFi() goes out of scope.
 WiFiEventHandler wifiDisconnectEventHandler;
 
-//Makes WiFi disconnect reasons observable over HTTP instead of only via a live serial capture.
-//wifiDisconnectCount/lastWifiDisconnectReason/lastWifiDisconnectAt (ESPMaster.ino) track
-//frequency/cause over time, cheaply.
+//WiFi disconnect statistics for GET /api/diag (counters live in ESPMaster.ino).
 
-//Translates a WiFi disconnect reason into a readable string for the serial log, so "full signal but
-//won't connect" can be pinned to a concrete cause instead of just "FAILED".
+//Readable disconnect reason for the serial log, instead of WiFiManager's generic "FAILED".
 String wifiDisconnectReasonToString(WiFiDisconnectReason reason) {
   switch (reason) {
     case WIFI_DISCONNECT_REASON_UNSPECIFIED: return "UNSPECIFIED";
@@ -42,9 +39,7 @@ String wifiDisconnectReasonToString(WiFiDisconnectReason reason) {
   }
 }
 
-//Both functions below use wifiScanRequested/wifiConnectPhase/WIFI_CONNECT_* - all only declared
-//under `#if WIFI_USE_DIRECT == false` in ESPMaster.ino (WiFiManager-based AP-config mode; direct
-//mode has no such scan/reconnect UI), so these definitions must be guarded the same way.
+//Only in WiFiManager mode: the state used below is declared under WIFI_USE_DIRECT == false.
 #if WIFI_USE_DIRECT == false
 //Starts the network scan requested via POST /api/wifi/scan - kept out of the AsyncWebServer
 //callback. Empty completion callback: GET /api/wifi/scan-result polls WiFi.scanComplete() directly.
@@ -56,22 +51,17 @@ void checkWifiScanRequest() {
   WiFi.scanNetworksAsync([](int numNetworksFound) {});
 }
 
-//WiFi.begin() with the credentials also saved to flash as the network to join after a reboot.
-//WiFiManager::autoConnect() switches WiFi.persistent() off at boot and - when it connects with
-//saved credentials - never switches it back on, so a plain WiFi.begin() here only changed the
-//network until the next reboot (OTA, crash, power cut), after which the device silently rejoined
-//whatever network was still in flash. Persistence is switched back off right after, matching what
-//WiFiManager expects for the rest of the runtime.
+//WiFi.begin() that also saves the network to flash. WiFiManager::autoConnect() turns
+//WiFi.persistent() off at boot, so a plain begin() was lost on the next reboot. Persistence is
+//turned off again afterwards, as WiFiManager expects.
 void beginWifiAndPersist(const String &ssid, const String &password) {
   WiFi.persistent(true);
   WiFi.begin(ssid.c_str(), password.c_str());
   WiFi.persistent(false);
 }
 
-//Advances the "connect to a new WiFi network from the web UI" state machine started by
-//POST /api/wifi/connect - call every loop() iteration (a cheap no-op while WIFI_CONNECT_NONE).
-//Both the new network and, on failure, the reverted previous one are saved to flash (see
-//beginWifiAndPersist()), so flash always holds the network the device is actually using.
+//State machine for "connect to a new network" (POST /api/wifi/connect), called every loop(). The
+//new network and, on failure, the restored old one are both saved to flash.
 void checkWifiConnectAttempt() {
   if (wifiConnectPhase == WIFI_CONNECT_PENDING) {
     SerialPrintln(F("Attempting to connect to new WiFi network: \"") + wifiConnectNewSsid + F("\""));
@@ -93,12 +83,10 @@ void checkWifiConnectAttempt() {
 #endif
 
 #if WIFI_USE_DIRECT == false
-//Setup hotspot password on the display (security review OW-06, code review V9-03/04). A display
-//with 8+ units shows it whole and keeps it. A narrower one cycles through it for as long as the
-//portal is open: frame 0 is all dashes (marks the start, the password has no '-'), frames 1..n
-//are consecutive parts of the password, each held for SETUP_AP_PASSWORD_HOLD_MS.
-//Holds the user's fixed password instead when one is set (setupApFixedPassword) - that one is
-//never shown, so the frame functions below only ever see the random 8-character one.
+//Setup hotspot password on the display. With 8+ units it is shown whole; a narrower display cycles
+//through it while the portal is open: frame 0 is all dashes (start marker - the password has no
+//'-'), then consecutive parts, each held for SETUP_AP_PASSWORD_HOLD_MS. A fixed password set by
+//the user is never shown, so only the random 8-character one gets here.
 char setupApPassword[64] = "";
 int setupApPasswordFrame = 0;
 bool setupApPasswordFrameStarted = false;
@@ -161,14 +149,12 @@ void initWiFi() {
 
   WiFi.mode(WIFI_STA);
 
-  //Logs the real 802.11 disconnect reason so a "full signal but won't connect" report can be
-  //pinned to a concrete cause instead of WiFiManager's generic "AutoConnect: FAILED".
+  //Logs the real 802.11 disconnect reason.
   wifiDisconnectEventHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected &event) {
     SerialPrintln(F("DEBUG: WiFi Disconnected - SSID: \"") + event.ssid + F("\", Reason: ") + wifiDisconnectReasonToString(event.reason));
     wifiDisconnectCount++;
     lastWifiDisconnectReason = wifiDisconnectReasonToString(event.reason);
     lastWifiDisconnectAt = millis();
-    diagFreeHeapAtLastWifiDisconnect = ESP.getFreeHeap(); //TEMPORARY DIAGNOSTIC, see diagMinFreeHeap
   });
 
   //No WiFi.setSleepMode(WIFI_NONE_SLEEP) here deliberately - forcing the radio always-on was a
@@ -199,21 +185,17 @@ void initWiFi() {
     //Running the config portal and our own webserver together doesn't work reliably - reboot
     //after saving new credentials is the accepted workaround.
     SerialPrintln(F("New WiFi configuration saved. Will need to reboot device to let webserver work..."));
-    checkBootSnapshotFreshness(); //see its own comment (ESPMaster.ino) - keep the snapshot fresh before every intentional reboot
+    checkBootSnapshotFreshness(); //keep the snapshot fresh before rebooting
     isPendingReboot = true;
   });
 
   std::vector<const char *> menu = { "wifi", "info" ,"param", "sep", "restart", "exit" };
   wifiManager.setMenu(menu);
 
-  //The setup hotspot used to be open - anyone in range could point the device at their own network
-  //(security review 2026-10-12, OW-06). It now gets a fresh random WPA2 password every time,
-  //shown on the flaps once the hotspot is up: only someone standing in front of the display can
-  //use it. Uppercase letters and digits only (the flaps have no lowercase), without the
-  //look-alikes 0/O, 1/I, 2/Z, 5/S and 8/B.
-  //No two equal characters in a row - on a one-unit display they'd look like a single one.
-  //A fixed password set by the user replaces it; the display then stays quiet. The serial log
-  //below is the way back in if that password is forgotten.
+  //The setup hotspot gets a fresh random WPA2 password, shown on the flaps: only someone in front of
+  //the display can join. Uppercase and digits only (no lowercase flaps), without look-alikes 0/O,
+  //1/I, 2/Z, 5/S, 8/B, and no repeated characters (a one-unit display would show them as one). A
+  //fixed password from the web UI replaces it and is printed to the serial log as a fallback.
   if (setupApFixedPassword != "") {
     strlcpy(setupApPassword, setupApFixedPassword.c_str(), sizeof(setupApPassword));
   } else {
@@ -228,8 +210,7 @@ void initWiFi() {
   wifiManager.setAPCallback([](WiFiManager*) {
     SerialPrintln(F("Setup hotspot \"Split-Flap-AP\" open - password: ") + String(setupApPassword));
     wifiSetupPortalOpen = true;
-    //The setup takes precedence over whatever setup()'s pre-WiFi display is still writing (code
-    //review V9-03) - a busy display would refuse the password.
+    //Takes precedence over setup()'s pre-WiFi display job - a busy display would refuse it.
     cancelDisplayControllers();
     if (setupApFixedPassword != "") {
       return; //fixed password - nothing to show
@@ -237,9 +218,8 @@ void initWiFi() {
     setupApPasswordFrame = unitsAmount >= 8 ? 0 : 1; //narrow display: start with the first part
     setupApPasswordFrameStarted = false;
     setupApPasswordFrameDoneAt = 0;
-    //WiFiManager's portal loop offers no hook of its own, but it yield()s on every pass, and the
-    //core runs recurrent functions after each yield() - this keeps the display job going for the
-    //whole portal instead of only while this callback runs.
+    //WiFiManager's portal loop has no hook, but it yield()s every pass and the core runs recurrent
+    //functions after each yield() - that keeps the display going for the whole portal.
     if (unitsAmount > 0) {
       schedule_recurrent_function_us(tickSetupApPasswordDisplay, 10000);
     }
@@ -258,14 +238,14 @@ void initWiFi() {
 #else
   SerialPrintln(F("Setting up WiFi Direct"));
 
-  if (wifiDirectSsid != "" && wifiDirectPassword != "") {
+  if (wifiDirectSsid[0] != '\0' && wifiDirectPassword[0] != '\0') {
     WiFi.disconnect(true);
     delay(100);
     yield();
 
     WiFi.setAutoReconnect(true);
     WiFi.persistent(true);
-    WiFi.setOutputPower(20.5); //max power for range (ESP01)
+    WiFi.setOutputPower(20.5); //max power for range
 
     SerialPrintln(F("DEBUG: WiFi disconnected, starting fresh connection"));
     SerialPrintln(F("DEBUG: SSID: ") + String(wifiDirectSsid));
@@ -355,7 +335,7 @@ void initWiFi() {
       SerialPrintln(F("DEBUG:   - Incorrect SSID or password"));
       SerialPrintln(F("DEBUG:   - Router not in range"));
       SerialPrintln(F("DEBUG:   - Router not allowing new connections"));
-      SerialPrintln(F("DEBUG:   - Power supply issues (ESP01 needs stable 3.3V)"));
+      SerialPrintln(F("DEBUG:   - Power supply issues (the ESP-12F needs a stable 3.3V)"));
       isWifiConfigured = false;
     }
   } else {

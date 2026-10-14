@@ -1,10 +1,9 @@
 //A single password, globally disable-able (empty string), plus per-category toggles deciding
 //which endpoints stay reachable without it even while set.
 
-//The password is kept only as a salted PBKDF2-HMAC-SHA256 hash, "<iterations>$<salt hex>$<hash
-//hex>" (security review 2026-10-12, OW-10) - a flash dump no longer shows it in plaintext. The
-//iteration count is stored with it, so it can change later without invalidating old hashes.
-//Every wrong guess costs one full hash; checkAdminPassword()'s per-sender pause bounds that.
+//The password is stored only as a salted PBKDF2-HMAC-SHA256 hash, "<iterations>$<salt hex>$<hash
+//hex>", so a flash dump doesn't reveal it; the iteration count is stored with it. Every wrong guess
+//costs one full hash; checkAdminPassword()'s per-sender pause bounds that.
 #define ADMIN_PASSWORD_HASH_ITERATIONS 1000
 #define ADMIN_PASSWORD_SALT_BYTES 16
 
@@ -158,26 +157,20 @@ bool isRequestAllowedWithoutPassword(bool categoryPublicToggle) {
   return !isAdminPasswordSet() || categoryPublicToggle;
 }
 
-//Login sessions for the web UI: POST /api/login checks the password once and hands the browser a
-//random session token as an HttpOnly cookie; every protected endpoint then accepts either that
-//cookie or the X-OTA-Password header as before (scripts/automations keep working unchanged).
-//A session stays valid for LOGIN_SESSION_DAYS after its LAST use (renewed at most once a day, so
-//regular use never logs out and flash isn't written on every request). Kept per device, persisted
-//in their own small file so a reboot doesn't log everyone out. Changing the password ends all
-//sessions.
+//Web UI login: POST /api/login checks the password once and sets a random session token as an
+//HttpOnly cookie; protected endpoints accept that cookie or the X-OTA-Password header (scripts keep
+//working). A session lasts LOGIN_SESSION_DAYS after its last use (renewed at most daily, so flash
+//isn't written per request), survives a reboot and ends with a password change.
 //
-//CSRF: browsers attach the cookie to cross-site requests too, so a cookie only counts together
-//with the X-Requested-With header the web UI sends on every request - another site can't add that
-//header without a CORS preflight this device never approves. SameSite=Strict on top.
-//LOGIN_SESSION_* constants, loginSessionsPath and failedLogins live in ESPMaster.ino (used by
-//its /api/login handlers, and that file is compiled first).
+//CSRF: the cookie only counts together with the X-Requested-With header the web UI sends - another
+//site can't add it without a CORS preflight this device never approves. SameSite=Strict on top.
+//LOGIN_SESSION_*, loginSessionsPath and failedLogins live in ESPMaster.ino (compiled first).
 struct LoginSession {
   char token[33] = ""; //32 hex chars (128 random bits), "" = free slot
   uint32_t expiresAt = 0; //real UTC; 0 = not known yet (no valid clock when it was created)
 };
 LoginSession loginSessions[LOGIN_SESSIONS_MAX];
-//Loaded on the first check that needs it, not at boot - every file open costs ~800ms on this
-//device's flash chip (see bootSnapshotPath's comment), and boot time matters more.
+//Loaded on first use, not at boot - each file open costs ~800ms on this flash chip.
 bool loginSessionsLoaded = false;
 bool loginSessionsDirty = false; //saved from loop(), see saveLoginSessionsIfDirty()
 
@@ -287,12 +280,10 @@ int findValidLoginSession(AsyncWebServerRequest* request) {
   return -1;
 }
 
-//Every admin-password comparison goes through here - login form, X-OTA-Password header, an
-//extension's pairing request and the password change - so a wrong guess on any of them pauses all of
-//them for 2 seconds (security review 2026-10-12, Live-02), but only for the sender that guessed
-//wrong (OW-09). While paused nothing is compared, not even a correct password. If
-//FAILED_LOGIN_SLOTS senders are paused at once, any further sender waits too - so more addresses
-//don't buy more guesses per second than that. Sessions are unaffected.
+//Every admin-password comparison goes through here (login, X-OTA-Password header, pairing,
+//password change), so a wrong guess pauses all of them for 2 seconds - for that sender only. While
+//paused nothing is compared, not even a correct password. If FAILED_LOGIN_SLOTS senders are paused,
+//any further sender waits too, so more addresses don't buy more guesses. Sessions are unaffected.
 int checkAdminPassword(AsyncWebServerRequest* request, const String &provided) {
   uint32_t ip = request->client() != nullptr ? (uint32_t)request->client()->remoteIP() : 0;
   unsigned long now = millis();
