@@ -614,6 +614,7 @@ nothing to flash, but restarts the unit into its bootloader.
 {
   "unitIndex": 0,
   "bootAddress": "0x29",
+  "bootloaderVersion": "SF-TWIBOOT v3.5",
   "pageSize": 128,
   "totalPages": 42,
   "pagesWritten": 42,
@@ -624,7 +625,9 @@ nothing to flash, but restarts the unit into its bootloader.
 ```
 On failure, `success: false` and an `error` field instead of `message`/`started` (and possibly
 missing `bootAddress`/`pageSize`/`totalPages`/`pagesWritten` if the failure happened before the
-unit was even found, e.g. no unit answered in bootloader mode). Safety against an aborted push:
+unit was even found, e.g. no unit answered in bootloader mode). Only a bootloader reporting
+`SF-TWIBOOT` (v3.5 and later) is updated; an older twiboot is refused before anything is written,
+since it would not honour the marker below. Safety against an aborted push:
 an EEPROM "update in progress" marker is armed before any flash page is touched and only cleared
 after every page (including the vector table, written last) is confirmed byte-for-byte - twiboot
 itself refuses to boot into the app while that marker is armed, regardless of a subsequent reset,
@@ -1130,6 +1133,8 @@ endpoint) through here.
 - `200 text/plain`: `"Security settings updated"`
 - `400 text/plain` if `currentPassword` is missing.
 - `401 text/plain` if `currentPassword` doesn't match.
+- `500 text/plain` if the new password couldn't be saved - the old password stays valid (existing
+  sessions have already been ended).
 
 ```bash
 # Change the password only, leave toggles untouched:

@@ -3053,7 +3053,10 @@ void setup() {
           request->send(500, "text/plain", "Could not revoke existing sessions - password not changed");
           return;
         }
-        setAdminPassword(request->getParam("newPassword", true)->value());
+        if (!setAdminPassword(request->getParam("newPassword", true)->value())) {
+          request->send(500, "text/plain", "Could not save the new password - password not changed (existing sessions were ended)");
+          return;
+        }
         SerialPrintln(!isAdminPasswordSet() ? F("OTA password cleared - protection now globally OFF") : F("OTA password changed"));
       }
 

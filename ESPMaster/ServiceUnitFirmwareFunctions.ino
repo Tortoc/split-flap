@@ -388,6 +388,20 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
     return false;
   }
 
+  //Only this fork's twiboot (SF-TWIBOOT, v3.5 and later) keeps the unit in the bootloader while the
+  //marker is armed. An older build would accept the marker write but boot a half-written image after
+  //an aborted update, so it gets nothing written.
+  char bootloaderVersion[17];
+  if (!twibootReadVersion(bootAddress, bootloaderVersion, sizeof(bootloaderVersion)) || strncmp(bootloaderVersion, "SF-TWIBOOT", 10) != 0) {
+    firmwareFile.close();
+    result["success"] = false;
+    result["error"] = F("The unit's bootloader doesn't report SF-TWIBOOT (v3.5 or later), so an aborted update could start a "
+      "half-written firmware. Flash the current twiboot over ISP first (see Unit/BOOTLOADER_SETUP.md). Nothing was written.");
+    serializeJson(result, resultJsonOut);
+    return false;
+  }
+  result["bootloaderVersion"] = String(bootloaderVersion);
+
   //Arm the "in progress" marker before touching flash; if it can't be confirmed, write nothing.
   String markerFailureReason;
   if (!twibootWriteAndVerifyEepromByte(bootAddress, UNIT_BOOTLOADER_UPDATE_MARKER_ADDR, UNIT_BOOTLOADER_UPDATE_MARKER_INPROGRESS, markerFailureReason)) {

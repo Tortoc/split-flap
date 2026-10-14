@@ -144,10 +144,19 @@ bool verifyAdminPassword(const String &provided) {
 }
 
 //New admin password ("" = protection off): hashed, persisted, and the cache forgets the old one.
-void setAdminPassword(const String &password) {
+//Returns false if it couldn't be saved - then the old password stays, in memory and on flash. Both
+//the hash file and the boot snapshot must take it: the snapshot wins at boot, so a stale one would
+//bring the old password back after a reboot.
+bool setAdminPassword(const String &password) {
+  String previousHash = adminPasswordHash;
   adminPasswordHash = hashAdminPassword(password);
   verifiedPasswordCached = false;
+  if (writeFile(LittleFS, adminPasswordHashPath, adminPasswordHash.c_str()) && saveBootSnapshot()) {
+    return true;
+  }
+  adminPasswordHash = previousHash;
   writeFile(LittleFS, adminPasswordHashPath, adminPasswordHash.c_str());
+  return false;
 }
 
 //True if no password is required for this category - either the global off-switch, or the admin
