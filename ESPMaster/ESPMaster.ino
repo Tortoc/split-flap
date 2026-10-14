@@ -1108,7 +1108,7 @@ void setup() {
           pageDeliveryClient->close(); //deferred to its next poll; its onDisconnect then releases the guard and the file
         }
         AsyncWebServerResponse *busyResponse = request->beginResponse(503, "text/html",
-          String(F("<!DOCTYPE html><meta http-equiv=\"refresh\" content=\"1\"><p>Einen Moment ...</p>")));
+          String(F("<!DOCTYPE html><meta http-equiv=\"refresh\" content=\"1\"><p>...</p>")));
         busyResponse->addHeader("Retry-After", "1");
         request->send(busyResponse);
         return;
