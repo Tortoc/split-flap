@@ -21,7 +21,7 @@
 //read back as 255/255/255 ("unknown").
 #define UNIT_FW_VERSION_MAJOR 2
 #define UNIT_FW_VERSION_MINOR 2
-#define UNIT_FW_VERSION_PATCH 3
+#define UNIT_FW_VERSION_PATCH 4
 
 //Address jumpers J4 on the fae-pcb, 6 bits = addresses 0-63. J4 has 8 pin pairs; the top two (D6,
 //D5) stay unused - twiboot adds a fixed 0x29 base (main.c, keep in sync), so 6 bits (bootloader
