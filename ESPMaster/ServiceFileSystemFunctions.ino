@@ -11,19 +11,17 @@ void initialiseFileSystem() {
 //if it's missing or broken, from the ~30 individual files, which also writes a fresh snapshot.
 void loadValuesFromFileSystem() {
   bool snapshotNeedsWrite = false;
-  if (!loadValuesFromBootSnapshot()) {
+  bool snapshotLoaded = loadValuesFromBootSnapshot();
+  if (!snapshotLoaded) {
     SerialPrintln(F("Boot snapshot missing/invalid - loading individual setting files instead (slower, one-time until the snapshot is (re)written)"));
     loadValuesFromIndividualFiles();
     snapshotNeedsWrite = true;
   }
-  //A plaintext password from a firmware before 5.0.0 (or none) was just hashed - store the hash
-  //and remove every plaintext copy (its own file and the snapshot rewritten below).
+  //Keep the old plaintext copies until both new copies are durable. A failed migration is
+  //retried on the next boot or before a password change.
   if (adminPasswordMigrated) {
-    SerialPrintln(F("Admin password: now stored as a hash, plaintext copy removed"));
-    writeFile(LittleFS, adminPasswordHashPath, adminPasswordHash.c_str());
-    LittleFS.remove(legacyOtaPasswordPath);
-    adminPasswordMigrated = false;
-    snapshotNeedsWrite = true;
+    finishAdminPasswordMigration();
+    snapshotNeedsWrite = false; //the migration writes the snapshot itself
   }
   if (snapshotNeedsWrite) {
     saveBootSnapshot();
@@ -68,14 +66,37 @@ void loadValuesFromFileSystem() {
   SerialPrint(F("   Rotation Item Count: "));
   SerialPrintln(rotationItemCount);
 
-  //Baseline for checkBootSnapshotFreshness(), so the first check after boot doesn't see a change
-  //and write the snapshot again.
-  lastSavedSettingsSignature = computeSettingsSignature();
+  //Only a loaded valid snapshot establishes this baseline. Writers update it on success;
+  //a failed boot write must remain dirty so the periodic freshness check retries it.
+  if (snapshotLoaded && !adminPasswordMigrated) {
+    lastSavedSettingsSignature = computeSettingsSignature();
+  }
+}
+
+bool finishAdminPasswordMigration() {
+  if (!adminPasswordMigrated) {
+    return true;
+  }
+  if (!writeAtomicFile(LittleFS, adminPasswordHashPath, adminPasswordHash.c_str()) || !saveBootSnapshot()) {
+    SerialPrintln(F("Admin password migration could not be saved - keeping the previous copies"));
+    return false;
+  }
+  if (LittleFS.exists(legacyOtaPasswordPath) && !LittleFS.remove(legacyOtaPasswordPath)) {
+    SerialPrintln(F("Admin password migration: plaintext file could not be removed - will retry"));
+    return false;
+  }
+  adminPasswordMigrated = false;
+  SerialPrintln(F("Admin password: now stored as a hash, plaintext copies removed"));
+  return true;
 }
 
 //Fast path: one combined JSON file instead of ~30. Returns false and touches nothing if it's
 //missing or doesn't parse - all of the snapshot or none of it.
 bool loadValuesFromBootSnapshot() {
+  //A legacy file can be newer than this snapshot (downgrade), or await migration cleanup.
+  if (LittleFS.exists(legacyOtaPasswordPath)) {
+    return false;
+  }
   String snapshotJson = readFile(LittleFS, bootSnapshotPath, "");
   if (snapshotJson == "") {
     return false;
@@ -245,9 +266,8 @@ bool saveBootSnapshot() {
   doc["accessControlTimezonePublic"] = accessControlTimezonePublic;
   doc["accessControlSystemPublic"] = accessControlSystemPublic;
 
-  //Not atomic: a missing/broken snapshot only makes the next boot slower, but an overflowed one would
-  //load with settings silently missing, so that is refused.
-  if (!writeJsonDocumentFile(bootSnapshotPath, doc, false)) {
+  //The snapshot also holds the password hash: a failed write must preserve the previous copy.
+  if (!writeJsonDocumentFile(bootSnapshotPath, doc, true)) {
     SerialPrintln(F("Boot snapshot: write FAILED - will retry on the next freshness check"));
     return false;
   }
@@ -339,7 +359,11 @@ bool writeJsonDocumentFile(const char *path, JsonDocument &doc, bool atomic) {
   serializeJson(doc, out);
   out.flush();
   file.close();
-  return finishJsonFileWrite(writtenPath, path, out.accepted() == expected, startedAt);
+  bool ok = out.accepted() == expected;
+  if (ok && atomic) {
+    ok = verifyFileContents(LittleFS, writtenPath.c_str(), expected, out.checksum());
+  }
+  return finishJsonFileWrite(writtenPath, path, ok, startedAt);
 }
 
 //Persists a JSON array one element at a time, so only one small element document is alive (a whole
@@ -375,7 +399,11 @@ bool writeJsonArrayFile(const char *path, int count, void (*fillElement)(int ind
   out.write(']');
   out.flush();
   file.close();
-  return finishJsonFileWrite(writtenPath, path, ok && out.accepted() == expected, startedAt);
+  ok = ok && out.accepted() == expected;
+  if (ok) {
+    ok = verifyFileContents(LittleFS, writtenPath.c_str(), expected, out.checksum());
+  }
+  return finishJsonFileWrite(writtenPath, path, ok, startedAt);
 }
 
 //Sends a JSON array as a chunked response, one element at a time - the HTTP counterpart of
@@ -500,6 +528,50 @@ String readFile(fs::FS &fs, const char * path, String defaultValue) {
     break;
   }
   return fileContent;
+}
+
+//File.close() cannot report LittleFS sync errors. Reopen the closed file and check the committed
+//bytes before promoting it; a complete write count alone only proves data reached the cache.
+bool verifyFileContents(fs::FS &fs, const char *path, size_t expected, uint32_t expectedChecksum) {
+  File file = fs.open(path, "r");
+  if (!file || file.size() != expected) {
+    return false;
+  }
+  uint8_t block[64];
+  size_t received = 0;
+  uint32_t checksum = FILE_CHECKSUM_SEED;
+  while (file.available()) {
+    size_t length = file.read(block, sizeof(block));
+    if (length == 0) {
+      return false;
+    }
+    received += length;
+    checksum = extendFileChecksum(checksum, block, length);
+  }
+  return received == expected && checksum == expectedChecksum;
+}
+
+//Atomic replacement for security-sensitive values. A failed write or rename leaves the old file
+//intact. Only the temporary path is allocated; the message is streamed by writeFile().
+bool writeAtomicFile(fs::FS &fs, const char *path, const char *message) {
+  String temporaryPath = String(path) + F(".tmp");
+  if (!writeFile(fs, temporaryPath.c_str(), message)) {
+    fs.remove(temporaryPath.c_str());
+    return false;
+  }
+  size_t expected = strlen(message);
+  uint32_t checksum = extendFileChecksum(FILE_CHECKSUM_SEED, reinterpret_cast<const uint8_t*>(message), expected);
+  if (!verifyFileContents(fs, temporaryPath.c_str(), expected, checksum)) {
+    fs.remove(temporaryPath.c_str());
+    SerialPrintln(F("- Atomic file verification failed"));
+    return false;
+  }
+  if (!fs.rename(temporaryPath.c_str(), path)) {
+    fs.remove(temporaryPath.c_str());
+    SerialPrintln(F("- Atomic file rename failed"));
+    return false;
+  }
+  return true;
 }
 
 //Write file to LittleFS. Returns whether the FULL message was written (a short write is a failure).

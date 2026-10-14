@@ -144,18 +144,28 @@ bool verifyAdminPassword(const String &provided) {
 }
 
 //New admin password ("" = protection off): hashed, persisted, and the cache forgets the old one.
-//Returns false if it couldn't be saved - then the old password stays, in memory and on flash. Both
+//Returns false if it couldn't be saved - the previous password remains active. Both
 //the hash file and the boot snapshot must take it: the snapshot wins at boot, so a stale one would
 //bring the old password back after a reboot.
 bool setAdminPassword(const String &password) {
+  //Establish a valid previous snapshot before changing either copy. It remains authoritative
+  //if saving the new snapshot and restoring the hash file both fail.
+  if (!finishAdminPasswordMigration()) {
+    return false;
+  }
+  if ((computeSettingsSignature() != lastSavedSettingsSignature || !LittleFS.exists(bootSnapshotPath)) && !saveBootSnapshot()) {
+    return false;
+  }
   String previousHash = adminPasswordHash;
   adminPasswordHash = hashAdminPassword(password);
   verifiedPasswordCached = false;
-  if (writeFile(LittleFS, adminPasswordHashPath, adminPasswordHash.c_str()) && saveBootSnapshot()) {
+  if (writeAtomicFile(LittleFS, adminPasswordHashPath, adminPasswordHash.c_str()) && saveBootSnapshot()) {
     return true;
   }
   adminPasswordHash = previousHash;
-  writeFile(LittleFS, adminPasswordHashPath, adminPasswordHash.c_str());
+  if (!writeAtomicFile(LittleFS, adminPasswordHashPath, adminPasswordHash.c_str())) {
+    SerialPrintln(F("Password rollback file write failed - the previous boot snapshot is retained"));
+  }
   return false;
 }
 

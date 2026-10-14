@@ -1,5 +1,14 @@
 #include <FS.h>
 
+//Streaming FNV-1a for checking completed file writes without keeping their content in RAM.
+constexpr uint32_t FILE_CHECKSUM_SEED = 2166136261UL;
+inline uint32_t extendFileChecksum(uint32_t checksum, const uint8_t *bytes, size_t length) {
+  for (size_t i = 0; i < length; i++) {
+    checksum = (checksum ^ bytes[i]) * 16777619UL;
+  }
+  return checksum;
+}
+
 //Small write buffer in front of a LittleFS File, so serializeJson() into a file isn't one
 //File::write() per character. Counts the bytes the File accepted, so a short write (flash full)
 //is detectable.
@@ -7,6 +16,7 @@ class BufferedFileWriter : public Print {
 public:
   explicit BufferedFileWriter(File &file) : _file(file) {}
   size_t write(uint8_t c) override {
+    _checksum = extendFileChecksum(_checksum, &c, 1);
     _buffer[_length++] = c;
     if (_length == sizeof(_buffer)) {
       flush();
@@ -26,11 +36,13 @@ public:
     }
   }
   size_t accepted() const { return _accepted; }
+  uint32_t checksum() const { return _checksum; }
 private:
   File &_file;
   uint8_t _buffer[64];
   size_t _length = 0;
   size_t _accepted = 0;
+  uint32_t _checksum = FILE_CHECKSUM_SEED;
 };
 
 //A message to show at a scheduled future time
