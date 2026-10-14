@@ -31,7 +31,7 @@ endpoint layout.
 
 ## Authentication
 
-CODE_REVIEW.md #29 (local, see `../CODE_REVIEW.md` if present) found the original OTA-password
+A code review found the original OTA-password
 design ineffective: it only guarded 4 firmware endpoints, and the password itself was readable by
 anyone unauthenticated (both via a dedicated endpoint and via the filesystem-wide static file
 route, which also exposed every other config file directly). Both are fixed now: **the password
@@ -49,12 +49,12 @@ to 8 sessions per device, persisted across reboots. Changing the password ends a
 `POST /api/extension-display` (primary -> extension) and `POST /api/ota-password` (needs the
 current password itself) don't take sessions.
 
-**Stored as a hash** (since 5.0.0, OWASP OW-10): the device keeps the password only as a salted
+**Stored as a hash** (since 5.0.0): the device keeps the password only as a salted
 PBKDF2-HMAC-SHA256 hash (1000 iterations) in `/adminpasswordhash.txt` and the boot snapshot. The
 first boot of 5.0.0 hashes the old plaintext password and deletes the plaintext copies. A
 firmware before 5.0.0 flashed afterwards finds no password and falls back to `splitflap`.
 
-**Multi-device link** (since 5.0.0, OWASP OW-10/OW-02): a primary no longer sends its admin
+**Multi-device link** (since 5.0.0): a primary no longer sends its admin
 password with each display push - the devices' admin passwords may now differ. Each extension is
 paired once: [`POST /api/extension-devices?action=pair`](#multi-device-link) on the primary, with
 the extension's own admin password. The primary then hands its link secret to the extension
@@ -90,19 +90,19 @@ toggle says: `POST /api/web-file`, `POST /api/units/firmware`, `POST /api/units/
 (changing the password or any toggle always requires the *current* password - otherwise a
 category opened via one toggle could reopen every other one through this same endpoint).
 
-**Reading needs the password too** (since ESPMaster 4.10.14, security review OW-08), gated by the
+**Reading needs the password too** (since ESPMaster 4.10.14), gated by the
 category toggles above. Only these stay open: `GET /`, `GET /api/session`,
 `GET /api/diag?type=health`, and `GET /api/units` (a primary polls its extensions' unit count
 there without credentials).
 
-**Host header** (since 4.10.14, OW-07, against DNS rebinding): requests are only answered (400
+**Host header** (since 4.10.14, against DNS rebinding): requests are only answered (400
 otherwise) if `Host` is an IPv4 address, the device's mDNS/DHCP name alone or as `<name>.local`, or
 exactly the router DNS name set via
 [`POST /api/wifi?action=set-router-hostname`](#post-apiwifi) (since 4.10.15 - before that any
 `<name>.<domain>` was accepted, which a foreign domain could abuse). Address extension devices the
 same way. A request with more than one `Content-Type` header is refused with 400 as well.
 
-**Password length**: a new non-empty password needs at least 8 characters (4.10.14, OW-04).
+**Password length**: a new non-empty password needs at least 8 characters (since 4.10.14).
 
 ## Endpoint index
 
@@ -186,7 +186,7 @@ speed, mode, WiFi status, etc.
   "countdownToDateUnix": 0,
   "wifiStatus": "Connected",
   "wifiRssi": -69,
-  "wifiIp": "192.168.1.51",
+  "wifiIp": "192.168.1.50",
   "scheduledMessageCount": 1,
   "rotationItemCount": 0,
   "wifiSettingsResettable": true,
@@ -215,7 +215,7 @@ can populate its display from this one already-fetched response instead of a sep
 countup/rotation) also writes its own rendered content into - only meaningful as "what was last
 submitted for Text mode" while `deviceMode` is actually `"text"`; ignore it otherwise.
 `linkPaired` (since 5.0.0) says whether this device, as an extension, is paired with a primary.
-`otaPasswordSet`/`accessControl*Public` are the access-control state (CODE_REVIEW.md #29, see
+`otaPasswordSet`/`accessControl*Public` are the access-control state (see
 [Authentication](#authentication)) - `otaPasswordSet` is whether a password is currently
 configured at all (the password itself is never sent back, unlike the field this replaced), and
 each `accessControl*Public` is that category's own toggle. The whole response needs the password
@@ -548,11 +548,14 @@ automatically), so `index.html.gz` is the *only* accepted filename.
 > 0-byte file. Verify byte-for-byte after uploading (`GET /` and compare length/content against
 > the source).
 
+The web UI comes in English and German: `firmware/build-webui.py` writes `index-en.html.gz` and
+`index-de.html.gz` (also attached to every `esp-v…` release). Uploading the other one switches the
+language; send it under the file name `index.html.gz`:
+
 ```bash
-gzip -9 -k -c index.html > index.html.gz
 curl -X POST http://192.168.1.50/api/web-file \
   -H "X-OTA-Password: splitflap" \
-  -F "file=@index.html.gz;filename=index.html.gz;type=application/gzip"
+  -F "file=@index-de.html.gz;filename=index.html.gz;type=application/gzip"
 ```
 
 ---
@@ -632,7 +635,7 @@ has been uploaded yet; `503` if another push is already in progress.
 
 **`action=probe` response** `200 application/json` on success - diagnostic-only, sends a unit into
 bootloader mode and reports which I2C address it answers on and its chip info, **without writing
-anything to flash**. Used to verify the DIP-jumper address is read live by twiboot:
+anything to flash**. Used to verify the jumper address is read live by twiboot:
 ```json
 {
   "unitIndex": 0,
@@ -816,8 +819,8 @@ animation override fields below.
 
 Replace the whole list via [`POST /api/rotation-items`](#post-apirotation-items) (full replace,
 not a merge/patch - send the complete list every time). `POST /api/settings`'s `rotationItems`
-param still works too, but a form field of a few KB can arrive empty on this device (BUILD_INFO
-Punkt 235), so the web UI uses the JSON body.
+param still works too, but a form field of a few KB can arrive empty on this device, so the web UI
+uses the JSON body.
 
 ```bash
 curl http://192.168.1.50/api/rotation-items -H "X-OTA-Password: splitflap"
@@ -930,7 +933,7 @@ rather than hardcoded credentials).
 
 **`action=reset`** - erases the stored WiFi configuration and reboots into AP setup mode (connect
 to the device's own `Split-Flap-AP` network to reconfigure). Since 4.10.14 that hotspot is
-protected by a fresh random 8-character password, shown on the flaps while it is open (OW-06),
+protected by a fresh random 8-character password, shown on the flaps while it is open,
 unless a fixed one is set (`action=set-setup-ap-password`).
 **Response** `200 text/html` - an explanatory page (meant for real navigation).
 
@@ -1106,7 +1109,7 @@ first pairing and sends it to that extension; poll `GET` for the outcome.
 
 Changes the password and/or the per-category access-control toggles (see
 [Authentication](#authentication)) together, in one request. There is no `GET` on this resource
-any more - the password itself is never sent back by the device (CODE_REVIEW.md #29); read
+any more - the password itself is never sent back by the device; read
 `otaPasswordSet`/`accessControl*Public` from [`GET /api/settings`](#get-apisettings) instead,
 which expose the non-secret state only.
 

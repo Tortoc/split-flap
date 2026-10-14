@@ -5,7 +5,6 @@ the units. Current version: `espVersion` in `ESPMaster.ino` (git tags `esp-vX.Y.
 
 - [`API.md`](API.md) - every HTTP endpoint, with `curl` examples.
 - [`../firmware/README.md`](../firmware/README.md) - build options, prebuilt binaries, flashing.
-- [`../firmware/BUILD_INFO.md`](../firmware/BUILD_INFO.md) - what changed in each build.
 - [`../README.md`](../README.md) - hardware, setup, security and multi-device overview.
 
 ## Building
@@ -23,9 +22,9 @@ the three options this firmware depends on:
 
 The Arduino IDE does not pass these linker flags by default, so a plain IDE build fails.
 
-The web UI is `data/index.html`. The device serves it gzip-compressed from LittleFS
-(`index.html.gz`); see `firmware/README.md` for building `littlefs.bin`, or replace just the page
-with `POST /api/web-file`.
+The web UI is `data/index.html` (English source); `i18n/de.json` holds the German texts. The device
+serves the page gzip-compressed from LittleFS (`index.html.gz`); `firmware/build-webui.py` builds it
+in both languages (see `firmware/README.md`), and `POST /api/web-file` replaces just the page.
 
 ## Feature flags
 
@@ -35,7 +34,7 @@ At the top of `ESPMaster.ino`:
 | --- | --- | --- |
 | `SERIAL_ENABLE` | `true` | Serial log at `SERIAL_BAUDRATE` (115200). |
 | `UNIT_CALLS_DISABLE` | `false` | No I2C calls to the units - for testing the ESP alone. |
-| `WEB_FIRMWARE_UPDATE_ENABLE` | `true` | Firmware upload from the browser (**⋮ menu > Firmware Update**). |
+| `WEB_FIRMWARE_UPDATE_ENABLE` | `true` | Firmware upload from the browser (**☰ Menu > Firmware update**). |
 | `UNIT_BOOTLOADER_ENABLE` | `true` | Push `Unit.ino` updates over I2C via twiboot, see [`../Unit/BOOTLOADER_SETUP.md`](../Unit/BOOTLOADER_SETUP.md). |
 | `UNITS_AMOUNT_MAX` | `64` | Highest unit count; the real count is detected at startup (I2C scan from address 0). |
 | `WIFI_USE_DIRECT` | `false` | `false`: WiFiManager setup hotspot `Split-Flap-AP`. `true`: fixed credentials in `wifiDirectSsid`/`wifiDirectPassword`. |
@@ -44,7 +43,6 @@ At the top of `ESPMaster.ino`:
 | `LED_ENABLE` | `true` | Error blink on `LED_DEBUG_PIN` (GPIO 2) when WiFi failed at startup - only while debug mode is on. |
 | `DEBUG_ENABLE` | `true` | Startup debug page, error panel and serial log in the web UI, switched at runtime with `POST /api/debug-mode`. |
 | `MQTT_ENABLE` | `false` | MQTT / Home Assistant integration. Off saves the PubSubClient buffer. |
-| `FAE_MOD` | defined | fae-pcb with ESP-12F module. |
 
 Settings that used to be compile-time constants (time zone, mDNS name, password, quiet hours,
 device role, ...) are set in the web UI and stored on LittleFS.
@@ -87,4 +85,4 @@ sections of the main README; the protocol details are in [`API.md`](API.md#authe
 
 Started from the split-flap-scientress ESPMaster v2.3.0 ("Scott" version: non-blocking NTP
 sync, `yield()` in display loops, WiFi strength indicator, LED setup codes). Most of that has
-since been reworked; the per-version changes are in `firmware/BUILD_INFO.md` and the git tags.
+since been reworked; the per-version changes are in the git history and tags.

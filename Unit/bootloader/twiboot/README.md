@@ -16,7 +16,7 @@ byte-for-byte identical to upstream). About half of the added lines are a docume
 at the top of `main.c` explaining the changes in place; see that header for the full,
 line-referenced rationale behind each one. Summary:
 
-1. **Dynamic I2C address via DIP switches** (~20 new lines + renaming `TWI_ADDRESS` to
+1. **Dynamic I2C address via address jumpers** (~20 new lines + renaming `TWI_ADDRESS` to
    `TWI_ADDRESS_BASE`): instead of a fixed compile-time slave address, `main()` reads the same
    6 address-jumper pins the application firmware (`Unit.ino`) already reads and adds that to
    `TWI_ADDRESS_BASE`. This lets one compiled bootloader image be flashed onto every unit -
@@ -40,11 +40,10 @@ v2.1, v3.0 on GitHub), and this fork's base commit already carries `"TWIBOOT v3.
 `VERSION_STRING` (5 commits past the v3.0 tag, version bumped in source ahead of a formal tag).
 Continuing that same scheme forward through the three changes above (each new capability a MINOR
 bump, the bugfix a MINOR bump as well since upstream has no separate patch level): v3.2 -> **v3.3**
-(dynamic addressing) -> **v3.4** (EEPROM update marker) -> **v3.5** (idle-timeout fix). This
-number is tracked in `main.c`'s header comment, not reported over I2C - `Show bootloader version`
-still returns upstream's own `"TWIBOOT v3.2"` string unchanged, since updating it would need every
-already-deployed unit's bootloader re-flashed via ISP (no OTA path exists for the bootloader
-itself, by design). Everything else - chip info, flash/EEPROM read/write, application start,
+(dynamic addressing) -> **v3.4** (EEPROM update marker) -> **v3.5** (idle-timeout fix).
+`VERSION_STRING` reports it over I2C as `"SF-TWIBOOT v3.5"` ("Read bootloader info" in the web UI);
+a unit flashed with an older build reports that build's string. The bootloader itself can only be
+updated via ISP - there is no OTA path for it, by design. Everything else - chip info, flash/EEPROM read/write, application start,
 clockstretching - is exactly the upstream protocol.
 
 twiboot acts as a slave device on a TWI/I2C bus and allows reading/writing of the internal flash memory.

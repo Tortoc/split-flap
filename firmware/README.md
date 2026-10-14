@@ -1,145 +1,122 @@
-# Vorkompilierte Firmware
+# Building and Flashing the Firmware
 
-Dieser Ordner enthält die **jeweils aktuellste kompilierte Firmware** für
-alle drei Komponenten des Projekts, direkt aus dem Quellcode in diesem Repo
-gebaut. Praktisch, wenn kein Arduino-Toolchain-Setup gewünscht ist - für
-Entwicklung/Änderungen bleibt der Quellcode in [`ESPMaster/`](../ESPMaster),
-[`Unit/`](../Unit) und [`Unit/bootloader/twiboot/`](../Unit/bootloader/twiboot)
-maßgeblich.
+This folder holds the build script for ESPMaster and the build and flashing notes for all three
+components. Prebuilt binaries are not part of the repository: they are attached to the
+[GitHub releases](https://github.com/Tortoc/split-flap/releases), one release per component tag:
 
-⚠️ **Diese Dateien werden manuell aktuell gehalten**, nicht automatisch per
-CI gebaut. Stand: siehe `BUILD_INFO.md` in diesem Ordner (Commit-Hash +
-Datum des letzten Builds). Bei Zweifel: Datum/Commit-Hash mit `git log`
-vergleichen, ob der Quellcode seither weiter geändert wurde.
+| Release tag | Files |
+| --- | --- |
+| `esp-vX.Y.Z` | `ESPMaster.bin` - sketch binary for the ESP8266<br>`littlefs-en.bin`, `littlefs-de.bin` - file system image with the English or German web UI<br>`index-en.html.gz`, `index-de.html.gz` - the web UI alone, for `POST /api/web-file` |
+| `unit-vX.Y.Z` | `Unit.hex` - unit firmware as Intel HEX (for ISP)<br>`Unit.bin` - the same firmware as a raw binary (for the I2C update push from the ESPMaster web UI, see [`Unit/BOOTLOADER_SETUP.md`](../Unit/BOOTLOADER_SETUP.md)) |
+| `twiboot-vX.Y` | `twiboot.hex` - bootloader as Intel HEX (for ISP)<br>`twiboot.bin` - the same as a raw binary |
 
-## Inhalt
+The binaries are built by hand from the tagged sources (CI only checks that the code compiles).
+For development, the sources in [`ESPMaster/`](../ESPMaster), [`Unit/`](../Unit) and
+[`Unit/bootloader/twiboot/`](../Unit/bootloader/twiboot) are authoritative.
 
-```
-firmware/
-├── ESPMaster/
-│   ├── ESPMaster.bin   - Sketch-Binary für den ESP8266 (Master-Modul)
-│   └── littlefs.bin    - Dateisystem-Image (Web-UI: index.html.gz)
-├── Unit/
-│   ├── Unit.hex         - App-Firmware für die Units (Intel HEX, für ISP/Arduino-IDE-Upload)
-│   └── Unit.bin         - Dieselbe Firmware als rohes Binary (für den I2C-Firmware-Update-Push
-│                          über die ESPMaster-Weboberfläche, siehe Unit/BOOTLOADER_SETUP.md)
-└── bootloader/
-    ├── twiboot.hex       - Bootloader-Firmware (Intel HEX, für ISP-Flash)
-    └── twiboot.bin       - Dasselbe als rohes Binary
-```
+## Building
 
-## Build-Konfiguration (wie diese Dateien entstanden sind)
+### ESPMaster
 
-⚠️ **Immer `./compile-espmaster.sh` benutzen, nicht `arduino-cli compile` von Hand tippen.**
-Dieses Skript (in diesem Ordner) verdrahtet `:eesz=4M1M,mmu=3232` und die `-Wl,--wrap=...`-Flags fest -
-beide wurden in der Vergangenheit schon mehrfach vergessen (zuletzt 2026-09-16), mit stundenlanger Fehlsuche in
-die falsche Richtung (WLAN-Flakiness) als Folge. Die Befehle unten sind nur zur Dokumentation,
-was das Skript intern tut - nicht zum Abtippen.
+⚠️ **Always build with [`compile-espmaster.sh`](compile-espmaster.sh), don't type
+`arduino-cli compile` by hand.** The script hardcodes the board options and linker flags below.
+Both have been forgotten before, each time followed by hours of searching in the wrong direction
+(it looked like flaky WiFi). The command is shown only to document what the script does:
 
-⚠️ **Das `:eesz=4M1M` ist Teil des FQBN, kein optionaler Zusatz.** Ein Build
-mit dem bloßen `esp8266:esp8266:generic` (ohne `eesz`) kompiliert still und
-ohne Fehler - aber mit einem falschen (kleineren) Flash-Layout, das die
-echte LittleFS-Partition und die WLAN-Zugangsdaten unsichtbar macht (Gerät
-verhält sich wie zurückgesetzt: eigener AP-Modus, leere Einstellungen) und
-gleichzeitig den OTA-Slot auf ~438KB schrumpft, was auch die
-Web-OTA-Selbstreparatur mit dem korrekten Build vereitelt (Absturz mitten im
-Chunk-Upload). **Nach JEDEM Compile+Flash zwingend `flashConfigured` gegen
-`flashReal` in `GET /api/diag?type=heap` prüfen**, nicht erst bei einem
-Chip-Tausch (2026-09-08/09 hier schonmal aufgetreten).
-Falls es doch passiert: Web-OTA kann sich selbst nicht reparieren (siehe
-oben) - Recovery nur per seriellem `arduino-cli upload`/`esptool.py`, das
-unabhängig vom aktuell laufenden (falschen) Partitionsschema an absoluten
-Flash-Adressen schreibt.
-
-**ESPMaster** (`esp8266:esp8266:generic`, Flash-Layout `eesz=4M1M`, MMU `3232`):
 ```bash
 arduino-cli compile --fqbn "esp8266:esp8266:generic:eesz=4M1M,mmu=3232" \
   --build-property "compiler.c.elf.extra_flags=-Wl,--wrap=_Znwj -Wl,--wrap=tcp_accept" \
   ESPMaster
 ```
-**⚠️ Das `--build-property` mit den beiden `-Wl,--wrap=...`-Flags ist seit Punkt 207/209
-(2026-09-12) ZWINGEND erforderlich, kein optionaler Zusatz.** `ServiceMemoryReserveFunctions.cpp`
-und `ServiceConnectionGateFunctions.cpp` definieren `__wrap__Znwj`/`__wrap_tcp_accept` und
-referenzieren `__real__Znwj`/`__real_tcp_accept` - letztere existieren als linkbare Symbole nur,
-wenn der Linker tatsächlich mit `--wrap=_Znwj`/`--wrap=tcp_accept` aufgerufen wird. Ohne dieses
-Flag schlägt der Build mit "undefined reference to `__real__Znwj`" (bzw. `__real_tcp_accept`) fehl
-- das ist beabsichtigt (ein stiller Fallback auf ungeschütztes Verhalten wäre schlimmer als ein
-lauter Build-Fehler). Der Mechanismus selbst ist nicht neu erfunden: dieser Core nutzt exakt
-dasselbe `-Wl,-wrap,...`-Muster bereits selbst für zwei andere Symbole
-(`compiler.c.elf.flags` in `platform.txt`: `-Wl,-wrap,system_restart_local
--Wl,-wrap,spi_flash_read`).
 
-**`mmu=3232` (wieder seit ESPMaster 5.0.1):** voller 32-KB-Flash-Cache. Von 4.10.11 bis 5.0.0
-lief der Build mit `mmu=4816H` (16 KB Cache, dafür ein zweiter Heap im IRAM für die beiden
-4-KB-OTA-Puffer). Mit dem Code von 5.0.0 kamen ausgehende TCP-Verbindungen damit erst nach
-2-4 s an (erstes Datenpaket erst per Retransmit), das Primärgerät erreichte keine
-Erweiterungsgeräte mehr (Punkt 260). Die OTA-Puffer (`HeapSelectIram`) liegen jetzt wieder im DRAM;
-ein Upload bei sehr knappem Heap kann scheitern, die alte Firmware bleibt dann aktiv. `iramFree` in
-`GET /api/diag?type=heap` ist 0.
+**`eesz=4M1M` is part of the FQBN, not an optional extra.** The ESP-12F has 4 MB of flash; this
+layout gives a ~1019 KB OTA slot and 1 MB of LittleFS at `0x300000`. A build with the bare
+`esp8266:esp8266:generic` compiles without any error but uses a much smaller layout: the real
+LittleFS partition and the stored WiFi credentials become invisible (the device behaves as if
+reset: setup hotspot, empty settings) and the OTA slot shrinks to ~438 KB, so even a web OTA
+update with the correct build fails halfway through. Recovery is only possible over the serial
+cable (`arduino-cli upload` or `esptool.py`), which writes to absolute flash addresses regardless
+of the running layout. **After every cable flash, compare `flashConfigured` with `flashReal` in
+`GET /api/diag?type=heap`.** Do the same before building with this profile for a different module:
+a layout larger than the real chip causes address errors at boot.
 
-**Änderung 2026-08-21:** vorher `eesz=1M128`
-(~438KB OTA-Slot). Per neuem `/api/heap`-Diagnosefeld
-(`ESP.getFlashChipRealSize()`) wurde festgestellt, dass der tatsächlich
-verbaute Chip 4MB groß ist - vorher nur zu einem Viertel genutzt, und der
-OTA-Slot war bereits kleiner als der Sketch selbst (Web-Firmware-Upload
-schlug deshalb strukturell immer fehl). Auf `eesz=4M1M` umgestellt
-(~1019KB OTA-Slot, 1MB LittleFS). **Wichtig, falls dieser Chip je gegen
-ein anderes Modul getauscht wird:** vor einem Rebuild mit diesem Profil
-zwingend erst `flashReal` gegen `flashConfigured` in `/api/heap` prüfen -
-ein zu groß gewähltes `eesz` für einen kleineren echten Chip kann beim
-Boot zu Adressfehlern führen.
+**The two `-Wl,--wrap=...` flags are mandatory.** `ServiceMemoryReserveFunctions.cpp` and
+`ServiceConnectionGateFunctions.cpp` (protection against TCP connection floods and out-of-memory
+aborts) define `__wrap__Znwj`/`__wrap_tcp_accept` and call `__real__Znwj`/`__real_tcp_accept`,
+which only exist when the linker runs with these flags. Without them the build fails with
+"undefined reference to `__real__Znwj`" - on purpose, a silent fallback to unprotected behavior
+would be worse. The ESP8266 core uses the same mechanism itself (`compiler.c.elf.flags` in
+`platform.txt`: `-Wl,-wrap,system_restart_local -Wl,-wrap,spi_flash_read`).
 
-`littlefs.bin` gebaut mit `mklittlefs -p 256 -b 8192 -s 1024000` (Werte
-passend zu `eesz=4M1M`s `spiffs_blocksize`/`spiffs_start`/`spiffs_end` in
-`boards.txt` - **nicht** mehr die alten `4096`/`131072`-Werte). Adresse zum
-Flashen ebenfalls geändert: `0x300000` statt `0xDB000` (siehe `boards.txt`s
-`generic.menu.eesz.4M1M.build.spiffs_start`).
+**`mmu=3232`** keeps the full 32 KB flash cache. ESPMaster 4.10.11 to 5.0.0 used `mmu=4816H`
+(16 KB cache plus a second heap in IRAM for the two 4 KB OTA buffers). With the code size of 5.0.0
+that delayed outgoing TCP connections by 2-4 s (the first data segment was only sent on
+retransmit), so a primary could no longer reach its extensions. The OTA buffers now live in DRAM
+(`iramFree` in `GET /api/diag?type=heap` is 0); an upload on a very low heap can fail, in which
+case the old firmware stays active.
 
-**Änderung 2026-08-31:** `mklittlefs` läuft nicht
-mehr direkt gegen [`ESPMaster/data/`](../ESPMaster/data), sondern gegen eine
-Kopie davon, in der `index.html` durch ein gzip-komprimiertes
-`index.html.gz` ersetzt ist (`gzip -9 -k -c ESPMaster/data/index.html >
-<kopie>/index.html.gz`, danach das unkomprimierte `index.html` aus der Kopie
-löschen) - spart ~55% Übertragungsgröße, `ESPAsyncWebSrv` liefert `.gz`-Dateien
-automatisch mit korrektem `Content-Encoding: gzip` aus. Die im Repo verfolgte
-`ESPMaster/data/index.html` selbst bleibt unverändert die normale, lesbare
-Quelldatei - nur dieser Build-Schritt komprimiert sie zusätzlich. Einzelne
-Web-Datei-Updates über `POST /api/web-file` müssen seitdem ebenfalls
-`index.html.gz` (nicht mehr `index.html`) als Zieldateiname verwenden.
+### Web UI (littlefs.bin)
 
-**Unit** (Arduino Nano / bare ATmega328P, altes Bootloader-Profil - passend
-zu den 16MHz/`hfuse=0xDA`-Fuses, siehe [`Unit/BOOTLOADER_SETUP.md`](../Unit/BOOTLOADER_SETUP.md)):
+The web UI exists in English and German. [`ESPMaster/data/index.html`](../ESPMaster/data/index.html)
+is the English source; [`ESPMaster/i18n/de.json`](../ESPMaster/i18n/de.json) maps its texts to
+German. [`build-webui.py`](build-webui.py) (Python 3, standard library only) builds both languages:
+
 ```bash
-arduino-cli compile --fqbn arduino:avr:nano:cpu=atmega328old Unit
+firmware/build-webui.py            # writes build/web/
+firmware/build-webui.py --check    # only checks the dictionaries (also run by CI)
 ```
 
-**Bootloader** (gepatchter twiboot, siehe [`Unit/bootloader/twiboot/main.c`](../Unit/bootloader/twiboot/main.c)
-für Details/Attribution):
+Per language it writes `index-<lang>.html.gz` and `littlefs-<lang>.bin`. The page is stored
+gzip-compressed as `index.html.gz` on the device; `ESPAsyncWebSrv` serves `.gz` files with the right
+`Content-Encoding` automatically, and the page is ~55 % smaller on the wire. `mklittlefs` ships with
+the ESP8266 core (`~/.arduino15/packages/esp8266/tools/mklittlefs/`, found automatically, or pass
+`--mklittlefs`). Its parameters (`-p 256 -b 8192 -s 1024000`) match `spiffs_pagesize`,
+`spiffs_blocksize` and `spiffs_start`/`spiffs_end` of `eesz=4M1M` in the core's `boards.txt`.
+
+Translating: only these parts of `index.html` are replaced, so code is never changed by accident -
+text between two tags (also with inline tags such as `<code>` or `<b>` inside, then the whole
+inner HTML is the key), the attributes `title`, `placeholder`, `aria-label` and `value`, and JS
+string literals wrapped in `T(...)`. Wrap every new user-visible JS string in `T(...)` and add it
+to `de.json`; `--check` fails on a `T(...)` string without translation and on dictionary entries
+that no longer match anything. Dictionary values for JS strings are JS source text, so a `"`
+inside a `"..."` string is written as `\"` (in JSON: `\\\"`).
+
+### Unit
+
+The ATmega328P on the fae-pcb runs at 16 MHz like a Nano; the Nano profile with the old bootloader
+matches its fuses (`hfuse=0xDA`, see [`Unit/BOOTLOADER_SETUP.md`](../Unit/BOOTLOADER_SETUP.md)):
+
+```bash
+arduino-cli compile --fqbn arduino:avr:nano:cpu=atmega328old Unit --output-dir build
+avr-objcopy -I ihex -O binary build/Unit.ino.hex build/Unit.ino.bin
+```
+
+### Bootloader
+
+Patched twiboot, see [`Unit/bootloader/twiboot/main.c`](../Unit/bootloader/twiboot/main.c) for the
+changes and attribution:
+
 ```bash
 cd Unit/bootloader/twiboot
 make MCU=atmega328p CFLAGS_TARGET="-DUSE_CLOCKSTRETCH=1"
 ```
 
-## Flashen
+## Flashing
 
-- **ESPMaster:** `ESPMaster.bin` per `arduino-cli upload`/`esptool.py` auf
-  Adresse `0x0`, danach `littlefs.bin` auf Adresse `0x300000` (seit
-  2026-08-21/Punkt 83 - vorher `0xDB000`). **Seit 2026-08-22/Punkt 88
-  zuverlässig auch per Browser möglich** (nur den Sketch, kein LittleFS) - über
-  ⋮ Menü > Firmware Update > ESPMaster, das den Sketch in 4KB-Häppchen über
-  `/api/firmware-start`/`-chunk`/`-finish` hochlädt. Die Weboberfläche allein
-  lässt sich per `POST /api/web-file` (`index.html.gz`) ersetzen. Der serielle
-  Programmer bleibt nützlich für Diagnose (Serial-Log), ist für normale Updates
-  aber nicht mehr zwingend nötig.
-- **ESPMaster 5.0.0:** Der erste Start wandelt das Admin-Passwort in einen Hash um.
-  Ein Primärgerät vor 5.0.0 kann ein geschütztes Erweiterungsgerät mit 5.0.0 nicht
-  mehr ansteuern - im Verbund beide Geräte updaten und danach koppeln (siehe
-  Haupt-[README](../README.md#multiple-displays)).
-- **Unit-App:** `Unit.hex` per ISP oder Arduino-IDE - oder, falls die Unit
-  bereits den twiboot-Bootloader hat, `Unit.bin` über die ESPMaster-Weboberfläche
-  (⋮ Menü > Firmware Update > Units) per I2C pushen, kein USB nötig.
-- **Bootloader:** `twiboot.hex` per ISP-Programmer, siehe
-  [`Unit/BOOTLOADER_SETUP.md`](../Unit/BOOTLOADER_SETUP.md) für die
-  vollständige, verifizierte Anleitung inkl. Fuse-Werten - **einmalig pro
-  Unit, physischer Eingriff an bereits verbauter Hardware, dort zuerst den
-  Testplan durchgehen.**
+- **ESPMaster over the serial cable:** `ESPMaster.bin` at `0x0`, then `littlefs-en.bin` or
+  `littlefs-de.bin` at `0x300000`, with `arduino-cli upload` or `esptool.py` (if the default
+  stub-based upload fails partway through, use `esptool.py --no-stub`).
+- **ESPMaster from the browser:** **☰ Menu > Firmware update > ESPMaster** uploads the sketch in
+  4 KB chunks (`/api/firmware-start`/`-chunk`/`-finish`); the file system is not touched. The web
+  UI alone is replaced with `POST /api/web-file`; the file name must be `index.html.gz`, so upload
+  `index-de.html.gz` as `-F "file=@index-de.html.gz;filename=index.html.gz"`. This also switches the
+  language. The serial cable stays useful for the serial log, but normal updates don't need it.
+- **ESPMaster 5.0.0 and later:** the first start converts the admin password into a hash. A
+  primary older than 5.0.0 can't drive a password-protected extension running 5.0.0 or later -
+  update both devices, then pair them (see the main [README](../README.md#multiple-displays)).
+- **Unit firmware:** `Unit.hex` over ISP. If the unit already runs twiboot, either push `Unit.bin`
+  over I2C from the web UI (**☰ Menu > Firmware update > Units**), or use `avrdude -D` so the ISP
+  write doesn't erase the bootloader (see [`Unit/BOOTLOADER_SETUP.md`](../Unit/BOOTLOADER_SETUP.md)).
+- **Bootloader:** `twiboot.hex` with an ISP programmer, see
+  [`Unit/BOOTLOADER_SETUP.md`](../Unit/BOOTLOADER_SETUP.md) for the full procedure including the
+  fuses - **once per unit, on already-built hardware; go through the test plan there first.**

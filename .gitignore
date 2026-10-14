@@ -3,6 +3,7 @@ STATUS.md
 
 # Internal bugfix/debugging reference log - kept locally, never committed
 BUGFIX_LOG.md
+firmware/BUILD_INFO.md
 Use-Cases.md
 
 # Code-review reports - kept locally, never committed
