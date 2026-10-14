@@ -116,36 +116,35 @@ like `AVRDUDE_PROG="-c stk500v1 -b 19200 -P /dev/ttyUSB0"` (adjust the port).
 The same `twiboot.hex` goes onto **every** unit, whatever its jumpers are set to.
 
 **The `install` step erases the whole flash, including any `Unit.ino` already on the chip.**
-Flash the application again right afterwards, with `-D` so the bootloader you just wrote isn't
-erased again:
+Flash the application right afterwards, with `-D` so the bootloader you just wrote isn't erased
+again:
 
 ```bash
 avrdude -c usbasp -B 125kHz -p m328p -D -U flash:w:Unit.ino.hex:i
 ```
 
-**The same applies later, not just during the first setup.** If you rewrite only the application
-over ISP once bootloader and application are both in place (e.g. to fix an EEPROM value or a bad
-calibration), `avrdude` without `-D` **erases the whole chip again, bootloader included**. The
-write itself succeeds and verifies cleanly, so the loss goes unnoticed: the unit seems to run
-normally (it boots straight into the application), but every I2C firmware update now fails with
-"Unit did not respond in bootloader mode". **Rule of thumb: every ISP write that is not meant to
-rewrite all three parts (bootloader, application, fuses) needs `-D`.** After an ISP write that
-should only change one part, check the part that should be untouched with `avrdude -c ... -p
-atmega328p -t` and `dump flash 0x7800 32` (bootloader) or `dump flash 0x0 16` (application vector
-table).
+**`-D` only works on a blank (`0xFF`) area.** Over ISP the only erase is the full chip erase, and
+without it AVR flash can only change bits from 1 to 0. So `-D` is right exactly here: for the
+application directly after `make install` erased the chip. Writing over an application or
+bootloader that is already on the chip with `-D` produces a mix of old and new content (`avrdude`
+reports `Warning: flash verification mismatch`). Leaving `-D` out instead erases the whole chip,
+bootloader included - the write verifies cleanly and the unit seems to run normally (it boots
+straight into the application), but every I2C firmware update then fails with "Unit did not
+respond in bootloader mode".
 
-**Limit of this rule:** `-D` only works if the target area is blank (`0xFF`) - AVR flash can only
-change bits from 1 to 0 without an erase. Updating an existing bootloader with `-D` produces a
-mix of old and new content (`avrdude` reports `Warning: flash verification mismatch`). An existing
-bootloader therefore can't be updated in place over ISP without losing the application. The full
-sequence is:
+**Once twiboot is installed, update the application over I2C from the web UI**, not over ISP. If
+an ISP write is unavoidable (new bootloader, broken unit), do the full sequence:
 
 1. Back up the calibration offset: `dump eeprom 0 4` in `avrdude -t` shows `calOffset` as a
-   little-endian `uint16_t` in the first two bytes.
-2. `avrdude -U flash:w:twiboot.hex:i` without `-D` (full chip erase, the application is lost).
-3. Restore the application with an I2C push from the web UI (`pushFirmwareToUnit()` in
-   `ServiceUnitFirmwareFunctions.ino`).
+   little-endian `uint16_t` in the first two bytes (the chip erase also clears the EEPROM).
+2. `make MCU=atmega328p install AVRDUDE_PROG="..."` or `avrdude -U flash:w:twiboot.hex:i`
+   without `-D` (full chip erase, then the bootloader).
+3. The application: `avrdude ... -D -U flash:w:Unit.ino.hex:i` (the area is blank now), or an
+   I2C push from the web UI.
 4. Set the calibration offset again on the **☰ Menu > Units** page.
+
+After an ISP write, check both parts with `avrdude -c ... -p atmega328p -t`: `dump flash 0x7800 32`
+(bootloader) and `dump flash 0x0 16` (application vector table).
 
 ## Step 3: Smoke test (on the spare unit, before any installed unit)
 

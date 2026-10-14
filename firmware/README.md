@@ -114,9 +114,11 @@ make MCU=atmega328p CFLAGS_TARGET="-DUSE_CLOCKSTRETCH=1"
 - **ESPMaster 5.0.0 and later:** the first start converts the admin password into a hash. A
   primary older than 5.0.0 can't drive a password-protected extension running 5.0.0 or later -
   update both devices, then pair them (see the main [README](../README.md#multiple-displays)).
-- **Unit firmware:** `Unit.hex` over ISP. If the unit already runs twiboot, either push `Unit.bin`
-  over I2C from the web UI (**☰ Menu > Firmware update > Units**), or use `avrdude -D` so the ISP
-  write doesn't erase the bootloader (see [`Unit/BOOTLOADER_SETUP.md`](../Unit/BOOTLOADER_SETUP.md)).
+- **Unit firmware:** once the unit runs twiboot, push `Unit.bin` over I2C from the web UI
+  (**☰ Menu > Firmware update > Units**). Over ISP, `Unit.hex` goes on with `avrdude -D` only
+  right after the bootloader was written (blank application area); overwriting an existing
+  application with `-D` corrupts it, without `-D` the chip erase removes the bootloader (see
+  [`Unit/BOOTLOADER_SETUP.md`](../Unit/BOOTLOADER_SETUP.md)).
 - **Bootloader:** `twiboot.hex` with an ISP programmer, see
   [`Unit/BOOTLOADER_SETUP.md`](../Unit/BOOTLOADER_SETUP.md) for the full procedure including the
   fuses - **once per unit, on already-built hardware; go through the test plan there first.**
