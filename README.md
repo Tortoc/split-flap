@@ -19,6 +19,9 @@ the great foundations they have put in place.
 - Multiple displays working as one (extend or mirror)
 - Many stability fixes for the ESP8266's tight heap and network stack
 
+This fork was developed with the help of Claude (Anthropic), an AI assistant; all changes were
+reviewed and tested on real hardware.
+
 This project has built on the original project to add extra features such as:
 
 - Message Splitting
