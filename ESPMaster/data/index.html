@@ -250,8 +250,9 @@
 			margin: 0;
 		}
 
+		/* Native width: a fixed 150px cut off the time in some locales. */
 		input[type=datetime-local] {
-			width: 150px;
+			width: auto;
 		}
 
 		.hidden {
@@ -1536,7 +1537,7 @@
 									<div id="divScheduleOptions" class="hidden">
 										<p class="note">All scheduled messages together: at most 4000 characters.</p>
 										<p>
-											<label for="scheduledDateTime">Show indefinitely</label>
+											<label for="inputCheckboxShowIndefinitely">Show indefinitely</label>
 											<input type="checkbox" id="inputCheckboxShowIndefinitely" name="scheduleShowIndefinitely" />
 										</p>
 										<p>
@@ -2721,6 +2722,8 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 								setSpeed(responseObject.flapSpeed);
 								setSavedMode(responseObject.deviceMode);
+								//Before the Text field: its line count needs the unit count.
+								setUnitCount(responseObject.unitCount);
 								//Restore the Text field after a reload - only in Text mode, since other modes write their own
 								//rendered content into inputText.
 								if (responseObject.deviceMode === "text") {
@@ -2730,7 +2733,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 								}
 								setAlignment(responseObject.alignment);
 								setAnimation(responseObject.animationMode, responseObject.animationStaggerMs);
-								setUnitCount(responseObject.unitCount);
 								displayWidth = responseObject.displayWidth || 0;
 								setCountdownDate(responseObject.countdownToDateUnix);
 								if (pendingCountdownDateOverride !== null) {
