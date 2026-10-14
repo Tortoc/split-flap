@@ -714,14 +714,17 @@ void recvWithEndMarker() {
       calibrate(true);
       run_test();
     } else {
-      // convert to int
-      calOffset = String(receivedChars).toInt();
-      // check if the integer conversion failed
-      if (calOffset == 0 && receivedChars[0] != '0') {
+      //Validate the entire command before changing RAM, EEPROM or the motor position.
+      char* endPtr;
+      long newOffset = strtol(receivedChars, &endPtr, 10);
+      if (endPtr == receivedChars || *endPtr != '\0' || newOffset < 0 || newOffset >= STEPS) {
         Serial.println(F("Invalid Command"));
       } else {
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+          calOffset = (uint16_t)newOffset;
+        }
         // save to eeprom
-        writeToEEPROM(calOffset);
+        writeToEEPROM((uint16_t)newOffset);
         calibrate(true);
       }
     }
