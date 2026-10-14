@@ -6,11 +6,12 @@ endpoint layout.
 ## Conventions
 
 - **Base URL**: `http://<device-ip>/`, or `http://<hostname>.local/` on networks/clients that
-  support mDNS (most desktop OSes and phones; not universal on IoT-only networks/routers) - added
-  2026-09-10, `"split-flap"` by default, user-changeable (System → Netzwerk in the UI, or
+  support mDNS (most desktop OSes and phones; not universal on IoT-only networks/routers) -
+  `"split-flap"` by default, user-changeable (☰ Menu > System > Network in the web UI, or
   [`POST /api/wifi?action=set-hostname`](#post-apiwifi)). Falls back to the router's DHCP client
   list or the serial log at boot if mDNS resolution doesn't work on your network.
-- **Auth**: a single password protects state-changing endpoints, via an `X-OTA-Password` header.
+- **Auth**: a single admin password protects the API (reading included), via an `X-OTA-Password`
+  header or a web UI login session.
   It can be turned off entirely (empty password - every endpoint below, including firmware/flash,
   becomes unauthenticated) or scoped down category-by-category while still set - see
   [Authentication](#authentication).
@@ -21,11 +22,10 @@ endpoint layout.
   allocation on a heap-constrained device; see that entry.
 - **CORS**: not configured - calls from a page served by a different origin will be blocked by
   the browser. Fine for `curl`/scripts/same-origin use, not for a third-party web page.
-- All endpoints below are on this ESP8266 build's default flash layout (`eesz=4M1M` since
-  2026-08-21, previously `eesz=1M128`); nothing here is affected by that choice, it's just how
-  this device happens to be built (see `firmware/README.md`).
+- The firmware is built with the flash layout `eesz=4M1M` (see `firmware/README.md`); nothing
+  in this API depends on it.
 - A live, in-device version of this reference (curl examples, same conventions) is also available
-  in the web UI itself: System → Hilfe.
+  in the web UI itself: ☰ Menu > System > Help.
 - **curl examples**: every endpoint below has one, using `192.168.1.50` as a placeholder for the
   device's actual IP - substitute your own throughout.
 
@@ -63,7 +63,7 @@ the extension's own admin password. The primary then hands its link secret to th
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/session` | Public. `{"loginRequired": bool, "loggedIn": bool}` - `loginRequired` is true while a password is set and at least one category is still protected. |
-| `POST /api/login` | Form param `password`, header `X-Requested-With: splitflap`. 200 + `Set-Cookie` on success, 401 wrong password, 429 for 2 s after a wrong attempt from the same address (since 4.10.16 per sender IP; every password check - login, `X-OTA-Password`, extension pairing, password change - shares it; if 8 senders are paused at once, new ones wait too). |
+| `POST /api/login` | Form param `password`, header `X-Requested-With: splitflap`. 200 + `Set-Cookie` on success, 401 wrong password, 429 for 2 s after a wrong attempt from the same address (since 4.10.16 per sender IP; every password check - login, `X-OTA-Password`, extension pairing, password change - shares it; if 8 senders are paused at once, new ones wait too). A request with the `X-OTA-Password` header gets `401` during the pause, even with the right password - wait 2 s after a wrong attempt. |
 | `POST /api/logout` | Ends the request's own session and clears the cookie. |
 
 **Global on/off switch**: an empty password (the default before you set one) means every endpoint
@@ -120,7 +120,7 @@ same way. A request with more than one `Content-Type` header is refused with 400
 | POST | [`/api/units?action=`](#post-apiunits) | Unit actions: `rescan`\|`offset`\|`reset` |
 | POST | [`/api/web-file`](#post-apiweb-file) | Replace `index.html` in place |
 | POST | [`/api/units/firmware`](#post-apiunitsfirmware) | Upload a Unit firmware image |
-| POST | [`/api/units/firmware-push?action=`](#post-apiunitsfirmware-push) | `push` uploaded firmware to a unit over I2C, or `probe` its bootloader address (writes nothing) |
+| POST | [`/api/units/firmware-push`](#post-apiunitsfirmware-push) | `push` uploaded firmware to a unit over I2C, or `probe` its bootloader address (writes nothing) |
 | POST | [`/api/firmware-start`](#post-apifirmware-start) | Begin a browser-based ESPMaster firmware update |
 | POST | [`/api/firmware-chunk`](#post-apifirmware-chunk) | Upload one chunk of the firmware |
 | POST | [`/api/firmware-finish`](#post-apifirmware-finish) | Finalize the update, reboot on success |
@@ -151,7 +151,7 @@ same way. A request with more than one `Content-Type` header is refused with 400
 ### `GET /`
 
 Serves the web UI (`index.html` from LittleFS) - the single-page app covering both the main
-clock view and the Administration view. Not a data endpoint; response is `text/html`.
+view and the admin dialogs. Not a data endpoint; response is `text/html`.
 
 If `DEBUG_ENABLE` is compiled in (it is, by default) and debug mode is currently on (see
 [`POST /api/debug-mode`](#post-apidebug-mode)), this instead serves a minimal startup-debug HTML
@@ -209,7 +209,7 @@ speed, mode, WiFi status, etc.
   "timezone": "Europe/Berlin"
 }
 ```
-`timezone` duplicates `GET /api/timezone` (same value) - folded in here so the Administration view
+`timezone` duplicates `GET /api/timezone` (same value) - folded in here so the web UI
 can populate its display from this one already-fetched response instead of a separate request.
 `inputText` is a shared internal variable every mode's per-second update (clock/date/countdown/
 countup/rotation) also writes its own rendered content into - only meaningful as "what was last
@@ -250,9 +250,9 @@ missing/wrong.
 | Param | Values | Notes |
 | --- | --- | --- |
 | `alignment` | `left` \| `center` \| `right` | |
-| `deviceMode` | `text` \| `clock` \| `date` \| `countdown` | |
+| `deviceMode` | `text` \| `clock` \| `date` \| `countdown` \| `countup` \| `rotation` | |
 | `flapSpeed` | `1`-`100` | Validated server-side even though the UI slider already clamps this |
-| `animationMode` | `simultaneous` \| `left-to-right` \| `right-to-left` \| `outside-in` \| `inside-out` | Added 2026-09-10 ("Animationen") - staggers each unit's start instead of writing all of them in the same tick. `simultaneous` (the default) behaves exactly like before this existed. |
+| `animationMode` | `simultaneous` \| `left-to-right` \| `right-to-left` \| `outside-in` \| `inside-out` | Staggers each unit's start instead of writing all of them in the same tick. `simultaneous` (the default) writes all units at once. |
 | `animationStaggerMs` | `0`-`1000` | Milliseconds between consecutive units' start in a directional mode - meaningless (but still validated) when `animationMode=simultaneous`. `0` also collapses any mode to "all at once". |
 | `inputText` | up to 500 chars | Only takes effect if `deviceMode` is (or becomes) `text` |
 | `scheduleEnabled` | `on` | If present, adds a **new** scheduled message instead of changing `deviceMode`/`inputText` directly - see below |
@@ -432,8 +432,8 @@ curl http://192.168.1.50/api/i2c-scan -H "X-OTA-Password: splitflap"
 
 ### `GET /api/units`
 
-Live status and calibration offset for every known unit - what the Administration view's Units
-card polls. Deferred to `loop()`, same reasoning as `/api/i2c-scan` above. Uses the lightweight
+Live status and calibration offset for every known unit - what the web UI's Units dialog
+polls. Deferred to `loop()`, same reasoning as `/api/i2c-scan` above. Uses the lightweight
 3-byte I2C read (status + offset only) - about half the I2C interrupt cost per unit versus the
 6-byte read internal display logic uses, since this endpoint's response was never used for
 anything beyond status/offset.
@@ -441,37 +441,41 @@ anything beyond status/offset.
 **Shares one registration with `POST /api/units` below** (heap-saving pattern established for
 `/api/wifi` etc.) - dispatched internally by request method, same path.
 
-**Query param** `detail` (any value, e.g. `?detail=1`): opts into the heavier 8-byte read instead,
-adding `phase`/`progress`/`unexpectedHomeTriggerCount`/`slowHomeSearchCount` to each unit - added
-as a diagnostic for watching a Unit that starts rotating with no ESPMaster-issued display job
-involved (the normal display-job wait logic's phase/progress logging never runs in that case). Not
-used by the Administration page itself - pass it manually (e.g. `curl`) when actively diagnosing.
+**Query param** `detail` (any value, e.g. `?detail=1`): opts into the heavier 11-byte read instead,
+adding `phase`/`progress`/`unexpectedHomeTriggerCount`/`slowHomeSearchCount`/`firmwareVersion` to
+each unit. The web UI's Units dialog uses it (for the firmware version); routine polling and a
+primary checking its extensions use the light read.
 
 **Response** `200 application/json`:
 ```json
 {
   "unitsAmount": 3,
+  "displayBusy": false,
+  "displayWriteFailed": false,
   "units": [
     { "index": 0, "online": true, "status": 0, "offset": 100 },
-    { "index": 1, "online": true, "status": 1, "offset": 95, "phase": 2, "progress": 340, "unexpectedHomeTriggerCount": 0, "slowHomeSearchCount": 0 }
+    { "index": 1, "online": true, "status": 1, "offset": 95, "phase": 2, "progress": 340, "unexpectedHomeTriggerCount": 0, "slowHomeSearchCount": 0, "firmwareVersion": "2.2.3" }
   ]
 }
 ```
 - `status`: `0` = ready, `1` = busy/moving.
 - `offset` / `status` are `-1` / `-2` respectively for a unit that didn't respond (`online: false`).
-- `phase`/`progress`/`unexpectedHomeTriggerCount`/`slowHomeSearchCount` only present with
-  `?detail=1`. `phase`: `0` = idle, `1` = calibrating (searching for the hall sensor marker), `2` =
+- `displayBusy`/`displayWriteFailed` (only on an extension device): still writing a pushed
+  segment / the last pushed segment had a failed unit write. A primary polls both before it moves
+  on to the next line.
+- `phase`/`progress`/`unexpectedHomeTriggerCount`/`slowHomeSearchCount`/`firmwareVersion` only
+  present with `?detail=1`. `firmwareVersion` is the unit's `Unit.ino` version, or `null` for
+  firmware without version reporting. `phase`: `0` = idle, `1` = calibrating (searching for the hall sensor marker), `2` =
   rotating to a target letter. `progress`: steps done so far in the current phase - watch whether
   this climbs steadily (points at a mechanical/torque issue) or keeps resetting toward 0 (points at
   the Unit itself repeatedly restarting, e.g. from a brown-out reset).
-- `unexpectedHomeTriggerCount`/`slowHomeSearchCount` (added 2026-09-10, inspired by
-  `scottbez1/splitflap`'s continuous home-sensor plausibility check): coarse, accumulate-since-
+- `unexpectedHomeTriggerCount`/`slowHomeSearchCount` (inspired by `scottbez1/splitflap`'s
+  continuous home-sensor plausibility check): coarse, accumulate-since-
   power-on counts of "the hall sensor fired somewhere it structurally shouldn't have" and
   "calibration succeeded, but took unusually long to find the marker" respectively - a nonzero and
   climbing value is worth investigating (possible slipping/insufficient torque), a single low
-  nonzero value isn't necessarily alarming. **Caveat, found live-testing this exact rollout**: a
-  Unit still running firmware from before this feature answers the same 8-byte request without
-  error, but its last 2 bytes are undefined bus-idle filler that reads back as **255** on this
+  nonzero value isn't necessarily alarming. **Caveat**: a Unit running firmware from before these
+  counters answers the same request without error, but its last 2 bytes are undefined bus-idle filler that reads back as **255** on this
   hardware - not a real count, and not distinguishable from a genuine 255 (I2C has no
   short-response signal a master can detect). Until every unit has received the newer `Unit.ino`,
   treat `255` on these two fields as "not supported by this unit's firmware yet", not as data.
@@ -587,17 +591,6 @@ curl -X POST http://192.168.1.50/api/units/firmware \
 Pushes the firmware previously uploaded via `/api/units/firmware` to one unit over I2C (twiboot
 protocol), or just probes which I2C address a unit answers on without writing anything - dispatched
 by `action`. Both deferred to `loop()` - a real push can take several seconds to a couple minutes.
-
-**Renamed 2026-08-22** from `/api/units/firmware/push` - that path was a strict prefix-extension
-of the upload endpoint above and got silently intercepted by it (ESPAsyncWebServer's route
-matching for the two-callback upload form), making it completely unreachable. Always use a
-sibling path, never a sub-path of an upload endpoint's URL. **Merged with the former, separate
-`/api/units/bootloader-probe` 2026-09-08** (one registration instead of two) - while doing so,
-found and fixed a related instance of the same underlying issue: this path is also
-a prefix-extension of `/api/units` (which only gained its own POST handler in an earlier
-same-day change), so it - and the upload endpoint above - had to be **registered before**
-`/api/units` in source order, or ESPAsyncWebServer's "first matching handler wins" dispatch
-silently swallows requests to either into `/api/units`'s handler instead.
 
 **Auth:** both actions require the `X-OTA-Password` header if a password is set - `probe` writes
 nothing to flash, but restarts the unit into its bootloader.
@@ -794,9 +787,7 @@ curl -X POST http://192.168.1.50/api/reboot -H "X-OTA-Password: splitflap"
 
 ### `GET /api/rotation-items`
 
-All current Rotation items, in display order. Was referenced from elsewhere in this document
-without ever having its own section - filled in 2026-09-10 alongside adding the per-item
-animation override fields below.
+All current Rotation items, in display order.
 
 **Response** `200 application/json`:
 ```json
@@ -814,8 +805,7 @@ animation override fields below.
 - `durationSeconds`: how long this item stays on screen before advancing to the next one.
 - `alignment`: per-item override (`left`\|`center`\|`right`) - `""` inherits the top-level
   `alignment` setting.
-- `animationMode`/`animationStaggerMs` (added 2026-09-10, "Animation pro Rotation-Item"): same
-  per-item-override-vs-inherit pattern as `alignment` - `animationMode=""` (and/or
+- `animationMode`/`animationStaggerMs`: same per-item-override-vs-inherit pattern as `alignment` - `animationMode=""` (and/or
   `animationStaggerMs=-1`) inherits the top-level `animationMode`/`animationStaggerMs` setting;
   otherwise both are validated exactly like the top-level `POST /api/settings` fields of the same
   name (see that entry).
@@ -952,8 +942,7 @@ connection immediately, before the new credentials are known to work; reverts au
 **Response:** `200 text/plain`: `"Connection attempt started"`. `400 text/plain` if `ssid` is
 missing/empty. `409 text/plain` if a connection attempt is already in progress.
 
-**`action=set-hostname`** - changes the mDNS hostname (`http://<hostname>.local/`), added
-2026-09-10 (user-configurable; was a compile-time constant before). Restarts the mDNS responder
+**`action=set-hostname`** - changes the mDNS hostname (`http://<hostname>.local/`). Restarts the mDNS responder
 immediately (only if `USE_MULTICAST` is compiled in) - no reboot needed.
 **Body params:** `hostname` (required) - DNS label rules: 1-63 characters, letters/digits/hyphens
 only, must not start or end with a hyphen.
@@ -992,7 +981,7 @@ curl -X POST "http://192.168.1.50/api/wifi?action=set-setup-ap-password" -H "X-O
 
 Two WiFi read-endpoints sharing one registered route, picked via `?type=`. Same
 `WIFI_USE_DIRECT == false` gating as `POST /api/wifi` above. Password-protected like the WiFi
-`POST`s (`accessControlWifi` toggle) since 2026-09-10 - see [Authentication](#authentication).
+`POST`s (`accessControlWifi` toggle) - see [Authentication](#authentication).
 
 **Query param** `type` (required): `scan-result` | `connect-status`.
 
@@ -1025,8 +1014,7 @@ curl "http://192.168.1.50/api/wifi?type=connect-status" -H "X-OTA-Password: spli
 
 ### `GET`/`POST /api/mqtt`
 
-MQTT + Home Assistant auto-discovery, added 2026-09-10 (found in two independent forks).
-Only exists at all if `MQTT_ENABLE` in `ESPMaster.ino` is `true`
+MQTT + Home Assistant auto-discovery. Only exists at all if `MQTT_ENABLE` in `ESPMaster.ino` is `true`
 (off by default) - a compile-time flag, not runtime-changeable, since `PubSubClient`'s buffer is
 `malloc()`'d from its constructor and there's no way to avoid that cost short of not linking the
 library in at all. Separately, `mqttEnabled` (this endpoint) controls whether it actually
@@ -1126,18 +1114,20 @@ endpoint) through here.
 | Param | Notes |
 | --- | --- |
 | `currentPassword` | Required. Must match the current password (empty string matches if none is set yet). |
-| `newPassword` | Optional, stored only as a hash (since 5.0.0). Omit entirely to leave the password unchanged. An **empty value** (`newPassword=`) deliberately disables password protection globally - every endpoint in this API, including firmware/flash, becomes unauthenticated. Not the same as omitting the param. |
+| `newPassword` | Optional, at least 8 characters, stored only as a hash (since 5.0.0). Omit entirely to leave the password unchanged. An **empty value** (`newPassword=`) deliberately disables password protection globally - every endpoint in this API, including firmware/flash, becomes unauthenticated. Not the same as omitting the param. |
 | `accessControlText`, `accessControlSettings`, `accessControlUnits`, `accessControlWifi`, `accessControlTimezone`, `accessControlSystem` | Optional, standard HTML checkbox semantics: present (any value, e.g. `on`) = that category is public; **absent = that category is protected**. Send the full set you want every time - an absent one is not "leave unchanged", it's "turn off". |
 
 **Response:**
 - `200 text/plain`: `"Security settings updated"`
-- `400 text/plain` if `currentPassword` is missing.
+- `400 text/plain` if `currentPassword` is missing, or `newPassword` is 1-7 characters long (at
+  least 8, or empty to switch protection off).
 - `401 text/plain` if `currentPassword` doesn't match.
+- `429 text/plain` for 2 s after a wrong password from the same address.
 - `500 text/plain` if the new password couldn't be saved - the old password stays valid (existing
   sessions have already been ended).
 
 ```bash
-# Change the password only, leave toggles untouched:
+# Change the password; every category stays protected (absent toggles = protected):
 curl -X POST http://192.168.1.50/api/ota-password \
   --data "currentPassword=splitflap&newPassword=newSecret123"
 

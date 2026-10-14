@@ -155,11 +155,11 @@ the next unit:
    bootloader stays out of the way as long as no update is started. **Test this several times with
    a reset or power cycle**, not just once - a loose ISP connection can falsify a single test.
 2. **Jumper test (the actual point of this patch):** set the unit's jumpers to a known value and
-   run `POST /api/units/firmware-push?action=probe` (see `ESPMaster/API.md`). It sends the unit
-   into the bootloader and reports the address it answers on, which must be exactly
-   `0x29 + <jumper value>`. Then set the jumpers to a **different** value, power-cycle the unit and
-   probe again: the bootloader now answers on the **new** address, without another ISP flash. Only
-   continue once this works reliably.
+   run `POST /api/units/firmware-push` with the body `action=probe&id=<index>` (see
+   `ESPMaster/API.md`). It sends the unit into the bootloader and reports the address it answers
+   on, which must be exactly `0x29 + <jumper value>`. Then set the jumpers to a **different**
+   value, power-cycle the unit and probe again: the bootloader now answers on the **new** address,
+   without another ISP flash. Only continue once this works reliably.
 3. Push a freshly compiled, functionally unchanged `Unit.ino` to exactly this unit from the web UI
    (**☰ Menu > Firmware update > Units**), then check normal operation again.
 4. Simulate an aborted update (e.g. restart ESPMaster in the middle of a push) and check that a

@@ -2160,7 +2160,7 @@ curl -X POST http://192.168.1.50/api/mqtt \
 						<details class="api-endpoint">
 							<summary>POST /api/ota-password</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Change the password and/or the opened categories; <code>currentPassword</code> is always required. A new password needs at least 8 characters; an empty <code>newPassword=</code> turns protection off. The device only stores a hash of the password.</p>
+								<p class="api-endpoint-desc">Change the password and/or the opened categories; <code>currentPassword</code> is always required. A new password needs at least 8 characters; an empty <code>newPassword=</code> turns protection off. The device only stores a hash of the password. Send every category that should stay open (e.g. <code>accessControlText=on</code>); a missing one becomes protected.</p>
 								<pre class="api-code"># Change the password only
 curl -X POST http://192.168.1.50/api/ota-password \
   --data "currentPassword=splitflap&amp;newPassword=myNewPassword"
@@ -2259,7 +2259,7 @@ curl -X POST http://192.168.1.50/api/web-file \
 							</div>
 						</details>
 						<details class="api-endpoint">
-							<summary>POST /api/units/firmware-push?action=push|probe</summary>
+							<summary>POST /api/units/firmware-push (action=push|probe)</summary>
 							<div class="api-endpoint-body">
 								<p class="api-endpoint-desc"><code>push</code> sends the uploaded firmware to a unit over I2C. <code>probe</code> only checks whether the unit answers in its bootloader and writes nothing; since it restarts the unit, it needs the password too.</p>
 								<pre class="api-code">curl -X POST http://192.168.1.50/api/units/firmware-push \
@@ -5827,7 +5827,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			resultEl.innerHTML = html;
 		}
 
-		//Reads twiboot's version string (and chip info) via POST /api/units/firmware-push?action=probe -
+		//Reads twiboot's version string (and chip info) via POST /api/units/firmware-push (action=probe) -
 		//disruptive: the unit briefly reboots into the bootloader.
 		function probeUnitBootloader() {
 			var target = getUnitFirmwareTarget();

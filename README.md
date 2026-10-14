@@ -176,7 +176,7 @@ Once a unit has twiboot installed, updating it going forward is done entirely fr
    ```
    (`avr-objcopy` ships with the Arduino AVR toolchain.)
 2. On the ESPMaster web UI's **☰ Menu > Firmware update > Units** tab, upload the `.bin`
-   and pick the target unit, then hit "Update starten".
+   and pick the target unit, then hit "Start update".
 
 The unit reboots into its bootloader, the new firmware is written and verified page-by-page, and
 only once everything checks out does the unit switch over to running it. There is no rollback: the
@@ -191,12 +191,12 @@ firmware keeps running.
 
 #### Pre-requisites
 
-The recommended toolchain is [arduino-cli](https://arduino.github.io/arduino-cli/). Install the ESP8266 core and the libraries in the versions the [CI build](./.github/workflows/build.yml) uses:
+The recommended toolchain is [arduino-cli](https://arduino.github.io/arduino-cli/). Install the cores and the libraries in the versions the [CI build](./.github/workflows/build.yml) uses (`arduino:avr` and `Stepper` are for `Unit.ino`; `--no-deps` keeps the dependencies at these versions too):
 
 ```bash
-arduino-cli core install esp8266:esp8266@3.1.2 --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
-arduino-cli lib install "ArduinoJson@7.0.4" "ESPAsyncWebSrv@1.2.7" "ESPAsyncTCP@1.2.4" "NTPClient@3.2.1" \
-  "ezTime@0.8.3" "LinkedList@1.3.3" "WiFiManager@2.0.17" "PubSubClient@2.8"
+arduino-cli core install esp8266:esp8266@3.1.2 arduino:avr@1.8.8 --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
+arduino-cli lib install --no-deps "ArduinoJson@7.0.4" "ESPAsyncWebSrv@1.2.7" "ESPAsyncTCP@1.2.4" "NTPClient@3.2.1" \
+  "ezTime@0.8.3" "LinkedList@1.3.3" "WiFiManager@2.0.17" "PubSubClient@2.8" "Stepper@1.1.3"
 ```
 
 - [ArduinoJSON](https://github.com/bblanchon/ArduinoJson) - Version: 7.0.4
@@ -207,6 +207,7 @@ arduino-cli lib install "ArduinoJson@7.0.4" "ESPAsyncWebSrv@1.2.7" "ESPAsyncTCP@
 - [WiFiManager](https://github.com/tzapu/WiFiManager) - Version: 2.0.17
 - [PubSubClient](https://github.com/knolleary/pubsubclient) - Version: 2.8.0 (MQTT support -
   only linked in if `MQTT_ENABLE` in `ESPMaster.ino` is `true`; off by default)
+- [Stepper](https://github.com/arduino-libraries/Stepper) - Version: 1.1.3 (`Unit.ino` only)
 
 The Arduino IDE works as well: add the board manager URL above, install the ESP8266 core and the same libraries through the Library Manager.
 
@@ -331,7 +332,7 @@ Give every display its own mDNS name (**☰ Menu > System > Network**) so the `.
 
 ### Common Problems
 
-- If the ESP is not talking to the units correctly, check that unit addresses are sequential starting from 0 with no gaps (see [Automatic Unit Detection](#automatic-unit-detection) - a gap stops the count early) and use "Rescan Units" on the **☰ Menu > Units** page after fixing anything.
+- If the ESP is not talking to the units correctly, check that unit addresses are sequential starting from 0 with no gaps (see [Automatic Unit Detection](#automatic-unit-detection) - a gap stops the count early) and use "Rescan units" on the **☰ Menu > Units** page after fixing anything.
 - Ensure you upload the sketch and the LittleFS sketch upload to the ESP8266.
 - When the system is powered, your Hall Sensor should only light up when a magnet is nearby.
 
