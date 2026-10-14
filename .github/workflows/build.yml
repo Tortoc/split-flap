@@ -1,0 +1,59 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-arduino-cli@v2
+        with:
+          version: 1.5.1
+
+      - name: Install cores
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp8266:esp8266@3.1.2 arduino:avr@1.8.8
+
+      # Same versions as listed in README.md; --no-deps keeps the dependencies at these versions too
+      - name: Install libraries
+        run: |
+          arduino-cli lib install --no-deps \
+            "ArduinoJson@7.0.4" \
+            "ESPAsyncWebSrv@1.2.7" \
+            "ESPAsyncTCP@1.2.4" \
+            "NTPClient@3.2.1" \
+            "ezTime@0.8.3" \
+            "LinkedList@1.3.3" \
+            "WiFiManager@2.0.17" \
+            "PubSubClient@2.8" \
+            "Stepper@1.1.3"
+
+      # Every T(...) string in the web UI needs a translation, and no dictionary entry may be stale
+      - name: Check web UI translations
+        run: python3 firmware/build-webui.py --check
+
+      - name: Build ESPMaster
+        run: firmware/compile-espmaster.sh
+
+      - name: Build Unit
+        run: arduino-cli compile --fqbn arduino:avr:nano:cpu=atmega328old Unit
+
+      # twiboot with the avr-gcc that came with arduino:avr; the bootloader section is 2048 bytes (hfuse=0xDA)
+      - name: Build bootloader
+        run: |
+          export PATH="$(echo ~/.arduino15/packages/arduino/tools/avr-gcc/*/bin):$PATH"
+          make -C Unit/bootloader/twiboot MCU=atmega328p CFLAGS_TARGET="-DUSE_CLOCKSTRETCH=1"
+          size=$(stat -c%s Unit/bootloader/twiboot/twiboot.bin)
+          echo "twiboot.bin: $size bytes"
+          test "$size" -le 2048
