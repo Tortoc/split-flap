@@ -18,8 +18,8 @@
 #define USE_MULTICAST       true   //"<mdnsHostname>.local" on the LAN, unique per display
 //LED_ENABLE only gates the error blink when WiFi failed at startup (end of setup()).
 #define LED_ENABLE          true
-#define DEBUG_ENABLE true  //startup debug page, error panel, page-load log, serial debug log -
-                           //switched at runtime via POST /api/debug-mode
+#define DEBUG_ENABLE true  //startup debug page (crash log, heap) instead of the web UI, plus the
+                           //debug LED - switched at runtime via POST /api/debug-mode
 #define MQTT_ENABLE false  //MQTT + Home Assistant auto-discovery.
                            //Compile-time only: PubSubClient malloc()s its buffer in the
                            //constructor, so false is the only way to avoid that cost.
@@ -78,7 +78,6 @@
 #include <ESP8266mDNS.h>
 #endif
 #include <ezTime.h>
-#include <NTPClient.h>
 #include <WiFiUdp.h>
 #if MQTT_ENABLE == true
 #include <PubSubClient.h>
@@ -203,7 +202,7 @@ bool isReservedI2CAddress(int address) {
 //1. Multipart boundary outside RFC 2046's 1-70 characters: the library's parser loops over it with
 //   a uint8_t counter, so 256+ characters hang it until the watchdog resets the device (cf.
 //   CVE-2026-54571).
-//2. Unknown Host header (DNS rebinding): accepted are an IPv4 address, this device's mDNS/DHCP name
+//2. Unknown Host header (DNS rebinding): accepted are an IPv4 address, this device's name (mDNS and DHCP)
 //   with or without ".local", or the exact routerHostname. Anything else is refused, even names
 //   starting with this device's name ("split-flap.attacker.example"). Extensions must be
 //   configured under one of these names.
@@ -329,12 +328,12 @@ String clockFormat = "HH:mm";
 //Countdown display prefix/suffix, shared by standalone Countdown mode and Rotation's countdown
 //items. Empty means "don't show that part" - see buildCountdownText().
 String countdownPrefix = "";
-String countdownSuffix = "Tage";
+String countdownSuffix = "days";
 
 //Countup display prefix/suffix - same idea as Countdown above, but for days elapsed *since* a
 //date instead of days remaining *until* one. See buildCountupText().
 String countupPrefix = "";
-String countupSuffix = "Tage";
+String countupSuffix = "days";
 
 //How long a scheduled message stays on screen
 const int scheduledMessageDisplayTimeMillis = 7500;
@@ -345,7 +344,7 @@ IPAddress wifiDeviceStaticIp(192, 168, 1, 50);
 
 //Your router details
 IPAddress wifiRouterGateway(192, 168, 1, 1);
-IPAddress wifiSubnet(255, 255, 0, 0);
+IPAddress wifiSubnet(255, 255, 255, 0);
 
 //DNS Entry. Default: Google DNS
 IPAddress wifiPrimaryDns(8, 8, 8, 8);
@@ -353,7 +352,7 @@ IPAddress wifiPrimaryDns(8, 8, 8, 8);
 
 //--- Core state - normal running of the system, be careful changing these ---
 //Firmware version shown in the UI (git tags esp-vX.Y.Z) - an own version line since the fork from
-//JonnyBooker's 2.3.0-Scott.
+//scientress/split-flap's 2.3.0.
 const char* espVersion = "5.0.6";
 
 //The letters on the flaps, in drum order - must match the physical drums.
@@ -560,8 +559,8 @@ const char* extensionLinkModePath = "/extensionlinkmode.txt";
 //Own file (a JSON array of hosts), not part of the boot snapshot.
 const char* extensionDevicesPath = "/extensiondevices.json";
 //Boot snapshot: this flash chip takes ~800ms per file open, and loading used ~30 files. This file
-//mirrors those scalar settings in one JSON blob, so boot needs one open. The individual files stay
-//the source of truth; this is a derived cache.
+//mirrors those scalar settings in one JSON blob, so boot needs one open. A valid snapshot wins at
+//boot; the individual files are the fallback when it is missing or broken (and get rewritten too).
 const char* bootSnapshotPath = "/boot-snapshot.json";
 //Kept current by checkBootSnapshotFreshness() from loop() (signature compare, no dirty flags).
 String lastSavedSettingsSignature = "";
@@ -580,12 +579,16 @@ const char* countdownSuffixPath = "/countdownsuffix.txt";
 const char* countupPath = "/countup.txt";
 const char* countupPrefixPath = "/countupprefix.txt";
 const char* countupSuffixPath = "/countupsuffix.txt";
+//Text mode's text - see persistTextModeText() (ServiceFileSystemFunctions.ino).
+const char* inputTextPath = "/inputtext.txt";
 
 //Variables for storing things for checking and use in normal running
 String alignment = "";
 String flapSpeed = "";
 String animationMode = ANIMATION_MODE_SIMULTANEOUS; //default: all units animate at once
 unsigned long animationStaggerMs = 150; //ms between consecutive units' start, see ANIMATION_MODES
+//In Text mode the text itself, persisted (persistTextModeText()); every other mode writes its
+//rendered content into it each second.
 String inputText = "";
 String deviceMode = "";
 String deviceRole = "standalone"; //standalone|primary|extension
@@ -613,6 +616,8 @@ bool isPendingUnitsReset = false;
 //Hours must not blank it (see initWiFi(), ServiceWifiFunctions.ino).
 bool wifiSetupPortalOpen = false;
 bool isWifiConfigured = false;
+//POST /api/wifi?action=set-hostname changed mdnsHostname - loop() hands it to the DHCP client too.
+bool pendingDhcpHostnameUpdate = false;
 //Background offline-recovery retry - see loop()'s `if (!isWifiConfigured)` block.
 unsigned long lastOfflineReconnectAttempt = 0;
 #define OFFLINE_RECONNECT_RETRY_MS (5UL * 60UL * 1000UL) //5 minutes
@@ -626,7 +631,6 @@ unsigned long lastWifiDisconnectAt = 0;
 bool rtcPresent = false;
 bool rtcOscillatorStopFlag = false;
 bool showDebugPage = false; //defaults off - the startup debug page can render blank on fresh boots
-volatile bool webRequestActive = false; //skip display updates while a web request is in flight
 LList<ScheduledMessage> scheduledMessages;
 //False while an out-of-memory read left scheduledMessages incomplete - saving that partial list
 //would overwrite every entry never read. writeScheduledMessagesToFile()
@@ -827,8 +831,9 @@ void setup() {
   Wire.setClock(400000); //400kHz - units run at 16MHz with 4.7k pull-ups, comfortably support this
 
 #if UNIT_BOOTLOADER_ENABLE == true
-  //twiboot holds SCL low during a flash page write - give it more time than the worst-case
-  //erase+write duration so it never gets misread as a bus error.
+  //twiboot holds SCL low during a flash page write (erase+write ~9 ms). 25 ms covers that with room
+  //to spare and is shorter than the core's 150 ms default, so a stuck slave blocks a read less long.
+  //Every Wire.begin() resets the limit to the default - set it again after each one.
   Wire.setClockStretchLimit(25000);
 #endif
 
@@ -956,7 +961,7 @@ void setup() {
     
     //Debug mode was already loaded at the very top of setup() - just log the already-known value.
 #if DEBUG_ENABLE == true
-    SerialPrintln(F("DEBUG: Debug mode: ") + String(showDebugPage ? F("enabled") : F("disabled")) + F(" (controls startup page, error status, page load log, and serial log)"));
+    SerialPrintln(F("DEBUG: Debug mode: ") + String(showDebugPage ? F("enabled") : F("disabled")) + F(" (controls the startup debug page and the debug LED)"));
 #endif
 
     //Web Server Endpoint configuration
@@ -1000,7 +1005,7 @@ void setup() {
         html += F("<button onclick='continueToNormal()'>Continue to Normal Mode</button>");
         html += F("<button onclick='loadDiag()'>Refresh Diagnostics</button>");
         html += "<div class='status'>Current Status: " + debugStatus + "</div>";
-        html += F("<p>Debug mode is enabled. This page shows current crash log and heap diagnostics. When you continue to normal mode, you'll also see error status panel and page load debug log features.</p>");
+        html += F("<p>Debug mode is enabled. This page shows the crash log and heap diagnostics.</p>");
         html += F("<div class='log-container' id='logContainer'>");
         html += F("<div style='color: #888;'>Loading diagnostics...</div>");
         html += F("</div>");
@@ -1056,33 +1061,25 @@ void setup() {
         html += F("  var map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#039;' };");
         html += F("  return text.replace(/[&<>\"']/g, function(m) { return map[m]; });");
         html += F("}");
-        html += F("function continueToNormal() {");
-        //Same sessionStorage keys as index.html's getAdminPassword() - same origin, so a password
-        //already entered on the main page is reused here without asking again, and vice versa.
-        html += F("  var password = '';");
-        html += F("  if (sessionStorage.getItem('splitflapAdminPasswordKnown') === '1') {");
-        html += F("    password = sessionStorage.getItem('splitflapAdminPassword') || '';");
-        html += F("  } else {");
-        html += F("    var entered = prompt('Admin password (leave empty if none is set):', '');");
-        html += F("    if (entered !== null) {");
-        html += F("      password = entered;");
-        html += F("      sessionStorage.setItem('splitflapAdminPassword', entered);");
-        html += F("      sessionStorage.setItem('splitflapAdminPasswordKnown', '1');");
-        html += F("    }");
-        html += F("  }");
+        //Uses the web UI's login session (cookie + X-Requested-With); only without one it asks for the
+        //password and sends it as X-OTA-Password.
+        html += F("function continueToNormal(password) {");
         html += F("  var xhr = new XMLHttpRequest();");
         html += F("  xhr.onreadystatechange = function() {");
-        html += F("    if (this.readyState == 4 && this.status == 200) {");
+        html += F("    if (this.readyState != 4) return;");
+        html += F("    if (this.status == 200) {");
         html += F("      window.location.href = '/';");
-        html += F("    } else if (this.readyState == 4 && this.status == 401) {");
-        html += F("      sessionStorage.removeItem('splitflapAdminPassword');");
-        html += F("      sessionStorage.removeItem('splitflapAdminPasswordKnown');");
-        html += F("      alert('Wrong admin password.');");
+        html += F("    } else if (this.status == 401) {");
+        html += F("      var entered = prompt('Admin password:', '');");
+        html += F("      if (entered !== null) continueToNormal(entered);");
+        html += F("    } else {");
+        html += F("      alert('Failed: status ' + this.status);");
         html += F("    }");
         html += F("  };");
         html += F("  xhr.open('POST', '/api/debug-mode', true);");
         html += F("  xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');");
-        html += F("  xhr.setRequestHeader('X-OTA-Password', password);");
+        html += F("  xhr.setRequestHeader('X-Requested-With', 'splitflap');");
+        html += F("  if (password) xhr.setRequestHeader('X-OTA-Password', password);");
         html += F("  xhr.send('enabled=false');");
         html += F("}");
         html += F("loadDiag();");
@@ -1137,10 +1134,7 @@ void setup() {
       if (rejectIfPasswordRequired(request, accessControlSettingsPublic)) return;
       unsigned long settingsStart = millis();
       SerialPrintln(F("DEBUG: Request for Settings Received at ") + String(settingsStart) + F("ms"));
-      
-      // Set flag to prevent display updates during web request
-      webRequestActive = true;
-      
+
       // Build minimal response immediately (fast path)
       JsonDocument minimalDoc;
       minimalDoc["timezoneOffset"] = timezone.getOffset();
@@ -1216,9 +1210,6 @@ void setup() {
       request->send(response);
 
       SerialPrintln(F("DEBUG: Settings response sent (total: ") + String(millis() - settingsStart) + F("ms)"));
-
-      // Clear flag after request completes
-      webRequestActive = false;
     });
 
     //Separate from the GET handler on purpose: merged into one HTTP_GET|HTTP_POST registration, real
@@ -1615,8 +1606,10 @@ void setup() {
             directTextRejected = true;
           } else {
             //Only if device mode has changed
+            bool switchedToTextMode = false;
             if (newDeviceModeValue != "" && deviceMode != newDeviceModeValue) {
               deviceMode = newDeviceModeValue;
+              switchedToTextMode = deviceMode == DEVICE_MODE_TEXT;
 
               //Always (re-)start a sequence from the beginning when switching into Rotation mode.
               if (deviceMode == DEVICE_MODE_ROTATION) {
@@ -1631,9 +1624,17 @@ void setup() {
               SerialPrintln(F("Device Mode Set: ") + deviceMode);
             }
 
-            //Only if we are showing text
-            if (hasNewInputTextValue && deviceMode == DEVICE_MODE_TEXT) {
-              inputText = newInputTextValue;
+            //Only if we are showing text. Switching back to Text mode without a text resumes the last
+            //one - inputText still holds the previous mode's rendered content.
+            if (deviceMode == DEVICE_MODE_TEXT) {
+              if (hasNewInputTextValue) {
+                if (switchedToTextMode || inputText != newInputTextValue) {
+                  inputText = newInputTextValue;
+                  persistTextModeText();
+                }
+              } else if (switchedToTextMode) {
+                inputText = readFile(LittleFS, inputTextPath, "");
+              }
             }
           }
         }
@@ -1838,7 +1839,7 @@ void setup() {
     // handler wins, so "/api/units" would swallow "/api/units/firmware*".
 
     // Admin: upload a compiled Unit.ino firmware image (raw AVR .bin, NOT ESPMaster's own) to be
-    // pushed to a unit via /api/units/firmware-push. Requires X-OTA-Password, same as /api/firmware.
+    // pushed to a unit via /api/units/firmware-push. Requires the password, like /api/firmware-start.
     webServer.on("/api/units/firmware", ASYNC_HTTP_POST,
       [](AsyncWebServerRequest * request) {
         //Ownership captured before releasing it - the request-scoped way to know whether THIS
@@ -2422,15 +2423,15 @@ void setup() {
 
       if (enabled) {
         SerialPrintln(F("DEBUG: Request to enable debug mode received"));
-        request->send(200, "text/plain", "OK - Debug mode enabled. This enables: startup debug page, error status panel, page load debug log, and serial debug log. Refresh page to see changes.");
+        request->send(200, "text/plain", "OK - Debug mode enabled: the startup debug page (crash log, heap) is shown instead of the web UI, and the debug LED is active. Refresh the page to see it.");
       } else {
         SerialPrintln(F("DEBUG: Request to exit debug mode received"));
-        request->send(200, "text/plain", "OK - Debug mode disabled. Startup debug page, error status, and debug logs will be hidden.");
+        request->send(200, "text/plain", "OK - Debug mode disabled. The normal web UI is shown again.");
       }
     });
 #endif
     
-    //POST, not GET (also reset-units/ota/reset-wifi): a GET link can be triggered cross-site.
+    //POST, not GET (like every other action): a GET link can be triggered cross-site.
     webServer.on("/api/reboot", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlSystemPublic)) return;
 
@@ -2555,13 +2556,8 @@ void setup() {
       } else {
         //Permanent: switches to Text mode like the main form. A busy display isn't a loss - the
         //mode loop keeps retrying.
-        if (deviceMode != DEVICE_MODE_TEXT) {
-          deviceMode = DEVICE_MODE_TEXT;
-          writeFile(LittleFS, deviceModePath, deviceMode.c_str());
-        }
-        inputText = newText;
+        applyTextModeText(newText);
         showText(newText);
-        checkBootSnapshotFreshness(); //re-sync now, not only on the 30s check
       }
 
       request->send(200, "text/plain", "OK");
@@ -2914,9 +2910,10 @@ void setup() {
           return;
         }
 
+        //The name is also the DHCP name (initWiFi()), where the ESP8266 SDK takes at most 32 characters.
         String newHostname = request->getParam("hostname", true)->value();
-        if (!isValidMdnsHostname(newHostname)) {
-          request->send(400, "text/plain", "Invalid hostname - only letters, digits, and hyphens (not leading/trailing), 1-63 characters");
+        if (!isValidMdnsHostname(newHostname) || newHostname.length() > 32) {
+          request->send(400, "text/plain", "Invalid hostname - only letters, digits, and hyphens (not leading/trailing), 1-32 characters");
           return;
         }
 
@@ -2933,6 +2930,7 @@ void setup() {
         }
 #endif
 
+        pendingDhcpHostnameUpdate = true; //WiFi.hostname() renews the DHCP lease - done from loop()
         checkBootSnapshotFreshness(); //re-sync now, not only on the 30s check
         request->send(200, "text/plain", "Hostname updated");
         return;
@@ -3346,45 +3344,39 @@ void performOneSecondDisplayTick() {
   checkCountup();
   checkRotation();
 
-  // Skip display updates if a web request is active to prevent blocking.
-  // (showText() itself is a no-op when no units are detected, see scanI2CBus())
-  if (!webRequestActive) {
-    //Mode Selection
-    if (deviceMode == DEVICE_MODE_ROTATION) {
-      //rotationCurrentAlignment ("" = inherit) is set by checkRotation(). A second counts toward the
-      //item's duration only once its render has SETTLED - showText() returns true when a job merely
-      //starts, and flap movement isn't reading time. A temporary message (finalPauseMs > 0) displaces
-      //the item; it then has to render and settle again.
-      bool foreignJob = isTemporaryMessageJobBusy();
-      if (foreignJob) {
-        rotationItemStarted = false;
-        rotationItemSettled = false;
-      } else if (rotationItemStarted && !isDisplayJobBusy()) {
-        rotationItemSettled = true;
-      }
-      bool rotationTextAccepted = showText(inputText, 0, rotationCurrentAlignment, rotationCurrentAnimationMode, rotationCurrentAnimationStaggerMs);
-      if (rotationTextAccepted) {
-        rotationItemStarted = true;
-        if (!isDisplayJobBusy()) {
-          rotationItemSettled = true; //already showing exactly this - nothing to move
-        }
-      }
-      if (rotationItemSettled && !foreignJob) {
-        rotationItemAcceptedSeconds++;
+  //showText() itself is a no-op when no units are detected, see scanI2CBus().
+  //Mode Selection
+  if (deviceMode == DEVICE_MODE_ROTATION) {
+    //rotationCurrentAlignment ("" = inherit) is set by checkRotation(). A second counts toward the
+    //item's duration only once its render has SETTLED - showText() returns true when a job merely
+    //starts, and flap movement isn't reading time. A temporary message (finalPauseMs > 0) displaces
+    //the item; it then has to render and settle again.
+    bool foreignJob = isTemporaryMessageJobBusy();
+    if (foreignJob) {
+      rotationItemStarted = false;
+      rotationItemSettled = false;
+    } else if (rotationItemStarted && !isDisplayJobBusy()) {
+      rotationItemSettled = true;
+    }
+    bool rotationTextAccepted = showText(inputText, 0, rotationCurrentAlignment, rotationCurrentAnimationMode, rotationCurrentAnimationStaggerMs);
+    if (rotationTextAccepted) {
+      rotationItemStarted = true;
+      if (!isDisplayJobBusy()) {
+        rotationItemSettled = true; //already showing exactly this - nothing to move
       }
     }
-    else if (deviceMode == DEVICE_MODE_TEXT || deviceMode == DEVICE_MODE_COUNTDOWN || deviceMode == DEVICE_MODE_COUNTUP) {
-      showText(inputText);
+    if (rotationItemSettled && !foreignJob) {
+      rotationItemAcceptedSeconds++;
     }
-    else if (deviceMode == DEVICE_MODE_DATE) {
-      showText(timezone.dateTime(convertUserDateFormatToEzTime(dateFormat)));
-    }
-    else if (deviceMode == DEVICE_MODE_CLOCK) {
-      showText(timezone.dateTime(convertUserDateFormatToEzTime(clockFormat)));
-    }
-  } else {
-    // Web request is active, skip display update to keep web server responsive
-    yield(); // Give web server time to process
+  }
+  else if (deviceMode == DEVICE_MODE_TEXT || deviceMode == DEVICE_MODE_COUNTDOWN || deviceMode == DEVICE_MODE_COUNTUP) {
+    showText(inputText);
+  }
+  else if (deviceMode == DEVICE_MODE_DATE) {
+    showText(timezone.dateTime(convertUserDateFormatToEzTime(dateFormat)));
+  }
+  else if (deviceMode == DEVICE_MODE_CLOCK) {
+    showText(timezone.dateTime(convertUserDateFormatToEzTime(clockFormat)));
   }
 }
 
@@ -3453,6 +3445,11 @@ void loop() {
 
   //Login sessions created/renewed/ended by web requests - persisted here, not in the callbacks.
   saveLoginSessionsIfDirty();
+
+  if (pendingDhcpHostnameUpdate) {
+    pendingDhcpHostnameUpdate = false;
+    WiFi.hostname(mdnsHostname); //also renews the DHCP lease, so the router learns the new name
+  }
 
   //Finishes a POST /api/timezone: the non-blocking lookup (checkTimezoneLookup(), already run this
   //tick) spans several ticks, so the request is held in timezoneLookupDeferredRequest meanwhile.
@@ -3832,9 +3829,7 @@ void loop() {
       //when the physical bus is idle - recoverI2CBus() alone doesn't catch that.
       Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
       Wire.setClock(400000);
-#if UNIT_BOOTLOADER_ENABLE == true
       Wire.setClockStretchLimit(25000);
-#endif
 
       //Explicitly return to the app - twiboot's ~1000ms idle timeout wasn't reliable (a unit once
       //stayed 44+s in the bootloader).
@@ -3842,7 +3837,7 @@ void loop() {
       doc["returnedToApp"] = returnedToApp;
       doc["note"] = returnedToApp
         ? "Nothing was written. The unit was explicitly told to return to its app."
-        : "Nothing was written, but the explicit return-to-app command failed - the unit may still be sitting in the bootloader. Check /admin/units, or power-cycle the unit if it doesn't come back on its own.";
+        : "Nothing was written, but the explicit return-to-app command failed - the unit may still be sitting in the bootloader. Check the Units page, or power-cycle the unit if it doesn't come back on its own.";
       }
     }
 
@@ -3962,7 +3957,7 @@ int scanI2CBus() {
 
   int foundCount = 0;
   bool foundUnits[UNITS_AMOUNT_MAX] = {false}; // Track which addresses are found
-  int unitStatus[UNITS_AMOUNT_MAX]; // Track status of each address (-2 = not found, -1 = sleeping, 0 = ready, 1 = busy)
+  int unitStatus[UNITS_AMOUNT_MAX]; // Track status of each address (-2 = not found, -3 = no status byte, 0 = ready, 1 = busy)
   for (int i = 0; i < UNITS_AMOUNT_MAX; i++) unitStatus[i] = -2; // {-2} only zero-initializes element 0 for a non-constant size
 
   // Scan all possible I2C addresses (0..UNITS_AMOUNT_MAX-1)
@@ -3989,8 +3984,6 @@ int scanI2CBus() {
           SerialPrintln(F(" (READY)"));
         } else if (status == 1) {
           SerialPrintln(F(" (BUSY/MOVING)"));
-        } else if (status == -1) {
-          SerialPrintln(F(" (SLEEPING)"));
         } else {
           SerialPrintln(F(" (UNKNOWN)"));
         }
@@ -4041,8 +4034,6 @@ int scanI2CBus() {
       SerialPrintln(F(" - Ready"));
     } else if (unitStatus[i] == 1) {
       SerialPrintln(F(" - Busy"));
-    } else if (unitStatus[i] == -1) {
-      SerialPrintln(F(" - Sleeping"));
     } else if (unitStatus[i] == -3) {
       SerialPrintln(F(" - No status response"));
     } else {

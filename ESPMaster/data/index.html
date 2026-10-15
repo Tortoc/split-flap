@@ -1588,7 +1588,7 @@
 
 							<div id="tab-clock" class="tab hidden">
 								<label for="inputClockFormat" class="ls-microlabel">Time format</label>
-								<input type="text" id="inputClockFormat" name="clockFormat" autocomplete="off" maxlength="40" placeholder="HH:mm:ss" class="ls-display-input" />
+								<input type="text" id="inputClockFormat" name="clockFormat" autocomplete="off" maxlength="40" placeholder="HH:mm" class="ls-display-input" />
 								<p class="note">Example: <code>HH:mm:ss</code> &rarr; 21:19:05. Tokens: HH/H (hour, 24h), hh/h (12h), mm (minute), ss (second).</p>
 							</div>
 
@@ -1706,11 +1706,11 @@
 						<p>
 							<label for="newMdnsHostname">Change DNS name</label>
 							<br>
-							<input type="text" id="newMdnsHostname" placeholder="e.g. split-flap" maxlength="63" />
+							<input type="text" id="newMdnsHostname" placeholder="e.g. split-flap" maxlength="32" />
 							<button class="btn-primary" onclick="changeMdnsHostname()">Change</button>
 						</p>
 						<p class="note">
-							Letters, digits and hyphens (not at the start/end), 1-63 characters. Every display on the network needs its own name.
+							Letters, digits and hyphens (not at the start/end), 1-32 characters. Every display on the network needs its own name. The router also lists the device under this name.
 						</p>
 						<p id="mdnsHostnameChangeStatus"></p>
 						<p>
@@ -1807,8 +1807,9 @@
 							Crash data the device saved before its last automatic restart.
 						</p>
 						<p>
-							<a href="/api/crash-log" target="_blank" class="btn-small action-link">Open crash log</a>
+							<button type="button" class="btn-small" onclick="loadCrashLog()">Show crash log</button>
 						</p>
+						<pre id="crashLogContent" class="api-code hidden"></pre>
 					</div>
 				</div>
 
@@ -2026,10 +2027,13 @@ curl -X POST http://192.168.1.50/api/text -H "X-OTA-Password: splitflap" --data 
 							</div>
 						</details>
 						<details class="api-endpoint">
-							<summary>GET /api/rotation-items</summary>
+							<summary>GET/POST /api/rotation-items</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">All rotation entries including their own alignment and animation (<code>alignment</code>/<code>animationMode</code>/<code>animationStaggerMs</code>; empty/<code>-1</code> = default). Change them via <code>POST /api/settings</code> with <code>rotationItems</code> (always the complete list).</p>
-								<pre class="api-code">curl http://192.168.1.50/api/rotation-items -H "X-OTA-Password: splitflap"</pre>
+								<p class="api-endpoint-desc">All rotation entries including their own alignment and animation (<code>alignment</code>/<code>animationMode</code>/<code>animationStaggerMs</code>; empty/<code>-1</code> = default). <code>POST</code> replaces the whole list with a JSON array (<code>Content-Type: application/json</code>, at most 8000 bytes).</p>
+								<pre class="api-code">curl http://192.168.1.50/api/rotation-items -H "X-OTA-Password: splitflap"
+
+curl -X POST http://192.168.1.50/api/rotation-items -H "X-OTA-Password: splitflap" \
+  -H "Content-Type: application/json" --data '[{"type":"clock","format":"HH:mm","durationSeconds":10}]'</pre>
 							</div>
 						</details>
 
@@ -2126,7 +2130,7 @@ curl "http://192.168.1.50/api/wifi?type=connect-status" -H "X-OTA-Password: spli
 						<details class="api-endpoint">
 							<summary>POST /api/wifi?action=set-hostname|set-router-hostname</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Changes the mDNS name (<code>http://&lt;name&gt;.local/</code>): letters, digits and hyphens, 1-63 characters. Takes effect immediately, without a reboot. <code>set-router-hostname</code> sets the full name from the router that the device should answer to as well.</p>
+								<p class="api-endpoint-desc">Changes the device name (<code>http://&lt;name&gt;.local/</code>, also the name in the router): letters, digits and hyphens, 1-32 characters. Takes effect immediately, without a reboot. <code>set-router-hostname</code> sets the full name from the router that the device should answer to as well.</p>
 								<pre class="api-code">curl -X POST "http://192.168.1.50/api/wifi?action=set-hostname" \
   -H "X-OTA-Password: splitflap" --data "hostname=my-split-flap"
 
@@ -2227,7 +2231,7 @@ curl "http://192.168.1.50/api/diag?type=tcp" -H "X-OTA-Password: splitflap"</pre
 						<details class="api-endpoint">
 							<summary>POST /api/debug-mode</summary>
 							<div class="api-endpoint-body">
-								<p class="api-endpoint-desc">Debug mode (boot log page, error status, load log) on/off; persists across reboots.</p>
+								<p class="api-endpoint-desc">Debug mode on/off: instead of this page the device then shows a debug page with crash log and heap. Persists across reboots.</p>
 								<pre class="api-code">curl -X POST http://192.168.1.50/api/debug-mode \
   -H "X-OTA-Password: splitflap" --data "enabled=true"</pre>
 							</div>
@@ -2568,7 +2572,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				};
 				var sendSettings = function () {
 					xhrRequest.open("POST", "/api/settings", true);
-					xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 					xhrRequest.send(formData);
 				};
 
@@ -2600,7 +2603,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				};
 				rotationRequest.open("POST", "/api/rotation-items", true);
 				rotationRequest.setRequestHeader("Content-Type", "application/json");
-				rotationRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 				rotationRequest.send(rotationItemsJson);
 
 				return false;
@@ -2723,6 +2725,8 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 								setSpeed(responseObject.flapSpeed);
 								setSavedMode(responseObject.deviceMode);
 								//Before the Text field: its line count needs the unit count.
+								//displayWidth first: setUnitCount() and the text field's counter use it.
+								displayWidth = responseObject.displayWidth || 0;
 								setUnitCount(responseObject.unitCount);
 								//Restore the Text field after a reload - only in Text mode, since other modes write their own
 								//rendered content into inputText.
@@ -2733,7 +2737,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 								}
 								setAlignment(responseObject.alignment);
 								setAnimation(responseObject.animationMode, responseObject.animationStaggerMs);
-								displayWidth = responseObject.displayWidth || 0;
 								setCountdownDate(responseObject.countdownToDateUnix);
 								if (pendingCountdownDateOverride !== null) {
 									document.getElementById('inputCountdownDateTime').value = pendingCountdownDateOverride;
@@ -2823,8 +2826,10 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			var labelLineCount = document.getElementById("labelLineCount");
 
 			labelCharacterCount.innerHTML = length;
-			//unitCount can be 0 if no units were detected on startup - avoid Infinity/NaN in that case
-			var lineWidthEstimate = unitCount > 0 ? Math.ceil(length / unitCount) : 0;
+			//Characters per line: displayWidth (own units plus extensions in extend mode), else unitCount.
+			//Either can be 0 if no units were detected on startup - avoid Infinity/NaN in that case.
+			var lineWidth = lineCharacters();
+			var lineWidthEstimate = lineWidth > 0 ? Math.ceil(length / lineWidth) : 0;
 			labelLineCount.innerHTML = lineWidthEstimate + inputText.split("\\n").length - 1;
 		}
 
@@ -2856,7 +2861,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			};
 
 			xhr.open("DELETE", `/api/scheduled-messages?id=${id}`, true);
-			xhr.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhr.send();
 		}
 
@@ -3048,12 +3052,16 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			}
 		}
 
-		//Sets the version on the UI just for awareness
+		//Shows the unit count in the status rail and the characters per line below the text field.
 		function setUnitCount(count) {
 			document.getElementById("labelUnits").innerHTML = count;
-			//Character-count hint below the text field shows the live unit count, not a fixed number
-			document.getElementById("labelUnitCountHint").innerHTML = count;
 			unitCount = count;
+			document.getElementById("labelUnitCountHint").innerHTML = lineCharacters();
+		}
+
+		//Characters one display line has - displayWidth (GET /api/settings), else the own unit count.
+		function lineCharacters() {
+			return displayWidth > 0 ? displayWidth : (Number(unitCount) || 0);
 		}
 
 		//Sets the version on the UI just for awareness
@@ -3653,7 +3661,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			});
 		}
 
-		//Populates rotationItemsData from the server's /api/settings response and renders it.
+		//Populates rotationItemsData from GET /api/rotation-items and renders it.
 		function setRotationItems(items) {
 			rotationItemsData = (items || []).map(function (item) {
 				return {
@@ -3973,10 +3981,10 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						document.getElementById("accessControlWifi").checked = !!responseObject.accessControlWifiPublic;
 						document.getElementById("accessControlTimezone").checked = !!responseObject.accessControlTimezonePublic;
 						document.getElementById("accessControlSystem").checked = !!responseObject.accessControlSystemPublic;
-						document.getElementById("currentTimezoneDisplay").innerText = responseObject.timezone || "(leer)";
+						document.getElementById("currentTimezoneDisplay").innerText = responseObject.timezone || T("(empty)");
 						var currentEspVersionEl = document.getElementById("currentEspVersionDisplay");
 						if (currentEspVersionEl) {
-							currentEspVersionEl.innerText = responseObject.version || "unbekannt";
+							currentEspVersionEl.innerText = responseObject.version || T("unknown");
 						}
 						document.getElementById("currentMdnsHostnameDisplay").innerText = responseObject.mdnsHostname || "split-flap";
 						document.getElementById("routerHostname").value = responseObject.routerHostname || "";
@@ -4013,8 +4021,35 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			xhrRequest.send();
 		}
 
-		//Fire-and-confirm actions via AJAX with a banner result (a plain form can't send the
-		//X-OTA-Password header).
+		//Fetched here, not opened as a link: the login session only counts with the X-Requested-With
+		//header (see the XHR wrapper), which a plain navigation doesn't send.
+		function loadCrashLog() {
+			var contentEl = document.getElementById("crashLogContent");
+			contentEl.classList.remove("hidden");
+			contentEl.textContent = T("Loading...");
+			var xhrRequest = new XMLHttpRequest();
+			xhrRequest.onreadystatechange = function () {
+				if (this.readyState != 4) {
+					return;
+				}
+				if (this.status == 200) {
+					contentEl.textContent = this.responseText.trim() ? this.responseText : T("No crashes recorded.");
+				} else if (this.status == 401) {
+					clearAdminPassword();
+					contentEl.textContent = T("Wrong admin password.");
+				} else {
+					contentEl.textContent = T("Failed: ") + (this.responseText || ("Status " + this.status));
+				}
+			};
+			xhrRequest.onerror = function () {
+				contentEl.textContent = T("Network error.");
+			};
+			xhrRequest.open("GET", "/api/crash-log", true);
+			xhrRequest.send();
+		}
+
+		//Fire-and-confirm actions via AJAX with a banner result, so the login session (X-Requested-With)
+		//applies.
 		function triggerReboot() {
 			if (!confirm(T("Reboot the device now?"))) {
 				return;
@@ -4069,7 +4104,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				resultEl.innerHTML = T('<span class="status-offline">Network error.</span>');
 			};
 			xhrRequest.open("POST", "/api/wifi?action=scan", true);
-			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send();
 		}
 
@@ -4110,7 +4144,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 							resultEl.innerHTML = T('<span class="status-offline">Could not read the response.</span>');
 						}
 					} else if (this.status == 401) {
-						//Sends the password header - the GET /api/wifi polls need it unless the WiFi category is public.
+						//The GET /api/wifi polls need the login unless the WiFi category is public.
 						clearAdminPassword();
 						button.disabled = false;
 						resultEl.innerHTML = T('<span class="status-offline">Wrong admin password.</span>');
@@ -4125,7 +4159,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				resultEl.innerHTML = T('<span class="status-offline">Network error while scanning.</span>');
 			};
 			xhrRequest.open("GET", "/api/wifi?type=scan-result", true);
-			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send();
 		}
 
@@ -4197,7 +4230,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			};
 			xhrRequest.open("POST", "/api/wifi?action=connect", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("ssid=" + encodeURIComponent(ssid) + "&password=" + encodeURIComponent(password));
 		}
 
@@ -4237,7 +4269,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 							statusEl.innerHTML = T('<span class="status-offline">Could not read the response.</span>');
 						}
 					} else if (this.status == 401) {
-						//Sends the password header (see pollWifiScanResult()) - otherwise every retry would 401 and only
+						//Needs the login (see pollWifiScanResult()) - otherwise every retry would 401 and only
 						//time out after ~45s instead of reporting a password problem.
 						clearAdminPassword();
 						button.disabled = false;
@@ -4252,7 +4284,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				setTimeout(function () { pollWifiConnectStatus(attempt + 1); }, 1500);
 			};
 			xhrRequest.open("GET", "/api/wifi?type=connect-status", true);
-			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send();
 		}
 
@@ -4264,7 +4295,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 		}
 
 		//Shared helper for the simple admin actions above: POST without body, banner with the result.
-		//Always sends X-OTA-Password (ignored if the category is public).
 		function postActionForBanner(path, successMessage) {
 			if (localDevelopment) {
 				showAdminBannerMessage(successMessage, true);
@@ -4288,7 +4318,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				showAdminBannerMessage(T("Network error."));
 			};
 			xhrRequest.open("POST", path, true);
-			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send();
 		}
 
@@ -4297,13 +4326,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			var el = document.getElementById("accessControlPasswordStatus");
 			el.innerText = passwordSet ? T("active") : T("off (everything openly reachable on the network)");
 			el.className = passwordSet ? "status-online-ready" : "status-offline";
-		}
-
-		//Protected requests are authenticated by the login session cookie (see showLoginDialog()),
-		//not by a password kept in the page - the existing call sites still pass this as their
-		//X-OTA-Password header, and an empty header just means "use the session".
-		function getAdminPassword() {
-			return "";
 		}
 
 		//Called from every protected request's 401 handler: the session is gone (expired, logged
@@ -4557,7 +4579,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					if (this.status == 200) {
 						try {
 							var responseObject = JSON.parse(this.responseText);
-							displayEl.innerText = responseObject.timezone || "(leer)";
+							displayEl.innerText = responseObject.timezone || T("(empty)");
 						} catch (e) {
 							displayEl.innerText = T("(could not be loaded)");
 						}
@@ -4612,7 +4634,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 			xhrRequest.open("POST", "/api/timezone", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("timezone=" + encodeURIComponent(newTimezone));
 		}
 
@@ -4627,8 +4648,8 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				alert(T("Please enter a DNS name."));
 				return;
 			}
-			if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(newHostname)) {
-				statusEl.innerHTML = T('<span class="status-offline">Invalid: only letters, digits and hyphens (not at the start/end), 1-63 characters.</span>');
+			if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,30}[A-Za-z0-9])?$/.test(newHostname)) {
+				statusEl.innerHTML = T('<span class="status-offline">Invalid: only letters, digits and hyphens (not at the start/end), 1-32 characters.</span>');
 				return;
 			}
 
@@ -4665,7 +4686,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			//hasParam("action") without post=true.
 			xhrRequest.open("POST", "/api/wifi?action=set-hostname", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("hostname=" + encodeURIComponent(newHostname));
 		}
 
@@ -4696,7 +4716,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			};
 			xhrRequest.open("POST", "/api/wifi?action=set-router-hostname", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("hostname=" + encodeURIComponent(value));
 		}
 
@@ -4755,7 +4774,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			};
 			xhrRequest.open("POST", "/api/wifi?action=set-setup-ap-password", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("password=" + encodeURIComponent(value));
 		}
 
@@ -4809,7 +4827,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 			xhrRequest.open("POST", "/api/mqtt", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send(body);
 		}
 
@@ -4869,7 +4886,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			};
 			xhrRequest.open("POST", "/api/device-role", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("role=" + encodeURIComponent(role) + "&linkMode=" + encodeURIComponent(linkMode));
 		}
 
@@ -4912,7 +4928,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			};
 			xhrRequest.open("POST", "/api/extension-devices", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("hosts=" + encodeURIComponent(hostsJson));
 		}
 
@@ -4998,7 +5013,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			};
 			xhrRequest.open("POST", "/api/extension-devices?action=pair", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("index=" + index + "&password=" + encodeURIComponent(passwordInput.value));
 		}
 
@@ -5019,7 +5033,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					statusEl.innerHTML = d && d.pairing !== "pending" ? extensionPairingStatusHtml(d) : T('<span class="status-offline">No response - check the status above.</span>');
 				};
 				xhrRequest.open("GET", "/api/extension-devices", true);
-				xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 				xhrRequest.send();
 			}, 1500);
 		}
@@ -5058,7 +5071,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				}
 			};
 			xhrRequest.open("GET", "/api/extension-devices", true);
-			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send();
 		}
 
@@ -5142,7 +5154,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 			xhrRequest.open("POST", "/api/quiet-hours", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("enabled=" + (enabled ? "true" : "false") + "&start=" + encodeURIComponent(start) + "&end=" + encodeURIComponent(end));
 		}
 
@@ -5163,6 +5174,9 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						} catch (e) {
 							showAdminBannerMessage(T("Could not read the rescan response."));
 						}
+					} else if (this.status == 401) {
+						clearAdminPassword();
+						showAdminBannerMessage(T("Wrong admin password."));
 					} else {
 						showAdminBannerMessage(T("Rescan failed. Status: ") + this.status);
 					}
@@ -5372,6 +5386,13 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				return;
 			}
 
+			//The unit only recalibrates on a different offset - the same value would be a no-op there.
+			var knownUnit = ((unitsData && unitsData.units) || []).filter(function (u) { return u.index === unitIndex; })[0];
+			if (knownUnit && knownUnit.online && knownUnit.offset === offsetValue) {
+				showAdminBannerMessage("Unit " + unitIndex + T(": offset unchanged - nothing sent."), true);
+				return;
+			}
+
 			//Shouldn't normally be reachable (button is disabled), guard against a stale render anyway.
 			if (recalibrationInProgress) {
 				showAdminBannerMessage(T("Another unit is still recalibrating - please wait for it to finish first."));
@@ -5421,7 +5442,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 			xhrRequest.open("POST", "/api/units?action=offset", true);
 			xhrRequest.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			xhrRequest.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhrRequest.send("id=" + encodeURIComponent(unitIndex) + "&offset=" + encodeURIComponent(offsetValue));
 		}
 
@@ -5516,7 +5536,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 				return;
 			}
 
-			var password = getAdminPassword();
 			var CHUNK_SIZE = 4096; //must match OTA_CHUNK_SIZE in ESPMaster.ino
 
 			button.disabled = true;
@@ -5531,7 +5550,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					method: "POST",
 					headers: {
 						"Content-Type": "application/x-www-form-urlencoded",
-						"X-OTA-Password": password,
 						"X-Requested-With": "splitflap" //login session cookie, see the XHR wrapper
 					},
 					body: "size=" + file.size
@@ -5549,7 +5567,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						method: "POST",
 						headers: {
 							"Content-Type": "application/octet-stream",
-							"X-OTA-Password": password,
 							"X-Requested-With": "splitflap"
 						},
 						body: chunk
@@ -5566,7 +5583,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 				var finishResponse = await fetch("/api/firmware-finish", {
 					method: "POST",
-					headers: { "X-OTA-Password": password, "X-Requested-With": "splitflap" }
+					headers: { "X-Requested-With": "splitflap" }
 				});
 				if (!finishResponse.ok) {
 					if (finishResponse.status == 401) clearAdminPassword();
@@ -5638,7 +5655,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			};
 
 			xhr.open("POST", "/api/units/firmware", true);
-			xhr.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhr.send(formData);
 		}
 
@@ -5709,7 +5725,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 			xhr.open("POST", "/api/units/firmware-push", true);
 			xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			xhr.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhr.send("action=push&id=" + encodeURIComponent(target));
 		}
 
@@ -5784,7 +5799,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						success = !!responseObject.success;
 						message = responseObject.success ? (responseObject.message || T("Successful.")) : (responseObject.error || T("Failed."));
 						if (typeof responseObject.pagesWritten !== "undefined" && typeof responseObject.totalPages !== "undefined") {
-							message += " (" + responseObject.pagesWritten + "/" + responseObject.totalPages + " Seiten)";
+							message += " (" + responseObject.pagesWritten + "/" + responseObject.totalPages + T(" pages)");
 						}
 					} catch (e) {
 						// message already has a fallback set above
@@ -5811,7 +5826,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 			xhr.open("POST", "/api/units/firmware-push", true);
 			xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			xhr.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhr.send("action=push&id=" + encodeURIComponent(unitIndex));
 		}
 
@@ -5882,7 +5896,6 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 			xhr.open("POST", "/api/units/firmware-push", true);
 			xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-			xhr.setRequestHeader("X-OTA-Password", getAdminPassword());
 			xhr.send("action=probe&id=" + encodeURIComponent(target));
 		}
 

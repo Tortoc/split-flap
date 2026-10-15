@@ -2,6 +2,7 @@
 void initialiseFileSystem() {
   if (!LittleFS.begin()) {
     SerialPrintln(F("An error has occurred while mounting LittleFS"));
+    return;
   }
 
   SerialPrintln(F("LittleFS mounted successfully"));
@@ -118,6 +119,8 @@ bool loadValuesFromBootSnapshot() {
   deviceMode = String((const char*)(doc["deviceMode"] | DEVICE_MODE_TEXT));
   deviceRole = String((const char*)(doc["deviceRole"] | DEVICE_ROLE_STANDALONE));
   extensionLinkMode = String((const char*)(doc["extensionLinkMode"] | EXTENSION_LINK_MODE_EXTEND));
+  //Only stored in Text mode, see saveBootSnapshot().
+  inputText = deviceMode == DEVICE_MODE_TEXT ? String((const char*)(doc["inputText"] | "")) : String();
   //"otaPassword" is only written by firmware before 5.0.0 (plaintext) - it wins over an older hash
   //and gets migrated.
   if (doc["adminPasswordHash"].is<const char*>() && !doc["otaPassword"].is<const char*>()) {
@@ -175,6 +178,7 @@ void loadValuesFromIndividualFiles() {
   deviceMode = readFile(LittleFS, deviceModePath, DEVICE_MODE_TEXT);
   deviceRole = readFile(LittleFS, deviceRolePath, DEVICE_ROLE_STANDALONE);
   extensionLinkMode = readFile(LittleFS, extensionLinkModePath, EXTENSION_LINK_MODE_EXTEND);
+  inputText = deviceMode == DEVICE_MODE_TEXT ? readFile(LittleFS, inputTextPath, "") : String();
   //Same precedence as the snapshot path: a plaintext file can only come from a firmware before
   //5.0.0, so it's newer than any hash file.
   bool legacyPasswordExists = LittleFS.exists(legacyOtaPasswordPath);
@@ -235,6 +239,10 @@ bool saveBootSnapshot() {
   doc["deviceMode"] = deviceMode;
   doc["deviceRole"] = deviceRole;
   doc["extensionLinkMode"] = extensionLinkMode;
+  //Text mode's text only - in every other mode inputText changes each second.
+  if (deviceMode == DEVICE_MODE_TEXT) {
+    doc["inputText"] = inputText;
+  }
   doc["adminPasswordHash"] = adminPasswordHash;
   doc["primaryLinkSecret"] = primaryLinkSecret;
   doc["pairedPrimaryLinkSecret"] = pairedPrimaryLinkSecret;
@@ -290,6 +298,11 @@ String computeSettingsSignature() {
   sig += deviceMode; sig += '|';
   sig += deviceRole; sig += '|';
   sig += extensionLinkMode; sig += '|';
+  //A checksum instead of the text: lastSavedSettingsSignature stays in RAM for good.
+  if (deviceMode == DEVICE_MODE_TEXT) {
+    sig += String(extendFileChecksum(FILE_CHECKSUM_SEED, (const uint8_t*)inputText.c_str(), inputText.length()), HEX);
+  }
+  sig += '|';
   sig += adminPasswordHash; sig += '|';
   sig += primaryLinkSecret; sig += '|';
   sig += pairedPrimaryLinkSecret; sig += '|';
@@ -321,6 +334,30 @@ String computeSettingsSignature() {
   sig += accessControlTimezonePublic ? '1' : '0';
   sig += accessControlSystemPublic ? '1' : '0';
   return sig;
+}
+
+//Text mode's text survives a reboot: own file plus the boot snapshot. In the file a real line break
+//becomes the two characters \n, which sentenceLine() treats the same way - readFile() stops at the
+//first real one.
+void persistTextModeText() {
+  String fileText = inputText;
+  fileText.replace("\n", "\\n");
+  writeFile(LittleFS, inputTextPath, fileText.c_str());
+}
+
+//Text mode with `text`, from POST /api/text, MQTT and an indefinite scheduled message: switches the
+//mode if needed, persists mode and text and re-syncs the boot snapshot. The caller shows it.
+void applyTextModeText(const String &text) {
+  bool modeChanged = deviceMode != DEVICE_MODE_TEXT;
+  if (modeChanged) {
+    deviceMode = DEVICE_MODE_TEXT;
+    writeFile(LittleFS, deviceModePath, deviceMode.c_str());
+  }
+  if (modeChanged || inputText != text) {
+    inputText = text;
+    persistTextModeText();
+  }
+  checkBootSnapshotFreshness(); //re-sync now, not only on the 30s check
 }
 
 //Shared tail of the JSON writers: drop the temp file on failure, otherwise rename it into place

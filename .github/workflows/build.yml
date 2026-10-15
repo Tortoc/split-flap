@@ -32,7 +32,6 @@ jobs:
             "ArduinoJson@7.0.4" \
             "ESPAsyncWebSrv@1.2.7" \
             "ESPAsyncTCP@1.2.4" \
-            "NTPClient@3.2.1" \
             "ezTime@0.8.3" \
             "LinkedList@1.3.3" \
             "WiFiManager@2.0.17" \

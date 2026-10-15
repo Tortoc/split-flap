@@ -42,7 +42,7 @@ const char* crashExceptionCauseText(uint32_t reason, uint32_t exccause) {
 void checkAndPersistCrashLog() {
   CrashDump dump;
   memset(&dump, 0, sizeof(dump));
-  if (!ESP.rtcUserMemoryRead(0, reinterpret_cast<uint32_t*>(&dump), sizeof(dump))) {
+  if (!ESP.rtcUserMemoryRead(CRASH_LOG_RTC_OFFSET, reinterpret_cast<uint32_t*>(&dump), sizeof(dump))) {
     return;
   }
   if (dump.magic != CRASH_LOG_MAGIC) {
@@ -96,5 +96,5 @@ void checkAndPersistCrashLog() {
 
   //Clear the RTC magic so a later, unrelated reboot doesn't re-report this same crash.
   memset(&dump, 0, sizeof(dump));
-  ESP.rtcUserMemoryWrite(0, reinterpret_cast<uint32_t*>(&dump), sizeof(dump));
+  ESP.rtcUserMemoryWrite(CRASH_LOG_RTC_OFFSET, reinterpret_cast<uint32_t*>(&dump), sizeof(dump));
 }

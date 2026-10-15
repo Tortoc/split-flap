@@ -39,9 +39,9 @@ At the top of `ESPMaster.ino`:
 | `UNITS_AMOUNT_MAX` | `64` | Highest unit count; the real count is detected at startup (I2C scan from address 0). |
 | `WIFI_USE_DIRECT` | `false` | `false`: WiFiManager setup hotspot `Split-Flap-AP`. `true`: fixed credentials in `wifiDirectSsid`/`wifiDirectPassword`. |
 | `WIFI_STATIC_IP` | `false` | Static IP from `wifiDeviceStaticIp` etc. instead of DHCP. |
-| `USE_MULTICAST` | `true` | mDNS name `<name>.local`; the name is set in the web UI and must be unique per device. |
+| `USE_MULTICAST` | `true` | mDNS name `<name>.local`; the name is set in the web UI (also the DHCP name) and must be unique per device. |
 | `LED_ENABLE` | `true` | Error blink on `LED_DEBUG_PIN` (GPIO 2) when WiFi failed at startup - only while debug mode is on. |
-| `DEBUG_ENABLE` | `true` | Startup debug page, error panel and serial log in the web UI, switched at runtime with `POST /api/debug-mode`. |
+| `DEBUG_ENABLE` | `true` | Debug page (boot status, crash log, heap) instead of the web UI, switched at runtime with `POST /api/debug-mode`. |
 | `MQTT_ENABLE` | `false` | MQTT / Home Assistant integration. Off saves the PubSubClient buffer. |
 
 Settings that used to be compile-time constants (time zone, mDNS name, password, quiet hours,
@@ -68,7 +68,7 @@ device role, ...) are set in the web UI and stored on LittleFS.
 ## Diagnostics
 
 - Serial log (115200 baud) - also prints the setup hotspot password when the hotspot opens.
-- Debug mode (`POST /api/debug-mode`): startup debug page and in-page serial log.
+- Debug mode (`POST /api/debug-mode`): debug page with boot status, crash log and heap.
 - `GET /api/crash-log` - exceptions and resets, kept across reboots.
 - `GET /api/diag` - heap, flash layout, WiFi and other diagnostics (`type=heap`, `type=health`, ...).
   After a cable flash, compare `flashConfigured` with `flashReal` in `type=heap`.
@@ -83,6 +83,6 @@ sections of the main README; the protocol details are in [`API.md`](API.md#authe
 
 ## History
 
-Started from the split-flap-scientress ESPMaster v2.3.0 ("Scott" version: non-blocking NTP
+Started from scientress/split-flap's ESPMaster 2.3.0 ("Scott" version: non-blocking NTP
 sync, `yield()` in display loops, WiFi strength indicator, LED setup codes). Most of that has
 since been reworked; the per-version changes are in the git history and tags.

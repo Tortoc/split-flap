@@ -41,8 +41,8 @@ String wifiDisconnectReasonToString(WiFiDisconnectReason reason) {
 
 //Only in WiFiManager mode: the state used below is declared under WIFI_USE_DIRECT == false.
 #if WIFI_USE_DIRECT == false
-//Starts the network scan requested via POST /api/wifi/scan - kept out of the AsyncWebServer
-//callback. Empty completion callback: GET /api/wifi/scan-result polls WiFi.scanComplete() directly.
+//Starts the network scan requested via POST /api/wifi?action=scan - kept out of the AsyncWebServer
+//callback. Empty completion callback: GET /api/wifi?type=scan-result polls WiFi.scanComplete().
 void checkWifiScanRequest() {
   if (!wifiScanRequested) {
     return;
@@ -60,7 +60,7 @@ void beginWifiAndPersist(const String &ssid, const String &password) {
   WiFi.persistent(false);
 }
 
-//State machine for "connect to a new network" (POST /api/wifi/connect), called every loop(). The
+//State machine for "connect to a new network" (POST /api/wifi?action=connect), called every loop(). The
 //new network and, on failure, the restored old one are both saved to flash.
 void checkWifiConnectAttempt() {
   if (wifiConnectPhase == WIFI_CONNECT_PENDING) {
@@ -174,7 +174,9 @@ void initWiFi() {
 #endif
 
   wifiManager.setTitle("Split-Flap Setup");
-  wifiManager.setHostname("Split-Flap");
+  //Same name as mDNS, so the router lists every display under its own name (it used to be a fixed
+  //"Split-Flap" for all of them).
+  wifiManager.setHostname(mdnsHostname);
   wifiManager.setDarkMode(true);
   wifiManager.setShowInfoUpdate(false);
   wifiManager.setConfigPortalBlocking(true);
@@ -245,7 +247,8 @@ void initWiFi() {
 
     WiFi.setAutoReconnect(true);
     WiFi.persistent(true);
-    WiFi.setOutputPower(20.5); //max power for range
+    //Same DHCP name as in WiFiManager mode. No WiFi.setOutputPower(20.5) - see the WiFiManager path.
+    WiFi.hostname(mdnsHostname);
 
     SerialPrintln(F("DEBUG: WiFi disconnected, starting fresh connection"));
     SerialPrintln(F("DEBUG: SSID: ") + String(wifiDirectSsid));

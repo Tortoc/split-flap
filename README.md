@@ -32,14 +32,13 @@ This project has built on the original project to add extra features such as:
 - Added ability to setup WiFi connection on device
   - The device will set itself up as an Access Point (AP) on first start. You will be able to connect to this network and a web portal will be provided where you can setup the WiFi network you want to connect to. The network (`Split-Flap-AP`) is protected by a random 8-character password that the display shows while the setup portal is open (a display with fewer than 8 units shows it in parts, over and over, each round starting after a row of dashes)
   - Alternatively a fixed hotspot password (8-63 characters) can be set in the web UI (**☰ Menu > System > Network**); the display then stays blank while the portal is open. If it is forgotten, the serial log prints it when the hotspot opens
-  - If the device was to lose connection, it should retry and if all else fails, it will open up the web portal again to change the WiFi settings if necessary
+  - If no known WiFi is reachable at startup, the portal opens for 3 minutes; after that the display shows `OFFLINE` and the device retries the stored WiFi every 5 minutes (it restarts once it is connected). A connection lost later is re-established automatically
   - Alternatively the WiFi credentials can be compiled in (direct mode, see [Updating Settings of the Sketch](#updating-settings-of-the-sketch))
 - Reworked UI, available in English and German (pick one when flashing or uploading the web UI)
   - Can see messages scheduled to be displayed and option to remove them
   - Loading indicators
   - Show hide information to fill out for the mode you select
   - See extra information on the UI such as:
-    - Last Message Received
     - Number of Flaps registered
     - Version Number running
     - How many characters/lines are in the textbox for text
@@ -198,13 +197,12 @@ The recommended toolchain is [arduino-cli](https://arduino.github.io/arduino-cli
 
 ```bash
 arduino-cli core install esp8266:esp8266@3.1.2 arduino:avr@1.8.8 --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
-arduino-cli lib install --no-deps "ArduinoJson@7.0.4" "ESPAsyncWebSrv@1.2.7" "ESPAsyncTCP@1.2.4" "NTPClient@3.2.1" \
+arduino-cli lib install --no-deps "ArduinoJson@7.0.4" "ESPAsyncWebSrv@1.2.7" "ESPAsyncTCP@1.2.4" \
   "ezTime@0.8.3" "LinkedList@1.3.3" "WiFiManager@2.0.17" "PubSubClient@2.8" "Stepper@1.1.3"
 ```
 
 - [ArduinoJSON](https://github.com/bblanchon/ArduinoJson) - Version: 7.0.4
 - [ESPAsyncWebSrv](https://github.com/dvarrel/ESPAsyncWebSrv) - Version: 1.2.7, with its dependency [ESPAsyncTCP](https://github.com/dvarrel/ESPAsyncTCP) - Version: 1.2.4
-- [NTPClient](https://github.com/arduino-libraries/NTPClient) - Version: 3.2.1
 - [ezTime](https://github.com/ropg/ezTime) - Version: 0.8.3
 - [LinkedList](https://github.com/ivanseidel/LinkedList) - Version: 1.3.3
 - [WiFiManager](https://github.com/tzapu/WiFiManager) - Version: 2.0.17
@@ -277,7 +275,7 @@ You will also need to change the WiFi Mode in the code via changing this variabl
 
 The time zone is set in the web UI (**☰ Menu > System > Time zone**, default `Europe/Berlin`), using the TZ database names: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
 
-You can also modify the date and clock format easily by using this table: https://github.com/ropg/ezTime#datetime
+The clock and date formats are set in the web UI's Clock and Date modes, e.g. `HH:mm:ss` or `dd.MM.yyyy` (tokens: `HH`/`H`, `hh`/`h`, `mm`, `ss`, `dd`/`d`, `MM`/`M`, `MMM`/`MMMM`, `EEE`/`EEEE`, `yyyy`/`yy`; see [`ESPMaster/API.md`](./ESPMaster/API.md#post-apisettings)).
 
 There are several helper `define` variables to help during debugging/running:
 
@@ -305,7 +303,7 @@ Code has been added to be able to set a Static IP Address on device. To do this:
    IPAddress wifiDeviceStaticIp(192, 168, 1, 50);
 
    IPAddress wifiRouterGateway(192, 168, 1, 1);
-   IPAddress wifiSubnet(255, 255, 0, 0);
+   IPAddress wifiSubnet(255, 255, 255, 0);
 
    IPAddress wifiPrimaryDns(8, 8, 8, 8);
    ```
@@ -321,7 +319,7 @@ So far we've only uploaded static files to the ESP8266. You now need to upload t
 - The web UI asks for the admin password; scripts send it as the `X-OTA-Password` header. The factory default is `splitflap` - change it in **☰ Menu > System > Access control** (8 characters minimum). Individual categories can be opened up without a password there, and an empty password switches protection off entirely.
 - Since ESPMaster 5.0.0 the password is stored only as a salted PBKDF2-SHA256 hash. Flashing a firmware older than 5.0.0 afterwards falls back to `splitflap`.
 - The ESP8266 can't do TLS: the password and session cookie travel unencrypted over your network. Keep the display in a network you trust.
-- The device only answers requests addressed to its IP address, its mDNS name (with or without `.local`) or the router DNS name entered in **☰ Menu > System > Network**.
+- The device only answers requests addressed to its IP address, its name (with or without `.local`) or the router DNS name entered in **☰ Menu > System > Network**. Since ESPMaster 5.0.7 the name set there is also the DHCP name the router sees (before: `Split-Flap` for every device), so a router DNS name entered earlier may have to be updated.
 
 ### Multiple Displays
 
@@ -331,7 +329,7 @@ Several displays in the same network can work as one (**☰ Menu > System > Mult
 2. On the primary, set the role to "Primary device", enter the extensions' IP addresses or host names and save.
 3. Pair each extension once from the primary, with that extension's admin password. From then on the primary signs every update instead of sending a password; the devices' passwords may differ. Since 5.0.0 a primary older than 5.0.0 can't drive a password-protected extension any more.
 
-Give every display its own mDNS name (**☰ Menu > System > Network**) so the `.local` names stay unique.
+Give every display its own name (**☰ Menu > System > Network**) so the `.local` names and the names in the router stay unique.
 
 ### Common Problems
 

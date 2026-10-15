@@ -1,5 +1,6 @@
 //Non-blocking display-update state machine - showText() starts a job and returns immediately;
-//updateDisplayJob() does at most one I2C transfer per loop() tick.
+//updateDisplayJob() advances it by one step per loop() tick (that step may write or poll several
+//units, and on a primary make short blocking HTTP calls to its extensions).
 
 //millis()-rollover-safe comparison (unsigned difference cast to signed).
 static inline bool millisReached(unsigned long target) {
@@ -160,7 +161,9 @@ bool pollDisplayJobWaitAllExtensionsReady() {
             }
           }
           done = allIdle;
-          if (done && (doc["displayWriteFailed"] | false)) {
+          //Only after this job's own push: before it, the flag still describes the previous push,
+          //whose failure already caused this redraw.
+          if (done && displayJob.state == DISPLAY_JOB_WAIT_READY_AFTER && (doc["displayWriteFailed"] | false)) {
             //Like a failed local write: finishDisplayJob() forces a re-send of this text.
             displayJob.hadWriteFailure = true;
           }
@@ -314,7 +317,7 @@ bool pollDisplayJobWaitAllUnitsReady() {
     bool unitDone = false;
 
     if (ok && status != 1) {
-      unitDone = true; //0 = ready, -1 = sleeping - either way, nothing to wait for
+      unitDone = true; //0 = ready - nothing to wait for
     } else if (ok) {
       if (wantPhaseRead) {
         //Implausible readings count as a failed read (not stored, timestamp untouched), so garbage
@@ -431,7 +434,7 @@ bool allAnimatedUnitsWritten() {
   return (displayJob.unitsWrittenMask & fullUnitsMask) == fullUnitsMask;
 }
 
-//Call once per loop() iteration; a cheap no-op while idle, at most one I2C transfer per call.
+//Call once per loop() iteration; a cheap no-op while idle, one state step per call.
 void updateDisplayJob() {
   //Quiet Hours started mid-job: abort to IDLE without finishDisplayJob() (only part was shown), and
   //bump displayRenderGeneration so the blank-out redraws even if an earlier "" looks current. The

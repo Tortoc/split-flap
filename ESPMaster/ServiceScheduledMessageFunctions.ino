@@ -147,8 +147,7 @@ void checkScheduledMessages() {
 
       bool shown;
       if (scheduledMessage.ShowIndefinitely) {
-        deviceMode = DEVICE_MODE_TEXT;
-        inputText = scheduledMessage.Message;
+        applyTextModeText(scheduledMessage.Message);
         shown = showText(scheduledMessage.Message);
       }
       else {

@@ -23,5 +23,5 @@ extern "C" void custom_crash_callback(struct rst_info *rstInfo, uint32_t stack, 
   }
   dump.stackWordCount = count;
 
-  ESP.rtcUserMemoryWrite(0, reinterpret_cast<uint32_t*>(&dump), sizeof(dump));
+  ESP.rtcUserMemoryWrite(CRASH_LOG_RTC_OFFSET, reinterpret_cast<uint32_t*>(&dump), sizeof(dump));
 }

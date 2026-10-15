@@ -8,12 +8,13 @@ endpoint layout.
 - **Base URL**: `http://<device-ip>/`, or `http://<hostname>.local/` on networks/clients that
   support mDNS (most desktop OSes and phones; not universal on IoT-only networks/routers) -
   `"split-flap"` by default, user-changeable (☰ Menu > System > Network in the web UI, or
-  [`POST /api/wifi?action=set-hostname`](#post-apiwifi)). Falls back to the router's DHCP client
-  list or the serial log at boot if mDNS resolution doesn't work on your network.
+  [`POST /api/wifi?action=set-hostname`](#post-apiwifi)). The same name is the DHCP name, so the
+  router lists the device under it too; otherwise check the serial log at boot.
 - **Auth**: a single admin password protects the API (reading included), via an `X-OTA-Password`
   header or a web UI login session.
-  It can be turned off entirely (empty password - every endpoint below, including firmware/flash,
-  becomes unauthenticated) or scoped down category-by-category while still set - see
+  The factory default is `splitflap`. It can be turned off entirely (empty password - every
+  endpoint below, including firmware/flash, becomes unauthenticated) or scoped down
+  category-by-category while still set - see
   [Authentication](#authentication).
 - **Request bodies**: `POST` endpoints take `application/x-www-form-urlencoded` bodies (i.e.
   `key=value&key2=value2`, the same as an HTML form submit) unless noted as multipart file upload.
@@ -66,9 +67,9 @@ the extension's own admin password. The primary then hands its link secret to th
 | `POST /api/login` | Form param `password`, header `X-Requested-With: splitflap`. 200 + `Set-Cookie` on success, 401 wrong password, 429 for 2 s after a wrong attempt from the same address (since 4.10.16 per sender IP; every password check - login, `X-OTA-Password`, extension pairing, password change - shares it; if 8 senders are paused at once, new ones wait too). A request with the `X-OTA-Password` header gets `401` during the pause, even with the right password - wait 2 s after a wrong attempt. |
 | `POST /api/logout` | Ends the request's own session and clears the cookie. |
 
-**Global on/off switch**: an empty password (the default before you set one) means every endpoint
-below is unauthenticated, no exceptions - including firmware/flash. Set one via
-[`POST /api/ota-password`](#post-apiota-password) to turn protection on.
+**Global on/off switch**: the factory default password is `splitflap`. An empty password means
+every endpoint below is unauthenticated, no exceptions - including firmware/flash. Both are changed
+via [`POST /api/ota-password`](#post-apiota-password).
 
 **Per-category toggles**: once a password is set, these categories are still reachable *without*
 it if their toggle is explicitly turned on (also via `POST /api/ota-password`, all default off -
@@ -77,16 +78,17 @@ a newly-added category always starts protected):
 | Toggle param | Covers |
 | --- | --- |
 | `accessControlText` | `POST /api/text` |
-| `accessControlSettings` | `GET`/`POST /api/settings`, `GET /api/rotation-items`, `GET`/`DELETE /api/scheduled-messages`, `POST /api/quiet-hours`, `GET /api/extension-devices`, `GET`/`POST /api/mqtt` |
+| `accessControlSettings` | `GET`/`POST /api/settings`, `GET`/`POST /api/rotation-items`, `GET`/`DELETE /api/scheduled-messages`, `POST /api/quiet-hours`, `GET /api/extension-devices`, `GET`/`POST /api/mqtt` |
 | `accessControlUnits` | `POST /api/units` (all actions), `GET /api/i2c-scan` |
 | `accessControlWifi` | `POST /api/wifi` (all actions), plus `GET /api/wifi?type=scan-result\|connect-status` |
 | `accessControlTimezone` | `GET`/`POST /api/timezone` |
-| `accessControlSystem` | `POST /api/reboot`, `POST /api/debug-mode`, `GET /api/diag` (except `type=health`), `GET`/`DELETE /api/crash-log` |
+| `accessControlSystem` | `POST /api/reboot`, `POST /api/debug-mode`, `POST /api/device-role`, `GET /api/diag` (except `type=health`), `GET`/`DELETE /api/crash-log` |
 
 **Never toggleable - always protected whenever a password is set**, no matter what any category
 toggle says: `POST /api/web-file`, `POST /api/units/firmware`, `POST /api/units/firmware-push`
 (both `action=push` and `action=probe` - a probe restarts the unit), `POST /api/firmware-start`,
-`POST /api/firmware-chunk`, `POST /api/firmware-finish`, and `POST /api/ota-password` itself
+`POST /api/firmware-chunk`, `POST /api/firmware-finish`, `POST /api/extension-devices` (it decides
+where the link secret and the display content go), and `POST /api/ota-password` itself
 (changing the password or any toggle always requires the *current* password - otherwise a
 category opened via one toggle could reopen every other one through this same endpoint).
 
@@ -96,7 +98,7 @@ category toggles above. Only these stay open: `GET /`, `GET /api/session`,
 there without credentials).
 
 **Host header** (since 4.10.14, against DNS rebinding): requests are only answered (400
-otherwise) if `Host` is an IPv4 address, the device's mDNS/DHCP name alone or as `<name>.local`, or
+otherwise) if `Host` is an IPv4 address, the device's name (mDNS and DHCP) alone or as `<name>.local`, or
 exactly the router DNS name set via
 [`POST /api/wifi?action=set-router-hostname`](#post-apiwifi) (since 4.10.15 - before that any
 `<name>.<domain>` was accepted, which a foreign domain could abuse). Address extension devices the
@@ -154,9 +156,9 @@ Serves the web UI (`index.html` from LittleFS) - the single-page app covering bo
 view and the admin dialogs. Not a data endpoint; response is `text/html`.
 
 If `DEBUG_ENABLE` is compiled in (it is, by default) and debug mode is currently on (see
-[`POST /api/debug-mode`](#post-apidebug-mode)), this instead serves a minimal startup-debug HTML
-page showing the live boot log, with a button that calls `POST /api/debug-mode` (`enabled=false`)
-to return to the normal page.
+[`POST /api/debug-mode`](#post-apidebug-mode)), this instead serves a minimal debug page with the
+boot status, the crash log and the heap diagnostics, plus a button that calls
+`POST /api/debug-mode` (`enabled=false`) to return to the normal page.
 
 ```bash
 curl http://192.168.1.50/
@@ -169,61 +171,73 @@ curl http://192.168.1.50/
 Current device state - the main page's own settings and the source of truth for alignment,
 speed, mode, WiFi status, etc.
 
-**Response** `200 application/json`:
+**Response** `200 application/json` (abridged - every field is listed below):
 ```json
 {
-  "timezoneOffset": 420,
-  "unitCount": 3,
+  "timezoneOffset": -120,
+  "unitCount": 10,
+  "displayWidth": 10,
   "alignment": "left",
   "flapSpeed": "80",
   "animationMode": "simultaneous",
   "animationStaggerMs": 150,
   "deviceMode": "text",
   "inputText": "HELLO WORLD",
-  "version": "2.3.0-Scott",
-  "lastTimeReceivedMessageDateTime": "16 Aug 26 09:12:04",
-  "lastWrittenText": "",
+  "version": "5.0.7",
+  "lastTimeReceivedMessageDateTime": "15 Oct 26 09:12:04",
+  "lastWrittenText": "HELLO WORLD",
   "countdownToDateUnix": 0,
+  "countupSinceDateUnix": 0,
   "wifiStatus": "Connected",
   "wifiRssi": -69,
   "wifiIp": "192.168.1.50",
-  "scheduledMessageCount": 1,
-  "rotationItemCount": 0,
   "wifiSettingsResettable": true,
   "mdnsHostname": "split-flap",
   "routerHostname": "",
   "setupApPasswordFixed": false,
-  "mqttEnabled": false,
-  "mqttBrokerHost": "",
-  "mqttBrokerPort": 1883,
-  "mqttUsername": "",
-  "mqttPasswordSet": false,
-  "mqttConnected": false,
+  "deviceRole": "standalone",
+  "extensionLinkMode": "extend",
   "otaPasswordSet": true,
+  "linkPaired": false,
   "accessControlTextPublic": false,
   "accessControlSettingsPublic": false,
   "accessControlUnitsPublic": false,
   "accessControlWifiPublic": false,
   "accessControlTimezonePublic": false,
   "accessControlSystemPublic": false,
-  "timezone": "Europe/Berlin"
+  "timezone": "Europe/Berlin",
+  "clockFormat": "HH:mm",
+  "dateFormat": "dd.MM.yyyy",
+  "countdownPrefix": "",
+  "countdownSuffix": "days",
+  "countupPrefix": "",
+  "countupSuffix": "days",
+  "quietHoursEnabled": false,
+  "quietHoursStart": "22:00",
+  "quietHoursEnd": "07:00",
+  "scheduledMessageCount": 1,
+  "rotationItemCount": 0
 }
 ```
 `timezone` duplicates `GET /api/timezone` (same value) - folded in here so the web UI
 can populate its display from this one already-fetched response instead of a separate request.
 `inputText` is a shared internal variable every mode's per-second update (clock/date/countdown/
 countup/rotation) also writes its own rendered content into - only meaningful as "what was last
-submitted for Text mode" while `deviceMode` is actually `"text"`; ignore it otherwise.
+submitted for Text mode" while `deviceMode` is actually `"text"`; ignore it otherwise. In Text mode
+it is stored on the device (since 5.0.7) and shown again after a restart.
+`displayWidth` is the number of characters one display line has: `unitCount`, plus the units of
+reachable extensions on a primary in extend mode.
 `linkPaired` (since 5.0.0) says whether this device, as an extension, is paired with a primary.
 `otaPasswordSet`/`accessControl*Public` are the access-control state (see
 [Authentication](#authentication)) - `otaPasswordSet` is whether a password is currently
 configured at all (the password itself is never sent back, unlike the field this replaced), and
 each `accessControl*Public` is that category's own toggle. The whole response needs the password
-unless `accessControlSettings` is public (since 4.10.14). `wifiSettingsResettable` reflects `WIFI_USE_DIRECT` being
-off (AP-config mode). `mdnsHostname` is the current `http://<hostname>.local/` name - user-
+unless `accessControlSettings` is public (since 4.10.14). `wifiSettingsResettable` is always `true`
+(it only means the web UI shows "Reset WiFi"). `mdnsHostname` is the current `http://<hostname>.local/` name - user-
 changeable via [`POST /api/wifi?action=set-hostname`](#post-apiwifi), see that entry. The
 `mqtt*` fields only appear if `MQTT_ENABLE` is compiled in (off by default) - see
-[`GET`/`POST /api/mqtt`](#getpost-apimqtt).
+[`GET`/`POST /api/mqtt`](#getpost-apimqtt). `lastTimeReceivedMessageDateTime` is the device time of
+the last `POST /api/settings`; the web UI doesn't show it. The date fields are UTC unix seconds.
 
 `scheduledMessageCount` is just the count (cheap) - same reasoning as `rotationItemCount`: the
 client fetches the full list from [`GET /api/scheduled-messages`](#get-apischeduled-messages) only
@@ -258,8 +272,11 @@ missing/wrong.
 | `scheduleEnabled` | `on` | If present, adds a **new** scheduled message instead of changing `deviceMode`/`inputText` directly - see below |
 | `scheduleShowIndefinitely` | `on` | Only relevant when `scheduleEnabled=on` |
 | `scheduledDateTimeUnix` | unix timestamp | When to show the scheduled message |
-| `countdownDateTimeUnix` | unix timestamp | Countdown target, only relevant for `deviceMode=countdown` |
-| `rotationItems` | JSON array (string) | Replaces the whole Rotation item list - see [`GET /api/rotation-items`](#get-apirotation-items) for the item schema. Only relevant for `deviceMode=rotation`, but can be sent regardless of the current mode. |
+| `countdownDateTimeUnix` | unix timestamp | Countdown target. Only applied together with `deviceMode=countdown` in the same request |
+| `countupDateTimeUnix` | unix timestamp | Count-up start date. Only applied together with `deviceMode=countup` in the same request |
+| `countdownPrefix`, `countdownSuffix`, `countupPrefix`, `countupSuffix` | up to 40 chars each | Text around the day count; empty is a valid value. Factory default suffix: `days` |
+| `clockFormat`, `dateFormat` | up to 40 chars each | Display format with the tokens `HH`/`H` (hour), `hh`/`h` (12h), `mm`, `ss`, `dd`/`d`, `MM`/`M`, `MMM`/`MMMM` (month name), `EEE`/`EEEE` (weekday), `yyyy`/`yy`; defaults `HH:mm` and `dd.MM.yyyy` |
+| `rotationItems` | JSON array (string) | Replaces the whole Rotation item list - see [`GET /api/rotation-items`](#get-apirotation-items) for the item schema. Only applied together with `deviceMode=rotation` in the same request; otherwise use [`POST /api/rotation-items`](#post-apirotation-items). |
 
 **Stored text budget** (since ESPMaster 4.10.5): all scheduled message texts together, and
 separately all rotation item texts (`value`/`format`/`prefix`/`suffix`), may hold at most 4000
@@ -349,14 +366,16 @@ buffer), which is the entire point on a heap-constrained device.
 - `frag` - heap fragmentation percentage (`ESP.getHeapFragmentation()`).
 - `maxBlock` - largest single contiguous free block available (bytes).
 
-**`type=tcp`** - live TCP connection-pool diagnostic (this ESP8266's lwIP hard-caps at 5
-simultaneous TCP connections). Same "plain text, zero allocation" reasoning as `heap` above.
-**Response** `200 text/plain`, e.g.: `active=1/5 timeWait=0/5 bound=0 listen=1`
-- `active` - currently active (open, in-flight) TCP connections, out of the hard limit of 5.
-- `timeWait` - connections in TCP TIME-WAIT after closing, out of a *separate* 5-slot pool (does
-  not compete with `active` for headroom).
+**`type=tcp`** - live TCP connection diagnostic. Same "plain text, zero allocation" reasoning as
+`heap` above.
+**Response** `200 text/plain`, e.g.: `active=1 timeWait=0 bound=0 listen=1 gateRejected=0`
+- `active` - currently active (open, in-flight) TCP connections. lwIP's `MEMP_NUM_TCP_PCB=5` is no
+  hard cap here (the PCBs come from `malloc()`), so more can be in flight.
+- `timeWait` - connections in TCP TIME-WAIT after closing.
 - `bound` - bound-but-not-yet-connected PCBs (normally 0).
 - `listen` - listening sockets (normally 1 - the web server itself).
+- `gateRejected` - connections refused since boot because free heap was too low (the connection
+  gate in `ServiceConnectionGateFunctions.cpp`).
 
 **`type=test`** - minimal connectivity/latency check, predates most other diagnostics on this
 list.
@@ -538,7 +557,7 @@ the web UI be updated without a full filesystem reflash (which would wipe runtim
 whole UI is one gzip-compressed file (`ESPAsyncWebServer` serves it with `Content-Encoding: gzip`
 automatically), so `index.html.gz` is the *only* accepted filename.
 
-**Auth:** requires `X-OTA-Password` header if a password is set.
+**Auth:** requires the password (`X-OTA-Password` or the web UI login) if one is set.
 
 **Request:** `multipart/form-data` file upload; the uploaded file's name must be exactly
 `index.html.gz`.
@@ -547,10 +566,9 @@ automatically), so `index.html.gz` is the *only* accepted filename.
 - `200 text/plain`: `"OK - file updated"`
 - `400 text/plain` if the filename isn't `index.html.gz`.
 - `401 text/plain` if the password is wrong.
-
-> ⚠️ No filesystem-space check happens before writing - a full partition can silently produce a
-> 0-byte file. Verify byte-for-byte after uploading (`GET /` and compare length/content against
-> the source).
+- `500 text/plain` if the file couldn't be written completely (e.g. flash full) - the upload goes to
+  a temporary file first, so the previous page stays in place.
+- `503 text/plain` if another web file upload is running.
 
 The web UI comes in English and German: `firmware/build-webui.py` writes `index-en.html.gz` and
 `index-de.html.gz` (also attached to every `esp-v…` release). Uploading the other one switches the
@@ -646,8 +664,8 @@ anything to flash**. Used to verify the jumper address is read live by twiboot:
   "note": "Nothing was written. The unit was explicitly told to return to its app."
 }
 ```
-or `{"unitIndex":N,"success":false,"error":"..."}` if no unit (or more than one) answered in
-bootloader mode. `503` if another probe is already in progress.
+or `{"unitIndex":N,"success":false,"error":"..."}` if nothing answered in bootloader mode at
+`0x29 + id` (or that address collides with another unit or the RTC). `503` if another probe is already in progress.
 
 Both actions: `400` if `id` is missing/invalid/out of range, or `action` is missing/unrecognized.
 
@@ -708,8 +726,8 @@ uploader's chunk size in sync with this).
 - `500 text/plain`: `"Chunk write failed, check the serial log for details"` (aborts the whole
   upload - old firmware stays active; call `/api/firmware-start` again to retry from scratch).
 
-An upload with no chunk/finish activity for 30s is treated as abandoned and cleaned up
-automatically (old firmware stays active).
+An upload with no chunk/finish activity for 90 s is treated as abandoned and cleaned up
+automatically (old firmware stays active). `503` if another chunk is still being processed.
 
 ```bash
 # One chunk, previously split with e.g. `split -b 4096 ESPMaster.ino.bin chunk_`
@@ -747,8 +765,9 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 ### `POST /api/debug-mode`
 
-Enables or disables debug mode (startup debug page, error status panel, page-load debug log,
-serial debug log at the bottom of the main page). Persisted across reboots.
+Enables or disables debug mode. While it is on, `GET /` serves the debug page (boot status, crash
+log, heap) instead of the web UI, and the debug LED is active. The serial log doesn't depend on
+it (`SERIAL_ENABLE`). Persisted across reboots.
 `accessControlSystem` category - see [Authentication](#authentication); `401 text/plain` if a
 password is required and missing/wrong.
 
@@ -797,8 +816,8 @@ All current Rotation items, in display order.
 ```
 - `type`: `text` \| `clock` \| `date` \| `countdown` \| `countup`.
 - `value`: the literal text, only meaningful for `type=text`.
-- `format`: `clock`/`date` display format (see `POST /api/settings`'s `clockFormat`/`dateFormat`
-  for the syntax) - unused for other types.
+- `format`: `clock`/`date` display format (same tokens as `POST /api/settings`'s
+  `clockFormat`/`dateFormat`) - unused for other types.
 - `targetDateTimeUnix`: `countdown`/`countup` target date - unused for other types.
 - `prefix`/`suffix`: per-item text wrapped around the day count, `countdown`/`countup` only -
   independent of the standalone Countdown/Countup modes' own prefix/suffix settings.
@@ -828,8 +847,8 @@ Replaces the whole Rotation item list. Body: the JSON array from
 most 8000 bytes. `accessControlSettings` category. Text items may use at most as many characters
 per line as the display has (`displayWidth` in `GET /api/settings`).
 **Response:** `200 text/plain` `"OK"`. `400` for invalid JSON or items (the existing list stays
-unchanged), `413` if the body is too large or memory is short, `503` while the list isn't fully
-loaded.
+unchanged), `413` if the body is too large or memory is short. (`GET` answers `503` while the list
+isn't fully loaded.)
 
 ```bash
 curl -X POST http://192.168.1.50/api/rotation-items -H "X-OTA-Password: splitflap" \
@@ -942,10 +961,12 @@ connection immediately, before the new credentials are known to work; reverts au
 **Response:** `200 text/plain`: `"Connection attempt started"`. `400 text/plain` if `ssid` is
 missing/empty. `409 text/plain` if a connection attempt is already in progress.
 
-**`action=set-hostname`** - changes the mDNS hostname (`http://<hostname>.local/`). Restarts the mDNS responder
-immediately (only if `USE_MULTICAST` is compiled in) - no reboot needed.
-**Body params:** `hostname` (required) - DNS label rules: 1-63 characters, letters/digits/hyphens
-only, must not start or end with a hyphen.
+**`action=set-hostname`** - changes the device name: the mDNS hostname (`http://<hostname>.local/`)
+and, since 5.0.7, the DHCP name the router sees. Restarts the mDNS responder (only if
+`USE_MULTICAST` is compiled in) and renews the DHCP lease right away - no reboot needed. A router
+DNS name set with `set-router-hostname` usually changes with it and has to be entered again.
+**Body params:** `hostname` (required) - DNS label rules: 1-32 characters (the ESP8266's DHCP
+limit), letters/digits/hyphens only, must not start or end with a hyphen.
 **Response:** `200 text/plain`: `"Hostname updated"`. `400 text/plain` if `hostname` is
 missing/invalid.
 

@@ -48,12 +48,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
-  if (deviceMode != DEVICE_MODE_TEXT) {
-    deviceMode = DEVICE_MODE_TEXT;
-    writeFile(LittleFS, deviceModePath, deviceMode.c_str());
-    checkBootSnapshotFreshness(); //re-sync now, not only on the 30s check
-  }
-  inputText = message;
+  applyTextModeText(message);
   showText(message);
 }
 
