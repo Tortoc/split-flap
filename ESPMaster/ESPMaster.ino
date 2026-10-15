@@ -737,8 +737,8 @@ bool firmwareUpdateAuthFailed = false;
 #define OTA_CHUNK_SIZE 4096 //must match CHUNK_SIZE in index.html's uploadFirmware()
 uint8_t* otaChunkBuffer = nullptr; //allocated only while an upload is in progress
 //Request that owns otaChunkBuffer/otaChunkLen while its body streams in - bodies of two requests
-//can interleave on the event loop. Claimed at index==0, released by its outer handler or by the
-//abandoned-upload watchdog.
+//can interleave on the event loop. Claimed at index==0, released by its outer handler, disconnect
+//or the abandoned-upload watchdog.
 AsyncWebServerRequest* otaChunkOwner = nullptr;
 volatile size_t otaChunkLen = 0;
 enum OtaPhase { OTA_PHASE_NONE, OTA_PHASE_BEGIN, OTA_PHASE_WRITE, OTA_PHASE_FINISH };
@@ -2292,6 +2292,8 @@ void setup() {
       }
 
       SerialPrintln(F("DEBUG: Firmware upload starting, size=") + String(size));
+      otaChunkOwner = nullptr;
+      otaChunkLen = 0;
       otaBeginSize = size;
       otaLastActivityAt = millis();
       otaResultReady = false;
@@ -2360,6 +2362,12 @@ void setup() {
           }
           otaChunkOwner = request;
           otaChunkLen = 0;
+          request->onDisconnect([request]() {
+            if (otaChunkOwner == request) {
+              otaChunkOwner = nullptr;
+              otaChunkLen = 0; //discard an incomplete body; completed chunks already released ownership
+            }
+          });
         }
         //Per-fragment ownership check: a request that never claimed (or lost) ownership is dropped.
         if (otaChunkOwner != request) {
@@ -2388,8 +2396,8 @@ void setup() {
         request->send(400, "text/plain", "No firmware upload in progress");
         return;
       }
-      //Same "already busy" guard as /api/firmware-chunk above.
-      if (otaPendingPhase != OTA_PHASE_NONE) {
+      //A chunk body may still own the buffer before its request handler queues the write.
+      if (otaPendingPhase != OTA_PHASE_NONE || otaChunkOwner != nullptr) {
         request->send(503, "text/plain", "Still processing a previous chunk, try again shortly");
         return;
       }
