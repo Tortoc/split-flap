@@ -199,7 +199,10 @@ The recommended toolchain is [arduino-cli](https://arduino.github.io/arduino-cli
 arduino-cli core install esp8266:esp8266@3.1.2 arduino:avr@1.8.8 --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
 arduino-cli lib install --no-deps "ArduinoJson@7.0.4" "ESPAsyncWebSrv@1.2.7" "ESPAsyncTCP@1.2.4" \
   "ezTime@0.8.3" "LinkedList@1.3.3" "WiFiManager@2.0.17" "PubSubClient@2.8" "Stepper@1.1.3"
+patch -p1 --forward -d ~/Arduino/libraries/ESPAsyncWebSrv < firmware/patches/ESPAsyncWebSrv-1.2.7-request-limits.patch
 ```
+
+ESPAsyncWebSrv needs the patch from [`firmware/patches/`](firmware/patches) (request parser limits, see [`firmware/README.md`](firmware/README.md)); ESPMaster refuses to build without it. The path is arduino-cli's default library folder; with the Arduino IDE, use its `libraries` folder.
 
 - [ArduinoJSON](https://github.com/bblanchon/ArduinoJson) - Version: 7.0.4
 - [ESPAsyncWebSrv](https://github.com/dvarrel/ESPAsyncWebSrv) - Version: 1.2.7, with its dependency [ESPAsyncTCP](https://github.com/dvarrel/ESPAsyncTCP) - Version: 1.2.4

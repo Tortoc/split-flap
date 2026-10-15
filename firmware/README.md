@@ -55,6 +55,22 @@ retransmit), so a primary could no longer reach its extensions. The OTA buffers 
 (`iramFree` in `GET /api/diag?type=heap` is 0); an upload on a very low heap can fail, in which
 case the old firmware stays active.
 
+**ESPAsyncWebSrv 1.2.7 must be patched** with
+[`patches/ESPAsyncWebSrv-1.2.7-request-limits.patch`](patches/ESPAsyncWebSrv-1.2.7-request-limits.patch)
+(once after installing the library; the CI does the same):
+
+```bash
+patch -p1 --forward -d ~/Arduino/libraries/ESPAsyncWebSrv < firmware/patches/ESPAsyncWebSrv-1.2.7-request-limits.patch
+```
+
+The library parses a whole request - query, headers, form fields - before any handler and its
+password check runs, and every parameter and header is a separate heap object: a few hundred bytes
+of `&&&...` from anyone on the network used up the heap and crashed the device. The patch drops a
+request (connection closed, no handler runs) with more than 32 parameters or 40 headers, a request
+or header line over 2048 bytes, or when free heap falls below 5000 bytes while parsing. File
+uploads and raw bodies (firmware chunks, rotation list) are not affected. Without the patch the
+build stops with an `#error` from `ESPMaster.ino`.
+
 ### Web UI (littlefs.bin)
 
 The web UI exists in English and German. [`ESPMaster/data/index.html`](../ESPMaster/data/index.html)

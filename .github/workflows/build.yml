@@ -38,6 +38,10 @@ jobs:
             "PubSubClient@2.8" \
             "Stepper@1.1.3"
 
+      # Request parser limits - ESPMaster refuses to build without them (see firmware/README.md)
+      - name: Patch ESPAsyncWebSrv
+        run: patch -p1 --forward -d ~/Arduino/libraries/ESPAsyncWebSrv < firmware/patches/ESPAsyncWebSrv-1.2.7-request-limits.patch
+
       # Every T(...) string in the web UI needs a translation, and no dictionary entry may be stale
       - name: Check web UI translations
         run: python3 firmware/build-webui.py --check

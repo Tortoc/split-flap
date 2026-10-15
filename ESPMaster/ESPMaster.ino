@@ -65,6 +65,7 @@
 
 #if WEB_FIRMWARE_UPDATE_ENABLE == true
 #include <Updater.h>
+#include <eboot_command.h> //eboot_command_clear() - see abortFirmwareUpdate()
 #include <bearssl/bearssl_hmac.h> //admin password hash (PBKDF2) and signed primary->extension pushes
 #endif
 
@@ -72,6 +73,11 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncTCP.h>
 #include <ESPAsyncWebSrv.h>
+//Unpatched, the library parses every parameter and header of a request before any handler (and its
+//password check) runs, so a small unauthenticated body could use up the heap.
+#ifndef ESPASYNCWEBSRV_SPLITFLAP_LIMITS
+#error "ESPAsyncWebSrv needs firmware/patches/ESPAsyncWebSrv-1.2.7-request-limits.patch - see firmware/README.md"
+#endif
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h> //primary->extension push and health check
 #if USE_MULTICAST == true
@@ -671,6 +677,10 @@ int rotationItemCount = 0;
 #define JSON_ARRAY_FILE_MISSING 1
 #define JSON_ARRAY_FILE_INVALID 2
 #define JSON_ARRAY_FILE_NO_MEMORY 3
+//Results of replaceExtensionDevicesFromJson() (ServiceExtensionFunctions.ino).
+#define EXTENSION_DEVICES_OK 0
+#define EXTENSION_DEVICES_INVALID 1
+#define EXTENSION_DEVICES_SAVE_FAILED 2
 int rotationCurrentIndex = 0;
 //Seconds the current rotation item was actually accepted by showText(), not wall-clock seconds -
 //a busy display swallows showText() calls, and a wall-clock timer skipped slow or blocked items.
@@ -763,6 +773,14 @@ volatile unsigned long otaLastActivityAt = 0; //watchdog for an abandoned upload
 //upload itself is fine.
 #define OTA_ABANDONED_TIMEOUT_MS 90000
 PendingRequestSlot pendingFirmwareUploadSlot; //reused in turn by all three /api/firmware-* steps
+
+//Ends a running update without activating anything. Update.end(false) alone isn't an abort in core
+//3.1.2: once every byte of the begin() size is written it verifies the image and writes eboot's copy
+//command, so the "aborted" image would run after the next restart. Clearing the command undoes that.
+void abortFirmwareUpdate() {
+  Update.end(false);
+  eboot_command_clear();
+}
 #endif
 
 //A browser firmware upload is running - the multi-device health check/push stay out of its way.
@@ -2707,8 +2725,13 @@ void setup() {
         request->send(400, "text/plain", "'hosts' (JSON array of hostnames/IPs) is required");
         return;
       }
-      if (!replaceExtensionDevicesFromJson(request->getParam("hosts", true)->value())) {
+      int replaceResult = replaceExtensionDevicesFromJson(request->getParam("hosts", true)->value());
+      if (replaceResult == EXTENSION_DEVICES_INVALID) {
         request->send(400, "text/plain", F("'hosts' must be a JSON array of IP addresses or hostnames, optionally with :port"));
+        return;
+      }
+      if (replaceResult == EXTENSION_DEVICES_SAVE_FAILED) {
+        request->send(500, "text/plain", F("Could not save the extension device list - nothing changed"));
         return;
       }
       request->send(200, "text/plain", "OK");
@@ -3616,19 +3639,22 @@ void loop() {
   if (otaPendingPhase == OTA_PHASE_BEGIN) {
     uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
     uint32_t rounded = (otaBeginSize + 0xFFF) & 0xFFFFF000; //round up to a flash sector
-    uint32_t updateSize = (rounded > 0 && rounded < maxSketchSpace) ? rounded : maxSketchSpace;
+    //Too large is refused instead of clamped: a clamped target could be filled completely and then
+    //"finish" a truncated image. rounded is 0 only on overflow.
+    bool fits = (rounded > 0 && rounded <= maxSketchSpace);
+    uint32_t updateSize = rounded;
 
     //Both 4KB OTA buffers (Update's sector buffer and otaChunkBuffer) go to a second IRAM heap if
     //the build has one - uploads start from the open web UI, when DRAM is tightest. The heap
     //selection is global, so these scopes stay yield-free and allocate nothing else. With mmu=3232
     //(since 5.0.1) there is no IRAM heap and HeapSelectIram is a no-op; free()/delete[] find the
     //right heap by address.
-    bool ok;
-    {
+    bool ok = false;
+    if (fits) {
       HeapSelectIram iramHeap;
       ok = Update.begin(updateSize, U_FLASH);
     }
-    if (!ok && Update.getError() == UPDATE_ERROR_OOM) {
+    if (fits && !ok && Update.getError() == UPDATE_ERROR_OOM) {
       ok = Update.begin(updateSize, U_FLASH);
     }
     if (ok) {
@@ -3647,15 +3673,18 @@ void loop() {
       ok = (otaChunkBuffer != nullptr);
       if (!ok) {
         SerialPrintln(F("Firmware upload: could not allocate chunk buffer"));
-        Update.end(false); //release Update's "running" lock (see below)
+        abortFirmwareUpdate(); //release Update's "running" lock (see below)
       }
+    } else if (!fits) {
+      SerialPrintln(F("Firmware upload: image of ") + String(otaBeginSize) + F(" bytes doesn't fit in ") + String(maxSketchSpace) + F(" free bytes"));
     } else {
       SerialPrintln(F("Firmware upload: Update.begin() failed"));
       Update.printError(Serial);
     }
 
     otaResultSuccess = ok;
-    otaResultMessage = ok ? "OK - ready for chunks" : "Failed to start update, check the serial log for details";
+    otaResultMessage = ok ? "OK - ready for chunks"
+      : (fits ? "Failed to start update, check the serial log for details" : "Firmware image too large for the free flash space");
     otaCompletedPhase = OTA_PHASE_BEGIN;
     otaResultReady = true;
     otaPendingPhase = OTA_PHASE_NONE;
@@ -3666,9 +3695,9 @@ void loop() {
     if (!ok) {
       SerialPrintln(F("Firmware upload: chunk write failed"));
       Update.printError(Serial);
-      //end() is still needed (result ignored): begin() refuses while the previous update is marked
-      //"running", and only end() clears that.
-      Update.end(false);
+      //end() is still needed: begin() refuses while the previous update is marked "running", and
+      //only end() clears that.
+      abortFirmwareUpdate();
       delete[] otaChunkBuffer; //abort the whole upload - a missing chunk buffer makes the other
       otaChunkBuffer = nullptr; //two endpoints cleanly reject anything further
     } else {
@@ -3693,7 +3722,7 @@ void loop() {
     if (!sizeMatches) {
       SerialPrintln(F("Firmware upload: size mismatch at finish (received ") + String(received) +
         F(" of ") + String(otaBeginSize) + F(" declared bytes) - refusing to activate a truncated image"));
-      Update.end(false); //release the "running" lock without activating anything
+      abortFirmwareUpdate(); //release the "running" lock without activating anything
     } else {
       ok = Update.end(true);
       if (!ok) {
@@ -3717,7 +3746,7 @@ void loop() {
   if (otaChunkBuffer != nullptr && otaPendingPhase == OTA_PHASE_NONE &&
       (millis() - otaLastActivityAt) > OTA_ABANDONED_TIMEOUT_MS) {
     SerialPrintln(F("Firmware upload: no activity for ") + String(OTA_ABANDONED_TIMEOUT_MS / 1000) + F("s, aborting (old firmware stays active)"));
-    Update.end(false);
+    abortFirmwareUpdate();
     delete[] otaChunkBuffer;
     otaChunkBuffer = nullptr;
     //A body that claimed ownership and then vanished would block otaChunkOwner forever - released

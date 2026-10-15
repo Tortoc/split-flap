@@ -1,0 +1,145 @@
+diff --git a/src/ESPAsyncWebSrv.h b/src/ESPAsyncWebSrv.h
+index f44d145..ba919a7 100644
+--- a/src/ESPAsyncWebSrv.h
++++ b/src/ESPAsyncWebSrv.h
+@@ -70,6 +70,22 @@ typedef enum {
+ } WebRequestMethod;
+ #endif
+ 
++// split-flap patch: request parser limits, see WebRequest.cpp. The sketch refuses to build without
++// this define.
++#define ESPASYNCWEBSRV_SPLITFLAP_LIMITS 1
++#ifndef ASYNCWEBSERVER_MAX_PARAMS
++#define ASYNCWEBSERVER_MAX_PARAMS 32        // query + form + multipart parameters per request
++#endif
++#ifndef ASYNCWEBSERVER_MAX_HEADERS
++#define ASYNCWEBSERVER_MAX_HEADERS 40       // header lines per request (browsers send ~20)
++#endif
++#ifndef ASYNCWEBSERVER_MAX_HEAD_LINE
++#define ASYNCWEBSERVER_MAX_HEAD_LINE 2048   // bytes of the request line or one header line
++#endif
++#ifndef ASYNCWEBSERVER_MIN_FREE_HEAP
++#define ASYNCWEBSERVER_MIN_FREE_HEAP 5000   // the parser stops allocating below this free heap
++#endif
++
+ //if this value is returned when asked for data, packet will not be sent and you will be asked for data again
+ #define RESPONSE_TRY_AGAIN 0xFFFFFFFF
+ 
+diff --git a/src/WebRequest.cpp b/src/WebRequest.cpp
+index b252f1b..0b41d52 100644
+--- a/src/WebRequest.cpp
++++ b/src/WebRequest.cpp
+@@ -32,6 +32,13 @@ static const String SharedEmptyString = String();
+ 
+ enum { PARSE_REQ_START, PARSE_REQ_HEADERS, PARSE_REQ_BODY, PARSE_REQ_END, PARSE_REQ_FAIL };
+ 
++// split-flap patch: every request is parsed before any handler (and its authentication) runs, and
++// each parameter and header is a separate heap object - a small body of "&&&..." used up the heap.
++// A request over the limits in ESPAsyncWebSrv.h is dropped: no handler runs, the connection is
++// closed. PARSE_REQ_FAIL stops any further parsing of its data.
++#define SPLITFLAP_REJECT_REQUEST() do { _parseState = PARSE_REQ_FAIL; _client->close(); } while(0)
++#define SPLITFLAP_HEAP_LOW() (ESP.getFreeHeap() < ASYNCWEBSERVER_MIN_FREE_HEAP)
++
+ AsyncWebServerRequest::AsyncWebServerRequest(AsyncWebServer* s, AsyncClient* c)
+   : _client(c)
+   , _server(s)
+@@ -113,11 +120,19 @@ void AsyncWebServerRequest::_onData(void *buf, size_t len){
+     if (i == len) { // No new line, just add the buffer in _temp
+       char ch = str[len-1];
+       str[len-1] = 0;
++      if(_temp.length() + len > ASYNCWEBSERVER_MAX_HEAD_LINE || SPLITFLAP_HEAP_LOW()){ // split-flap patch
++        SPLITFLAP_REJECT_REQUEST();
++        return;
++      }
+       _temp.reserve(_temp.length()+len);
+       _temp.concat(str);
+       _temp.concat(ch);
+     } else { // Found new line - extract it and parse
+       str[i] = 0; // Terminate the string at the end of the line.
++      if(_temp.length() + i > ASYNCWEBSERVER_MAX_HEAD_LINE){ // split-flap patch
++        SPLITFLAP_REJECT_REQUEST();
++        return;
++      }
+       _temp.concat(str);
+       _temp.trim();
+       _parseLine();
+@@ -138,6 +153,7 @@ void AsyncWebServerRequest::_onData(void *buf, size_t len){
+         for(i=0; i<len; i++){
+           _parseMultipartPostByte(((uint8_t*)buf)[i], i == len - 1);
+           _parsedLength++;
++          if(_parseState == PARSE_REQ_FAIL) return; // split-flap patch
+         }
+       } else
+           _parsedLength += len;
+@@ -162,6 +178,7 @@ void AsyncWebServerRequest::_onData(void *buf, size_t len){
+         for(i=0; i<len; i++){
+           _parsedLength++;
+           _parsePlainPostChar(((uint8_t*)buf)[i]);
++          if(_parseState == PARSE_REQ_FAIL) return; // split-flap patch
+         }
+       } else {
+         _parsedLength += len;
+@@ -230,6 +247,11 @@ void AsyncWebServerRequest::_onDisconnect(){
+ }
+ 
+ void AsyncWebServerRequest::_addParam(AsyncWebParameter *p){
++  if(_params.length() >= ASYNCWEBSERVER_MAX_PARAMS || SPLITFLAP_HEAP_LOW()){ // split-flap patch
++    delete p;
++    SPLITFLAP_REJECT_REQUEST();
++    return;
++  }
+   _params.add(p);
+ }
+ 
+@@ -239,7 +261,7 @@ void AsyncWebServerRequest::_addPathParam(const char *p){
+ 
+ void AsyncWebServerRequest::_addGetParams(const String& params){
+   size_t start = 0;
+-  while (start < params.length()){
++  while (start < params.length() && _parseState != PARSE_REQ_FAIL){ // split-flap patch: stop after a rejected parameter
+     int end = params.indexOf('&', start);
+     if (end < 0) end = params.length();
+     int equal = params.indexOf('=', start);
+@@ -345,7 +367,11 @@ bool AsyncWebServerRequest::_parseReqHeader(){
+         }
+       }
+     }
+-    _headers.add(new AsyncWebHeader(name, value));
++    if(_headers.length() >= ASYNCWEBSERVER_MAX_HEADERS || SPLITFLAP_HEAP_LOW()){ // split-flap patch
++      SPLITFLAP_REJECT_REQUEST();
++    } else {
++      _headers.add(new AsyncWebHeader(name, value));
++    }
+   }
+   _temp = String();
+   return true;
+@@ -354,6 +380,10 @@ bool AsyncWebServerRequest::_parseReqHeader(){
+ void AsyncWebServerRequest::_parsePlainPostChar(uint8_t data){
+   if(data && (char)data != '&')
+     _temp += (char)data;
++  if((_temp.length() & 0xFF) == 0xFF && SPLITFLAP_HEAP_LOW()){ // split-flap patch: one field can grow large
++    SPLITFLAP_REJECT_REQUEST();
++    return;
++  }
+   if(!data || (char)data == '&' || _parsedLength == _contentLength){
+     String name = "body";
+     String value = _temp;
+@@ -392,7 +422,8 @@ enum {
+ };
+ 
+ void AsyncWebServerRequest::_parseMultipartPostByte(uint8_t data, bool last){
+-#define itemWriteByte(b) do { _itemSize++; if(_itemIsFile) _handleUploadByte(b, last); else _itemValue+=(char)(b); } while(0)
++// split-flap patch: a non-file field's value can grow large - same heap check as for plain forms.
++#define itemWriteByte(b) do { _itemSize++; if(_itemIsFile) _handleUploadByte(b, last); else { _itemValue+=(char)(b); if((_itemValue.length() & 0xFF) == 0xFF && SPLITFLAP_HEAP_LOW()){ SPLITFLAP_REJECT_REQUEST(); return; } } } while(0)
+ 
+   if(!_parsedLength){
+     _multiParseState = EXPECT_BOUNDARY;
+@@ -558,7 +589,7 @@ void AsyncWebServerRequest::_parseLine(){
+       _client->close();
+     } else {
+       _parseReqHead();
+-      _parseState = PARSE_REQ_HEADERS;
++      if(_parseState != PARSE_REQ_FAIL) _parseState = PARSE_REQ_HEADERS; // split-flap patch: keep a rejection
+     }
+     return;
+   }

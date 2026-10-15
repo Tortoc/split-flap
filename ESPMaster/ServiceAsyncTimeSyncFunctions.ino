@@ -4,7 +4,7 @@
 //non-blocking WiFiUDP::parsePacket() instead. ezTime's own NTP sync is off (setInterval(0) in
 //setup()); checkNtpSync() and checkTimezoneLookup() take over.
 //
-//Don't apply NTP time with a plain Timezone::setTime(utc) - see ntpSyncApplyResult().
+//Apply NTP time only via ntpSyncApplyResult(), never with timezone.setTime(utc) on the local zone.
 
 #include <lwip/dns.h>
 
@@ -193,14 +193,12 @@ void startNtpSync() {
 }
 
 //Applies a raw NTP UTC timestamp so ezTime ends up in the same state as after its own updateNTP().
-//Timezone::setTime(t) treats t as local time and stores t + getOffset(t)*60, with ezTime's
-//POSIX-inverted offset sign - so setTime(rawUtc) would be off by the zone offset. Instead,
-//pre-compensate with offsetGuess = getOffset(rawUtc, UTC_TIME) and call setTime(rawUtc -
-//offsetGuess*60); setTime() recomputes the same offset and stores rawUtc. Checked below via
+//Timezone::setTime(t) treats t as local time of that zone; the synced time itself is global. Set via
+//the UTC zone (offset 0) - going through the local zone's time picked the wrong hour in the
+//repeated hour at the end of DST (local time ambiguous, off by -3600 s). Checked below via
 //getRealUtcNow().
 void ntpSyncApplyResult(time_t rawUtc) {
-  int16_t offsetGuess = timezone.getOffset(rawUtc, UTC_TIME);
-  timezone.setTime(rawUtc - (long)offsetGuess * 60);
+  UTC.setTime(rawUtc);
 
   long checkUtc = getRealUtcNow();
   long driftSeconds = checkUtc - (long)rawUtc;

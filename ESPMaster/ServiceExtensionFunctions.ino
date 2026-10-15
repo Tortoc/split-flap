@@ -421,34 +421,40 @@ bool extensionDisplayWriteFailed() {
 }
 
 //Replaces the extension host list (full replace, like replaceRotationItemsFromJson()) and resets
-//every entry's Reachable/UnitsAmount.
-bool replaceExtensionDevicesFromJson(String json) {
+//every entry's Reachable/UnitsAmount. Saved before anything changes: on EXTENSION_DEVICES_INVALID
+//or _SAVE_FAILED both the active list and the file stay as they were.
+int replaceExtensionDevicesFromJson(String json) {
   JsonDocument doc;
   if (deserializeJson(doc, json) || !doc.is<JsonArray>()) {
-    return false;
+    return EXTENSION_DEVICES_INVALID;
   }
   //Checked up front, so a list with one bad entry changes nothing.
+  JsonDocument outDoc;
+  JsonArray outArray = outDoc.to<JsonArray>();
   for (JsonVariant value : doc.as<JsonArray>()) {
-    String host = String((const char*)(value | ""));
-    host.trim();
-    if (host != "" && !isValidExtensionHost(host)) {
-      return false;
-    }
-  }
-
-  pendingExtensionPairing = false; //its index would name a different device now
-  extensionDeviceCount = 0;
-  for (JsonVariant value : doc.as<JsonArray>()) {
-    if (extensionDeviceCount >= EXTENSION_DEVICES_MAX) {
-      break;
-    }
     String host = String((const char*)(value | ""));
     host.trim();
     if (host == "") {
       continue;
     }
+    if (!isValidExtensionHost(host)) {
+      return EXTENSION_DEVICES_INVALID;
+    }
+    if (outArray.size() < EXTENSION_DEVICES_MAX) {
+      outArray.add(host);
+    }
+  }
+  String extensionDevicesJsonOut;
+  serializeJson(outDoc, extensionDevicesJsonOut);
+  if (!writeAtomicFile(LittleFS, extensionDevicesPath, extensionDevicesJsonOut.c_str())) {
+    return EXTENSION_DEVICES_SAVE_FAILED;
+  }
+
+  pendingExtensionPairing = false; //its index would name a different device now
+  extensionDeviceCount = 0;
+  for (JsonVariant value : outArray) {
     extensionDevices[extensionDeviceCount] = ExtensionDevice(); //fresh: Reachable=false, UnitsAmount=0
-    extensionDevices[extensionDeviceCount].Host = host;
+    extensionDevices[extensionDeviceCount].Host = String((const char*)value);
     extensionDeviceCount++;
   }
   //Free String buffers in now-unused slots (see replaceRotationItemsFromJson()).
@@ -456,16 +462,7 @@ bool replaceExtensionDevicesFromJson(String json) {
     extensionDevices[i] = ExtensionDevice();
   }
 
-  JsonDocument outDoc;
-  JsonArray outArray = outDoc.to<JsonArray>();
-  for (int i = 0; i < extensionDeviceCount; i++) {
-    outArray.add(extensionDevices[i].Host);
-  }
-  String extensionDevicesJsonOut;
-  serializeJson(outDoc, extensionDevicesJsonOut);
-  writeFile(LittleFS, extensionDevicesPath, extensionDevicesJsonOut.c_str());
-
   //The host list is part of the combined width - see displayRenderGeneration.
   displayRenderGeneration++;
-  return true;
+  return EXTENSION_DEVICES_OK;
 }
