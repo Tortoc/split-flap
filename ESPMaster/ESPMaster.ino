@@ -3389,6 +3389,11 @@ void performOneSecondDisplayTick() {
 }
 
 void loop() {
+  //At most ~1000 passes per second. Unthrottled, loop() ran 20000+ times a second through ~30 mostly idle
+  //calls and kept evicting the network and file system code from the flash cache: depending on where
+  //the linker happened to place it, page delivery got up to 10x slower.
+  delay(1);
+
 #if USE_MULTICAST == true
   MDNS.update();
 #endif
