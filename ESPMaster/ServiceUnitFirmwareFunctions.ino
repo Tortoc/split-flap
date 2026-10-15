@@ -49,7 +49,7 @@ uint8_t requestUnitEnterBootloader(int unitIndex) {
   return Wire.endTransmission();
 }
 
-//From 41 units upward the bootloader range (41-104) overlaps the app range (0-63): a running app
+//From 42 units upward the bootloader range (41-104) overlaps the app range (0-63): a running app
 //ACKs the presence check and "succeeds" the chip-info read with garbage, so the exact signature is
 //verified, not just read success.
 #define UNIT_IS_EXPECTED_CHIP_SIGNATURE(info) \
@@ -239,6 +239,28 @@ bool twibootStartApplication(int bootAddress) {
   return result == 0 || result == 3;
 }
 
+//For a push that stops before any flash page was written: disarms the update marker if this push may
+//have armed it (a failed read-back doesn't mean the write failed), then sends the unit back to its
+//app. Without this a bootloader without the rolling idle timeout (before v3.5) waits for a power
+//cycle, and an armed marker keeps any bootloader there. A marker that was already armed (or couldn't
+//be read) before this push stays untouched - the flash may hold a half-written earlier update.
+//Returns a sentence for the error message.
+String returnUnitToAppAfterAbort(int bootAddress, bool markerFreeBefore, bool armingAttempted) {
+  if (!markerFreeBefore) {
+    return F(" The unit still holds an unfinished earlier update and stays in its bootloader until an update completes.");
+  }
+  if (armingAttempted) {
+    String ignoredReason;
+    if (!twibootWriteAndVerifyEepromByte(bootAddress, UNIT_BOOTLOADER_UPDATE_MARKER_ADDR, UNIT_BOOTLOADER_UPDATE_MARKER_COMPLETE, ignoredReason)) {
+      return F(" The update marker could not be cleared - the unit may stay in its bootloader; run the update again (Units tab, \"Other unit number...\").");
+    }
+  }
+  if (!twibootStartApplication(bootAddress)) {
+    return F(" The unit didn't confirm the return to its app - check the Units page, or power-cycle the unit if it doesn't come back.");
+  }
+  return F(" The unit was sent back to its app.");
+}
+
 //Pushes the firmware at unitFirmwarePath to the unit over I2C.
 //
 //Safety: the EEPROM update marker is armed before any page is touched and cleared only after page 0
@@ -317,7 +339,7 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
     return false;
   }
 
-  //From 41 units upward unitIndex's bootloader address equals another unit's app address - a real
+  //From 42 units upward unitIndex's bootloader address equals another unit's app address - a real
   //bus conflict. Errs on the safe side: may reject a fine push, never allows a collision.
   int expectedBootAddressForCollisionCheck = UNIT_BOOTLOADER_BASE_ADDRESS + unitIndex;
   if (expectedBootAddressForCollisionCheck < unitsAmount) {
@@ -362,6 +384,12 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   result["bootAddress"] = "0x" + String(bootAddress, HEX);
   twibootHeartbeat(bootAddress);
 
+  //Whether the update marker was clear before this push - only then may an early abort disarm it
+  //again and send the unit to its app (see returnUnitToAppAfterAbort()).
+  uint8_t markerBefore = UNIT_BOOTLOADER_UPDATE_MARKER_INPROGRESS;
+  bool markerFreeBefore = twibootReadEepromByte(bootAddress, UNIT_BOOTLOADER_UPDATE_MARKER_ADDR, &markerBefore) &&
+    markerBefore != UNIT_BOOTLOADER_UPDATE_MARKER_INPROGRESS;
+
   uint8_t pageSize = chipInfo.pageSize;
   uint16_t maxFlashAddress = chipInfo.bootloaderStart;
 
@@ -373,7 +401,7 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
     firmwareFile.close();
     result["success"] = false;
     result["error"] = "Firmware image (" + String(firmwareSize) + " bytes) doesn't fit, or the unit reported an implausible page size (" +
-      String(pageSize) + "). Nothing was written.";
+      String(pageSize) + "). Nothing was written." + returnUnitToAppAfterAbort(bootAddress, markerFreeBefore, false);
     serializeJson(result, resultJsonOut);
     return false;
   }
@@ -383,7 +411,8 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   if (UNIT_BOOTLOADER_UPDATE_MARKER_ADDR >= chipInfo.eepromSize) {
     firmwareFile.close();
     result["success"] = false;
-    result["error"] = F("Update-marker address doesn't fit this unit's reported EEPROM size - refusing to proceed without the safety net. Nothing was written.");
+    result["error"] = String(F("Update-marker address doesn't fit this unit's reported EEPROM size - refusing to proceed without the safety net. Nothing was written.")) +
+      returnUnitToAppAfterAbort(bootAddress, markerFreeBefore, false);
     serializeJson(result, resultJsonOut);
     return false;
   }
@@ -395,8 +424,9 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   if (!twibootReadVersion(bootAddress, bootloaderVersion, sizeof(bootloaderVersion)) || strncmp(bootloaderVersion, "SF-TWIBOOT", 10) != 0) {
     firmwareFile.close();
     result["success"] = false;
-    result["error"] = F("The unit's bootloader doesn't report SF-TWIBOOT (v3.5 or later), so an aborted update could start a "
-      "half-written firmware. Flash the current twiboot over ISP first (see Unit/BOOTLOADER_SETUP.md). Nothing was written.");
+    result["error"] = String(F("The unit's bootloader doesn't report SF-TWIBOOT (v3.5 or later), so an aborted update could start a "
+      "half-written firmware. Flash the current twiboot over ISP first (see Unit/BOOTLOADER_SETUP.md). Nothing was written.")) +
+      returnUnitToAppAfterAbort(bootAddress, markerFreeBefore, false);
     serializeJson(result, resultJsonOut);
     return false;
   }
@@ -407,7 +437,9 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   if (!twibootWriteAndVerifyEepromByte(bootAddress, UNIT_BOOTLOADER_UPDATE_MARKER_ADDR, UNIT_BOOTLOADER_UPDATE_MARKER_INPROGRESS, markerFailureReason)) {
     firmwareFile.close();
     result["success"] = false;
-    result["error"] = "Could not arm the update-in-progress marker (" + markerFailureReason + "). Nothing was written - old firmware should still be running normally.";
+    //The marker write may have landed even though its read-back failed - disarm it again.
+    result["error"] = "Could not arm the update-in-progress marker (" + markerFailureReason + "). No flash page was written." +
+      returnUnitToAppAfterAbort(bootAddress, markerFreeBefore, true);
     serializeJson(result, resultJsonOut);
     return false;
   }

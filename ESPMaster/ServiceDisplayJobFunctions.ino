@@ -581,7 +581,7 @@ void updateUnitsResetSequence() {
     case UNITS_RESET_SEQ_IDLE:
       //Only once the display is free; otherwise retry quietly next tick.
       if (startDisplayJob(createRepeatingString('-'), convertSpeed(flapSpeed), 0, "", "", -1)) {
-        SerialPrintln(F("Reseting Units now..."));
+        SerialPrintln(F("Resetting units now..."));
         unitsResetSequenceState = UNITS_RESET_SEQ_BLANK1;
       }
       return;

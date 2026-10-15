@@ -1589,13 +1589,13 @@
 							<div id="tab-clock" class="tab hidden">
 								<label for="inputClockFormat" class="ls-microlabel">Time format</label>
 								<input type="text" id="inputClockFormat" name="clockFormat" autocomplete="off" maxlength="40" placeholder="HH:mm" class="ls-display-input" />
-								<p class="note">Example: <code>HH:mm:ss</code> &rarr; 21:19:05. Tokens: HH/H (hour, 24h), hh/h (12h), mm (minute), ss (second).</p>
+								<p class="note">Example: <code>HH:mm:ss</code> &rarr; 21:19:05. Tokens: HH/H (hour, 24h), hh/h (12h), mm (minute), ss (second). Text in single quotes is shown as is: <code>HH:mm 'UHR'</code>.</p>
 							</div>
 
 							<div id="tab-date" class="tab hidden">
 								<label for="inputDateFormat" class="ls-microlabel">Date format</label>
 								<input type="text" id="inputDateFormat" name="dateFormat" autocomplete="off" maxlength="40" placeholder="dd.MM.yyyy" class="ls-display-input" />
-								<p class="note">Example: <code>dd.MM.yyyy</code> &rarr; 11.09.2026. Tokens: dd/d (day), MM/M (month), yyyy/yy (year).</p>
+								<p class="note">Example: <code>dd.MM.yyyy</code> &rarr; 11.09.2026. Tokens: dd/d (day), MM/M (month), yyyy/yy (year). Text in single quotes is shown as is.</p>
 							</div>
 
 							<div id="tab-rotation" class="tab hidden">
@@ -2562,7 +2562,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 						} else {
 							//escapeHtml() on the server's text: it ends up in innerHTML (showBannerMessage()). The static
 							//fallback below is our own and keeps its <br>.
-							showBannerMessage(this.responseText ? escapeHtml(this.responseText) : T("Something went wrong during submission. Feel free to try again, ensure that you have entered valid information.<br>Ensure things like dates provided for schedules/countdowns are in the future."));
+							showBannerMessage(this.responseText ? escapeHtml(this.responseText) : T("Something went wrong during submission. Feel free to try again, ensure that you have entered valid information.<br>A scheduled message needs a date in the future."));
 						}
 					}
 				};
@@ -2844,6 +2844,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 		//Send message to delete a message
 		function deleteScheduledMessage(id, message) {
+			message = decodeUmlautPlaceholders(message); //as shown in the list ("M$RZ" -> "MÄRZ")
 			var confirmDeletion = confirm(T(`Delete message '${message}'?`));
 			if (!confirmDeletion) {
 				return false;
@@ -3806,7 +3807,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			elementContent.classList.remove("hidden");
 		}
 
-		//Encodes ä/ö/ü (any case) into the stand-ins #, $, & the device uses (the flaps have no lowercase,
+		//Encodes ä/ö/ü (any case) into the stand-ins $, &, # the device uses (the flaps have no lowercase,
 		//so case isn't preserved). Used by form.onsubmit.
 		function encodeUmlautPlaceholders(text) {
 			return (text || "").replace(/ä/gi, '$').replace(/ö/gi, '&').replace(/ü/gi, '#');

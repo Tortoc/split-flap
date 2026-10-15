@@ -5,6 +5,8 @@
 #include <user_interface.h>
 #include "CrashLog.h"
 
+extern const char* espVersion; //ESPMaster.ino
+
 extern "C" void custom_crash_callback(struct rst_info *rstInfo, uint32_t stack, uint32_t stackEnd) {
   CrashDump dump;
   memset(&dump, 0, sizeof(dump));
@@ -22,6 +24,8 @@ extern "C" void custom_crash_callback(struct rst_info *rstInfo, uint32_t stack, 
     dump.stackWords[count++] = *reinterpret_cast<uint32_t*>(addr);
   }
   dump.stackWordCount = count;
+  dump.uptimeMs = millis();
+  strncpy(dump.firmwareVersion, espVersion, sizeof(dump.firmwareVersion) - 1);
 
   ESP.rtcUserMemoryWrite(CRASH_LOG_RTC_OFFSET, reinterpret_cast<uint32_t*>(&dump), sizeof(dump));
 }

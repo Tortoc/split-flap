@@ -3,7 +3,8 @@
 #pragma once
 #include <stdint.h>
 
-#define CRASH_LOG_MAGIC 0xC5A5FEEDu
+//Changed with the layout below, so a dump of an older layout is never misread.
+#define CRASH_LOG_MAGIC 0xC5A5FEEEu
 #define CRASH_LOG_MAX_STACK_WORDS 32
 #define CRASH_LOG_MAX_ENTRIES 5
 //Position in the RTC user memory, in 4-byte blocks. Blocks 0-31 (128 bytes) hold the eboot command
@@ -21,4 +22,8 @@ struct CrashDump {
   uint32_t depc;
   uint32_t stackWordCount;
   uint32_t stackWords[CRASH_LOG_MAX_STACK_WORDS];
+  //Firmware that crashed (espVersion) and its uptime - stack addresses only decode against that
+  //build's .elf.
+  uint32_t uptimeMs;
+  char firmwareVersion[12];
 };

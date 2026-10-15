@@ -78,8 +78,11 @@ make MCU=atmega328p CFLAGS_TARGET="-DUSE_CLOCKSTRETCH=1"
 ```
 
 `-DUSE_CLOCKSTRETCH=1` makes the bootloader hold the I2C clock line (clock stretching) while it
-writes flash, which ESPMaster supports natively (`Wire.setClockStretchLimit()`) - without it
-ESPMaster would have to guess the timing.
+writes flash, which ESPMaster supports natively (`Wire.setClockStretchLimit()`). Without it
+twiboot doesn't answer during a write, ESPMaster's read-back right after each page fails and every
+I2C update aborts. The `Makefile` sets it for `atmega328p` by default, so a plain `make
+MCU=atmega328p` (or `install`) builds the right variant as well. A changed `CFLAGS_TARGET` alone
+doesn't trigger a rebuild - run `make clean` first.
 
 **Then check the `avr-size` output** that `make` prints (`text` + `data` is the flash actually
 used; `bss` is RAM only). The bootloader section is limited by the BOOTSZ fuse to **1024 words =
@@ -117,10 +120,10 @@ The same `twiboot.hex` goes onto **every** unit, whatever its jumpers are set to
 
 **The `install` step erases the whole flash, including any `Unit.ino` already on the chip.**
 Flash the application right afterwards, with `-D` so the bootloader you just wrote isn't erased
-again:
+again (`Unit.hex` from the latest `unit-v…` release, or `build/Unit.ino.hex` from your own build):
 
 ```bash
-avrdude -c usbasp -B 125kHz -p m328p -D -U flash:w:Unit.ino.hex:i
+avrdude -c usbasp -B 125kHz -p m328p -D -U flash:w:Unit.hex:i
 ```
 
 **`-D` only works on a blank (`0xFF`) area.** Over ISP the only erase is the full chip erase, and
@@ -139,7 +142,7 @@ an ISP write is unavoidable (new bootloader, broken unit), do the full sequence:
    little-endian `uint16_t` in the first two bytes (the chip erase also clears the EEPROM).
 2. `make MCU=atmega328p install AVRDUDE_PROG="..."` or `avrdude -U flash:w:twiboot.hex:i`
    without `-D` (full chip erase, then the bootloader).
-3. The application: `avrdude ... -D -U flash:w:Unit.ino.hex:i` (the area is blank now), or an
+3. The application: `avrdude ... -D -U flash:w:Unit.hex:i` (the area is blank now), or an
    I2C push from the web UI.
 4. Set the calibration offset again on the **☰ Menu > Units** page.
 
@@ -175,6 +178,6 @@ During an update push or a bootloader probe, ESPMaster talks to exactly one addr
 and checks the chip signature there before writing anything. It does not scan the whole bootloader
 window any more: a full scan refused to recover any unit as soon as a second one sat in the
 bootloader (e.g. after an aborted update). Two guards remain: a unit whose bootloader address would
-collide with another unit's application address (from 41 units upward) or with the RTC (`0x68`,
+collide with another unit's application address (from 42 units upward) or with the RTC (`0x68`,
 i.e. unit 63) is refused before anything is written. The application-side boot scan in ESPMaster
 (`scanI2CBus()`, which detects `unitsAmount`) covers addresses `0`-`63` and stops at the first gap.

@@ -52,6 +52,9 @@ void checkAndPersistCrashLog() {
   SerialPrintln(F("=== Crash detected from previous run - saving to " CRASH_LOG_PATH " ==="));
 
   JsonDocument entryDoc;
+  dump.firmwareVersion[sizeof(dump.firmwareVersion) - 1] = '\0'; //never trust RTC memory to be terminated
+  entryDoc["firmware"] = dump.firmwareVersion;
+  entryDoc["uptimeSec"] = dump.uptimeMs / 1000;
   entryDoc["reason"] = dump.reason;
   entryDoc["reasonText"] = crashResetReasonText(dump.reason);
   entryDoc["exccause"] = dump.exccause;

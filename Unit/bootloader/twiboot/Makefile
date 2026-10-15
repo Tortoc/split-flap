@@ -59,6 +59,10 @@ AVRDUDE_MCU=m328p -F
 AVRDUDE_FUSES=lfuse:w:0xff:m hfuse:w:0xda:m efuse:w:0xfd:m
 
 BOOTLOADER_START=0x7800
+# ESPMaster reads a page back right after writing it and relies on clock stretching for that; without
+# it twiboot NACKs during the write and every I2C update fails. Default here, so a plain
+# "make MCU=atmega328p install" builds the right variant too.
+CFLAGS_TARGET ?= -DUSE_CLOCKSTRETCH=1
 endif
 
 ifeq ($(MCU), attiny85)

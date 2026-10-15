@@ -236,9 +236,10 @@ String sentenceLine(const String &sentenceIn, int width, int wantedLine, int &li
       }
       else
       {
-        //Hyphenate an over-long word - but not right before the word's own line break.
+        //Hyphenate an over-long word - but not right before the word's own line break, and not on a
+        //one-unit display (the hyphen would be a page of its own before every letter).
         bool moreWordContentFollows = (letterIndex < currentWordLength - 1) && (wordItem[letterIndex + 1] != '\n');
-        if (inProgressLine.length() == width - 1 && moreWordContentFollows)
+        if (width > 1 && inProgressLine.length() == width - 1 && moreWordContentFollows)
         {
           inProgressLine += '-';
           emitLine(inProgressLine);
@@ -275,7 +276,9 @@ int countSentenceLines(const String &sentence, int width) {
 
 //Translates the user-facing format syntax (e.g. "HH:mm:ss", "dd.MM.yyyy") into ezTime's own
 //PHP-date()-style tokens, which Timezone::dateTime() understands. Longest tokens first, so "yyyy"
-//isn't chopped into four "y" matches.
+//isn't chopped into four "y" matches. Text in single quotes is literal ("HH:mm 'Uhr'", '' = a quote
+//itself), like Java's date patterns. Every other letter (and ezTime's escape characters '\' and
+//'~') is escaped - ezTime reads most letters as tokens of its own.
 String convertUserDateFormatToEzTime(String userFormat) {
   struct FormatToken { const char* from; const char* to; };
   static const FormatToken tokens[] = {
@@ -291,7 +294,24 @@ String convertUserDateFormatToEzTime(String userFormat) {
 
   String result = "";
   int i = 0;
+  bool quoted = false;
   while (i < (int)userFormat.length()) {
+    if (userFormat[i] == '\'') {
+      if (i + 1 < (int)userFormat.length() && userFormat[i + 1] == '\'') {
+        result += '\'';
+        i += 2;
+      } else {
+        quoted = !quoted;
+        i++;
+      }
+      continue;
+    }
+    if (quoted) {
+      result += '\\';
+      result += userFormat[i];
+      i++;
+      continue;
+    }
     bool matched = false;
     for (unsigned int t = 0; t < sizeof(tokens) / sizeof(tokens[0]); t++) {
       String from = tokens[t].from;
@@ -303,7 +323,11 @@ String convertUserDateFormatToEzTime(String userFormat) {
       }
     }
     if (!matched) {
-      result += userFormat[i];
+      char c = userFormat[i];
+      if (isAlpha(c) || c == '\\' || c == '~') {
+        result += '\\';
+      }
+      result += c;
       i++;
     }
   }
@@ -333,11 +357,14 @@ int parseTimeOfDayToMinutes(String value) {
     return -1;
   }
 
+  //Digits only - isNumber() (strtol) would also let " 7" or "+7" through.
+  for (int i = 0; i < 5; i++) {
+    if (i != 2 && !isDigit(value.charAt(i))) {
+      return -1;
+    }
+  }
   String hourPart = value.substring(0, 2);
   String minutePart = value.substring(3, 5);
-  if (!isNumber(hourPart) || !isNumber(minutePart)) {
-    return -1;
-  }
 
   int hour = hourPart.toInt();
   int minute = minutePart.toInt();

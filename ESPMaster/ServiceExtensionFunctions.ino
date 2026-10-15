@@ -56,8 +56,14 @@ void checkExtensionHealth() {
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, body);
         if (!error) {
-          ext.UnitsAmount = doc["unitsAmount"] | 0;
-          ok = ext.UnitsAmount > 0;
+          //Bounded like this device's own count: an implausible answer would blow up the combined
+          //width (and every String built from it) on this small heap.
+          int reportedUnitsAmount = doc["unitsAmount"] | 0;
+          ok = reportedUnitsAmount > 0 && reportedUnitsAmount <= UNITS_AMOUNT_MAX;
+          ext.UnitsAmount = ok ? reportedUnitsAmount : 0;
+          if (!ok) {
+            failure = String(F("unitsAmount ")) + String(reportedUnitsAmount) + F(" out of range");
+          }
         } else {
           failure = String(error.c_str()) + F(", ") + String(body.length()) + F(" bytes");
         }

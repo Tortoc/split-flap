@@ -8,7 +8,7 @@
 //--- Feature flags ---
 #define SERIAL_ENABLE       true   //enable serial debug messages
 #define UNIT_CALLS_DISABLE  false  //disable I2C calls to units (debug the ESP alone)
-#define WEB_FIRMWARE_UPDATE_ENABLE true //browser-based firmware upload from the Admin page
+#define WEB_FIRMWARE_UPDATE_ENABLE true //browser-based firmware upload (Menu > Firmware update)
 #define UNIT_BOOTLOADER_ENABLE true //push Unit.ino updates over I2C via twiboot - needs every
                                     //unit pre-flashed with twiboot, see Unit/BOOTLOADER_SETUP.md
 #define UNITS_AMOUNT_MAX    64     //matches the 6-bit address jumper range; actual amount
@@ -44,8 +44,8 @@
 #define UNIT_STEPS          2038    //must match STEPS in Unit.ino
 #define UNIT_BOOTLOADER_CMD 255     //must match CMD_ENTER_BOOTLOADER in Unit.ino
 #define UNIT_BOOTLOADER_BASE_ADDRESS 0x29 //start of the twiboot bootloader address range (0x29-0x68) -
-                                           //NOTE: 0x68 is also RTC_I2C_ADDRESS below - would collide
-                                           //if ever expanded near the structural 64-unit ceiling.
+                                           //NOTE: 0x68 (unit 63) is also RTC_I2C_ADDRESS below -
+                                           //refused via isReservedI2CAddress().
 #define CRASH_LOG_PATH "/crash-log.jsonl"
 //Optional DS3231 RTC module on the same I2C bus - fixed address per the DS3231 datasheet, not
 //configurable. Entirely optional/auto-detected (probeRtc()).
@@ -104,7 +104,7 @@ const WebRequestMethodComposite ASYNC_HTTP_POST = 0b00000010;
 const WebRequestMethodComposite ASYNC_HTTP_DELETE = 0b00000100;
 
 //--- User-facing settings ---
-//mDNS hostname ("<mdnsHostname>.local"), set via POST /api/wifi (Netzwerk tab).
+//mDNS hostname ("<mdnsHostname>.local"), set via POST /api/wifi (Network tab).
 String mdnsHostname = "split-flap";
 //Exact DNS name the router gives this device (e.g. "split-flap.fritz.box"), "" = none. Only used
 //to accept that Host header (RequestGuard); set via POST /api/wifi?action=set-router-hostname.
@@ -587,8 +587,8 @@ String alignment = "";
 String flapSpeed = "";
 String animationMode = ANIMATION_MODE_SIMULTANEOUS; //default: all units animate at once
 unsigned long animationStaggerMs = 150; //ms between consecutive units' start, see ANIMATION_MODES
-//In Text mode the text itself, persisted (persistTextModeText()); every other mode writes its
-//rendered content into it each second.
+//In Text mode the text itself, persisted (persistTextModeText()); Countdown, Countup and Rotation
+//write their rendered content into it each second (Clock/Date render straight into showText()).
 String inputText = "";
 String deviceMode = "";
 String deviceRole = "standalone"; //standalone|primary|extension
@@ -714,7 +714,7 @@ bool wifiScanRequested = false;
 
 enum WifiConnectPhase {
   WIFI_CONNECT_NONE,
-  WIFI_CONNECT_PENDING,          //POST /api/wifi/connect received, loop() hasn't called WiFi.begin() yet
+  WIFI_CONNECT_PENDING,          //POST /api/wifi?action=connect received, loop() hasn't called WiFi.begin() yet
   WIFI_CONNECT_TESTING,          //WiFi.begin() called with the new credentials, waiting for a result
   WIFI_CONNECT_SUCCESS,
   WIFI_CONNECT_FAILED_REVERTED   //new credentials didn't connect in time, reverted to the old ones
@@ -1455,7 +1455,7 @@ void setup() {
       //If there was an error, report back to check what has been input
       if (submissionError) {
         SerialPrintln(F("Finished Processing Request with Error"));
-        request->send(400, "text/plain", "Invalid submission - check the values you entered (e.g. schedule/countdown dates must be in the future).");
+        request->send(400, "text/plain", "Invalid submission - check the values you entered (e.g. a scheduled message needs a date in the future).");
       }
       else {
         SerialPrintln(F("Finished Processing Request Successfully"));
@@ -2442,8 +2442,8 @@ void setup() {
       
       String html = "<div style='text-align:center'>";
       html += F("<font face='arial'><h1>Split Flap - Rebooting</h1>");
-      html += F("<p>Reboot is pending now...<p>");
-      html += F("<p>This can take anywhere between 10-20 seconds<p>");
+      html += F("<p>Reboot is pending now...</p>");
+      html += F("<p>This can take anywhere between 10-20 seconds</p>");
       html += F("<p>You can go to the main home page after this time by clicking the button below or going to '/'.</p>");
       html += "<p><a href=\"http://" + ip.toString() + "\">Home</a></p>";
       html += F("</font>");
@@ -2855,8 +2855,8 @@ void setup() {
 
         String html = "<div style='text-align:center'>";
         html += F("<font face='arial'><h1>Split Flap - Resetting WiFi</h1>");
-        html += F("<p>WiFi Settings have been erased. Device will now reboot...<p>");
-        html += F("<p>You will now be able to connect to this device in AP mode to configure the WiFi once more<p>");
+        html += F("<p>WiFi Settings have been erased. Device will now reboot...</p>");
+        html += F("<p>You will now be able to connect to this device in AP mode to configure the WiFi once more</p>");
         html += F("<p>You can go to the main home page after this time by clicking the button below or going to '/'.</p>");
         html += "<p><a href=\"http://" + ip.toString() + "\">Home</a></p>";
         html += F("</font>");
@@ -3257,7 +3257,7 @@ void setup() {
     }
     else {
       SerialPrintln(F("Unable to connect to WiFi... Not starting web server"));
-      SerialPrintln(F("Please hard restart your device to try connect again"));
+      SerialPrintln(F("Retrying the stored WiFi every 5 minutes, the device restarts once connected"));
       SerialPrintln(F("#######################################################"));
       // Continuous blink to indicate error
       for (int i = 0; i < 10; i++) {
@@ -3400,8 +3400,8 @@ void loop() {
     cancelDisplayControllers();
   }
 
-  //Advances the display-update state machine by at most one I2C op, unconditionally and before
-  //any deferred-request handling below, so an in-progress display update can't block loop().
+  //Advances the display-update state machine by one step (it may write or poll several units, see
+  //ServiceDisplayJobFunctions.ino), unconditionally and before the deferred-request handling below.
   updateDisplayJob();
 
   //I2C requests deferred by the web handlers (see PendingRequestSlot) - served first.
@@ -3851,7 +3851,7 @@ void loop() {
 
   //Reboot from loop() - rebooting inside a request handler would never send the response
   if (isPendingReboot) {
-    SerialPrintln(F("Rebooting Now... Fairwell!"));
+    SerialPrintln(F("Rebooting now... Farewell!"));
     SerialPrintln(F("#######################################################"));
     delay(100);
 

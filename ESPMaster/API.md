@@ -275,7 +275,7 @@ missing/wrong.
 | `countdownDateTimeUnix` | unix timestamp | Countdown target. Only applied together with `deviceMode=countdown` in the same request |
 | `countupDateTimeUnix` | unix timestamp | Count-up start date. Only applied together with `deviceMode=countup` in the same request |
 | `countdownPrefix`, `countdownSuffix`, `countupPrefix`, `countupSuffix` | up to 40 chars each | Text around the day count; empty is a valid value. Factory default suffix: `days` |
-| `clockFormat`, `dateFormat` | up to 40 chars each | Display format with the tokens `HH`/`H` (hour), `hh`/`h` (12h), `mm`, `ss`, `dd`/`d`, `MM`/`M`, `MMM`/`MMMM` (month name), `EEE`/`EEEE` (weekday), `yyyy`/`yy`; defaults `HH:mm` and `dd.MM.yyyy` |
+| `clockFormat`, `dateFormat` | up to 40 chars each | Display format with the tokens `HH`/`H` (hour), `hh`/`h` (12h), `mm`, `ss`, `dd`/`d`, `MM`/`M`, `MMM`/`MMMM` (month name), `EEE`/`EEEE` (weekday), `yyyy`/`yy`. Text in single quotes is literal (`HH:mm 'UHR'`, `''` = a quote); every other character is shown as is (before 5.0.8 most other letters were read as format codes). Defaults `HH:mm` and `dd.MM.yyyy` |
 | `rotationItems` | JSON array (string) | Replaces the whole Rotation item list - see [`GET /api/rotation-items`](#get-apirotation-items) for the item schema. Only applied together with `deviceMode=rotation` in the same request; otherwise use [`POST /api/rotation-items`](#post-apirotation-items). |
 
 **Stored text budget** (since ESPMaster 4.10.5): all scheduled message texts together, and
@@ -396,7 +396,9 @@ curl "http://192.168.1.50/api/diag?type=test" -H "X-OTA-Password: splitflap"
 ### `GET /api/crash-log`
 
 The persisted on-device crash log - survives even if a live serial connection wasn't available at
-the moment of the crash. One JSON object per line (JSON Lines format), oldest first.
+the moment of the crash. One JSON object per line (JSON Lines format), oldest first. Since 5.0.8
+each entry starts with `firmware` (the version that crashed - decode the addresses with that
+build's `.elf`) and `uptimeSec`, followed by the reset reason, exception registers and stack.
 
 **Response** `200 application/jsonl` - raw file content, or an empty body if no crash log exists
 yet.
@@ -638,7 +640,10 @@ On failure, `success: false` and an `error` field instead of `message`/`started`
 missing `bootAddress`/`pageSize`/`totalPages`/`pagesWritten` if the failure happened before the
 unit was even found, e.g. no unit answered in bootloader mode). Only a bootloader reporting
 `SF-TWIBOOT` (v3.5 and later) is updated; an older twiboot is refused before anything is written,
-since it would not honour the marker below. Safety against an aborted push:
+since it would not honour the marker below. If a push stops before the first flash page (refused
+bootloader, image too large, marker not confirmed), the marker is disarmed again and the unit is
+sent back to its app - unless an earlier aborted update had already armed it; the `error` text says
+which. Safety against an aborted push:
 an EEPROM "update in progress" marker is armed before any flash page is touched and only cleared
 after every page (including the vector table, written last) is confirmed byte-for-byte - twiboot
 itself refuses to boot into the app while that marker is armed, regardless of a subsequent reset,
@@ -659,7 +664,8 @@ anything to flash**. Used to verify the jumper address is read live by twiboot:
   "addressOffsetFromBase": 0,
   "signature": "1E 95 0F",
   "pageSize": 128,
-  "bootloaderStart": 32256,
+  "bootloaderStart": 30720,
+  "bootloaderVersion": "SF-TWIBOOT v3.5",
   "returnedToApp": true,
   "note": "Nothing was written. The unit was explicitly told to return to its app."
 }
