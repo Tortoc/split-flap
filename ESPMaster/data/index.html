@@ -1589,7 +1589,7 @@
 							<div id="tab-clock" class="tab hidden">
 								<label for="inputClockFormat" class="ls-microlabel">Time format</label>
 								<input type="text" id="inputClockFormat" name="clockFormat" autocomplete="off" maxlength="40" placeholder="HH:mm" class="ls-display-input" />
-								<p class="note">Example: <code>HH:mm:ss</code> &rarr; 21:19:05. Tokens: HH/H (hour, 24h), hh/h (12h), mm (minute), ss (second). Text in single quotes is shown as is: <code>HH:mm 'UHR'</code>.</p>
+								<p class="note">Example: <code>HH:mm</code> &rarr; 21:19. Tokens: HH/H (hour, 24h), hh/h (12h), mm (minute), ss (second). Text in single quotes is shown as is: <code>HH:mm 'UHR'</code>.</p>
 							</div>
 
 							<div id="tab-date" class="tab hidden">
@@ -2540,7 +2540,11 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 							loadRotationItems();
 							return false;
 						}
-						rotationItemsJson = JSON.stringify(rotationItemsData);
+						//An empty clock/date format would show nothing - save the default the summary shows.
+						rotationItemsJson = JSON.stringify(rotationItemsData.map(function (item) {
+							return (item.type === "clock" || item.type === "date") && !item.format
+								? Object.assign({}, item, { format: ROTATION_DEFAULT_FORMATS[item.type] }) : item;
+						}));
 						break;
 				}
 
@@ -3270,15 +3274,19 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			renderRotationItems();
 		}
 
+		//Default format of a new clock/date rotation entry, also what an empty one is saved as. No
+		//seconds: the flaps can't keep up with a per-second change.
+		const ROTATION_DEFAULT_FORMATS = { clock: "HH:mm", date: "dd.MM.yyyy" };
+
 		function updateRotationItemType(index, newType) {
 			var previousType = rotationItemsData[index].type;
 			rotationItemsData[index].type = newType;
 			//Per-type default when switching type: switching to clock or date always starts with that
 			//type's default format (a clock format never fits a date and vice versa).
 			if (newType === "clock" && previousType !== "clock") {
-				rotationItemsData[index].format = "HH:mm:ss";
+				rotationItemsData[index].format = ROTATION_DEFAULT_FORMATS.clock;
 			} else if (newType === "date" && previousType !== "date") {
-				rotationItemsData[index].format = "dd.MM.yyyy";
+				rotationItemsData[index].format = ROTATION_DEFAULT_FORMATS.date;
 			} else if ((newType === "countdown" || newType === "countup") && !rotationItemsData[index].suffix) {
 				rotationItemsData[index].suffix = T("days");
 			}
@@ -3384,7 +3392,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 					var formatInput = document.createElement("input");
 					formatInput.type = "text";
 					formatInput.className = "ls-rotation-text ls-rotation-text-15"; //same 15-character width as prefix/suffix
-					formatInput.placeholder = item.type === "clock" ? "HH:mm:ss" : "dd.MM.yyyy";
+					formatInput.placeholder = ROTATION_DEFAULT_FORMATS[item.type];
 					formatInput.maxLength = 40;
 					formatInput.value = item.format;
 					formatInput.oninput = (function (i) { return function () { updateRotationItemField(i, "format", this.value); }; })(index);
@@ -3621,7 +3629,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 			if (item.type === "text") {
 				content = item.value ? T("“") + item.value + T("”") : T("(no text)");
 			} else if (item.type === "clock" || item.type === "date") {
-				content = "Format " + (item.format || (item.type === "clock" ? "HH:mm:ss" : "dd.MM.yyyy"));
+				content = "Format " + (item.format || ROTATION_DEFAULT_FORMATS[item.type]);
 			} else {
 				var date = "";
 				if (item.targetDateTimeUnix > 0) {

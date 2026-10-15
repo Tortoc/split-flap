@@ -188,7 +188,7 @@
  "Enable MQTT": "MQTT aktivieren",
  "Enable quiet hours": "Ruhezeiten aktivieren",
  "Europe/Berlin (simulated)": "Europe/Berlin (simuliert)",
- "Example: <code>HH:mm:ss</code> &rarr; 21:19:05. Tokens: HH/H (hour, 24h), hh/h (12h), mm (minute), ss (second). Text in single quotes is shown as is: <code>HH:mm 'UHR'</code>.": "Beispiel: <code>HH:mm:ss</code> &rarr; 21:19:05. Bausteine: HH/H (Stunde 24h), hh/h (12h), mm (Minute), ss (Sekunde). Text in einfachen Anführungszeichen erscheint unverändert: <code>HH:mm 'UHR'</code>.",
+ "Example: <code>HH:mm</code> &rarr; 21:19. Tokens: HH/H (hour, 24h), hh/h (12h), mm (minute), ss (second). Text in single quotes is shown as is: <code>HH:mm 'UHR'</code>.": "Beispiel: <code>HH:mm</code> &rarr; 21:19. Bausteine: HH/H (Stunde 24h), hh/h (12h), mm (Minute), ss (Sekunde). Text in einfachen Anführungszeichen erscheint unverändert: <code>HH:mm 'UHR'</code>.",
  "Example: <code>dd.MM.yyyy</code> &rarr; 11.09.2026. Tokens: dd/d (day), MM/M (month), yyyy/yy (year). Text in single quotes is shown as is.": "Beispiel: <code>dd.MM.yyyy</code> &rarr; 11.09.2026. Bausteine: dd/d (Tag), MM/M (Monat), yyyy/yy (Jahr). Text in einfachen Anführungszeichen erscheint unverändert.",
  "Excellent": "Ausgezeichnet",
  "Extend": "Erweitern",

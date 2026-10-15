@@ -275,7 +275,7 @@ You will also need to change the WiFi Mode in the code via changing this variabl
 
 The time zone is set in the web UI (**☰ Menu > System > Time zone**, default `Europe/Berlin`), using the TZ database names: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
 
-The clock and date formats are set in the web UI's Clock and Date modes, e.g. `HH:mm:ss` or `dd.MM.yyyy` (tokens: `HH`/`H`, `hh`/`h`, `mm`, `ss`, `dd`/`d`, `MM`/`M`, `MMM`/`MMMM`, `EEE`/`EEEE`, `yyyy`/`yy`; text in single quotes is shown as is, e.g. `HH:mm 'UHR'`; see [`ESPMaster/API.md`](./ESPMaster/API.md#post-apisettings)).
+The clock and date formats are set in the web UI's Clock and Date modes, e.g. `HH:mm` or `dd.MM.yyyy` (tokens: `HH`/`H`, `hh`/`h`, `mm`, `ss`, `dd`/`d`, `MM`/`M`, `MMM`/`MMMM`, `EEE`/`EEEE`, `yyyy`/`yy`; text in single quotes is shown as is, e.g. `HH:mm 'UHR'`; see [`ESPMaster/API.md`](./ESPMaster/API.md#post-apisettings)).
 
 There are several helper `define` variables to help during debugging/running:
 
