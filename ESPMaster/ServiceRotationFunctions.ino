@@ -172,7 +172,13 @@ bool replaceRotationItemsFromJson(const char *rotationItemsJson) {
       return false;
     }
 
+    //An unknown type was shown as text without the line check below - refused like a bad alignment.
     String itemType = value["type"] | DEVICE_MODE_TEXT;
+    if (itemType != DEVICE_MODE_TEXT && itemType != DEVICE_MODE_CLOCK && itemType != DEVICE_MODE_DATE &&
+        itemType != DEVICE_MODE_COUNTDOWN && itemType != DEVICE_MODE_COUNTUP) {
+      SerialPrintln(F("Rotation items JSON rejected: unknown type - keeping the existing list, not touching it"));
+      return false;
+    }
     if (itemType == DEVICE_MODE_TEXT && isMessageTooLongToRender(String((const char*)(value["value"] | "")))) {
       SerialPrintln(F("Rotation items JSON rejected: a text item needs more lines than fit to display - keeping the existing list, not touching it"));
       return false;
@@ -189,6 +195,12 @@ bool replaceRotationItemsFromJson(const char *rotationItemsJson) {
       SerialPrintln(F("Rotation items JSON rejected: invalid animationMode - keeping the existing list, not touching it"));
       return false;
     }
+    //Outside long's range (after 2038-01-19) `| 0` read it as 0 - a countup then counted from 1970.
+    if (!value["targetDateTimeUnix"].isNull() && !value["targetDateTimeUnix"].is<long>()) {
+      SerialPrintln(F("Rotation items JSON rejected: targetDateTimeUnix out of range - keeping the existing list, not touching it"));
+      return false;
+    }
+
     int itemAnimationStaggerMs = value["animationStaggerMs"] | -1;
     if (itemAnimationStaggerMs != -1 && (itemAnimationStaggerMs < 0 || itemAnimationStaggerMs > ANIMATION_STAGGER_MS_MAX)) {
       SerialPrintln(F("Rotation items JSON rejected: animationStaggerMs out of range - keeping the existing list, not touching it"));

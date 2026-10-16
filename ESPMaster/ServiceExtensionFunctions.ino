@@ -70,6 +70,13 @@ void checkExtensionHealth() {
       }
       http.end();
     }
+    //503 = its GET /api/units is busy with another caller (e.g. its own Units page) - it's there,
+    //only this answer is missing. Counted as unreachable, the combined width shrank and the whole
+    //display redrew twice within 15s.
+    if (httpCode == 503) {
+      SerialPrintln(F("Extension device \"") + ext.Host + F("\": busy (HTTP 503) - keeping the last state"));
+      continue;
+    }
     ext.Reachable = ok;
     ext.LastCheckedAt = millis();
     SerialPrintln(F("Extension device \"") + ext.Host + F("\": ") + (ok ? (F("reachable, ") + String(ext.UnitsAmount) + F(" units"))
@@ -338,13 +345,29 @@ struct ExtensionDisplayState {
   //Like displayJob.hadWriteFailure: one attempt per unit; a failure is reported via GET /api/units
   //(displayWriteFailed) so the primary re-sends the line.
   bool writeFailed = false;
+  //segment holds a received push (kept after writing, at most UNITS_AMOUNT_MAX chars), and a local
+  //job (units reset) paused the pushes - see tickExtensionDisplay().
+  bool hasContent = false;
+  bool redrawAfterLocalJob = false;
 };
 ExtensionDisplayState extensionDisplay;
+
+//A local display job on an extension's own units - the units reset (POST /api/units?action=reset) or
+//the setup hotspot password. Pushes wait meanwhile - before, both wrote the same units interleaved.
+bool extensionLocalJobRunning() {
+  return isPendingUnitsReset || isDisplayJobBusy();
+}
 
 //From loop(): picks up a newly queued push, replacing anything still animating. Only an extension
 //writes pushed content (a role change drops it via cancelDisplayControllers()).
 void tickExtensionDisplay() {
   if (deviceRole != DEVICE_ROLE_EXTENSION) {
+    return;
+  }
+  //The reset leaves every unit on '.', and the primary only pushes again on a new line - so the last
+  //push is written again in full afterwards.
+  if (extensionLocalJobRunning()) {
+    extensionDisplay.redrawAfterLocalJob = true;
     return;
   }
   if (pendingExtensionDisplayQueued) {
@@ -359,6 +382,16 @@ void tickExtensionDisplay() {
     extensionDisplay.startedAt = millis() - pendingExtensionDisplayStartOffsetMs;
     extensionDisplay.writtenMask = 0;
     extensionDisplay.writeFailed = false;
+    extensionDisplay.hasContent = true;
+    extensionDisplay.redrawAfterLocalJob = false;
+  } else if (extensionDisplay.redrawAfterLocalJob) {
+    extensionDisplay.redrawAfterLocalJob = false;
+    if (extensionDisplay.hasContent) {
+      extensionDisplay.active = true;
+      extensionDisplay.startedAt = millis();
+      extensionDisplay.writtenMask = 0;
+      extensionDisplay.writeFailed = false;
+    }
   }
   if (!extensionDisplay.active) {
     return;
@@ -389,7 +422,6 @@ void tickExtensionDisplay() {
   }
   if (allWritten) {
     extensionDisplay.active = false;
-    extensionDisplay.segment = String(); //release the buffer until the next push
   }
 }
 
@@ -408,12 +440,16 @@ void cancelDisplayControllers() {
   extensionDisplay.active = false;
   extensionDisplay.segment = String();
   extensionDisplay.writeFailed = false;
+  extensionDisplay.hasContent = false;
+  extensionDisplay.redrawAfterLocalJob = false;
   displayRenderGeneration++;
 }
 
-//Still writing a push - reported as displayBusy, so the primary doesn't take idle motors for done.
+//Still writing a push (or a local job holds it back) - reported as displayBusy, so the primary
+//doesn't take idle motors for done.
 bool extensionDisplayBusy() {
-  return pendingExtensionDisplayQueued || extensionDisplay.active;
+  return pendingExtensionDisplayQueued || extensionDisplay.active || extensionDisplay.redrawAfterLocalJob ||
+    extensionLocalJobRunning();
 }
 
 bool extensionDisplayWriteFailed() {

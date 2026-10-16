@@ -205,7 +205,7 @@ String sentenceLine(const String &sentenceIn, int width, int wantedLine, int &li
       int wordLength = indexOfFirstNewline == -1 ? wordItem.length() : indexOfFirstNewline;
 
       //If we cannot fit everything on the same line, start a new line
-      if (inProgressLine != "" && inProgressLine.length() + wordLength + 1 > width)
+      if (inProgressLine != "" && (int)inProgressLine.length() + wordLength + 1 > width)
       {
           emitLine(inProgressLine);
           inProgressLine = "";
@@ -239,7 +239,7 @@ String sentenceLine(const String &sentenceIn, int width, int wantedLine, int &li
         //Hyphenate an over-long word - but not right before the word's own line break, and not on a
         //one-unit display (the hyphen would be a page of its own before every letter).
         bool moreWordContentFollows = (letterIndex < currentWordLength - 1) && (wordItem[letterIndex + 1] != '\n');
-        if (width > 1 && inProgressLine.length() == width - 1 && moreWordContentFollows)
+        if (width > 1 && (int)inProgressLine.length() == width - 1 && moreWordContentFollows)
         {
           inProgressLine += '-';
           emitLine(inProgressLine);
@@ -248,7 +248,7 @@ String sentenceLine(const String &sentenceIn, int width, int wantedLine, int &li
 
         //Business as usual, add the letter onto the in progress line
         inProgressLine += wordItemLetter;
-        if (inProgressLine.length() == width)
+        if ((int)inProgressLine.length() == width)
         {
           emitLine(inProgressLine);
           inProgressLine = "";
@@ -343,11 +343,13 @@ bool isNumber(const String &str) {
 
   char* endPtr;
 
-  //10 specifies base 10 (decimal)
+  //10 specifies base 10 (decimal). Out of long's range is no number either: strtol()/atol() clamp it
+  //to LONG_MAX, so a date after 2038-01-19 silently became that date.
+  errno = 0;
   strtol(str.c_str(), &endPtr, 10);
 
   //Check if the conversion reached the end of the string
-  return (*endPtr == '\0');
+  return (*endPtr == '\0') && errno != ERANGE;
 }
 
 //Parses a fixed "HH:mm" time-of-day string into minutes-since-midnight (0-1439). Returns -1 for

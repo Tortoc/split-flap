@@ -43,6 +43,12 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
   SerialPrintln(F("MQTT command received: ") + message);
 
+  //Same as POST /api/text: an extension's units follow its primary.
+  if (deviceRole == DEVICE_ROLE_EXTENSION) {
+    SerialPrintln(F("MQTT command ignored: this device is an extension"));
+    return;
+  }
+
   if (isMessageTooLongToRender(message)) {
     SerialPrintln(F("MQTT command ignored: needs more lines than fit to display"));
     return;

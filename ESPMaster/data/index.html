@@ -1541,7 +1541,7 @@
 											<input type="checkbox" id="inputCheckboxShowIndefinitely" name="scheduleShowIndefinitely" />
 										</p>
 										<p>
-											<input type="datetime-local" id="inputScheduledDateTime" name="scheduleDateTime">
+											<input type="datetime-local" id="inputScheduledDateTime" name="scheduleDateTime" max="2037-12-31T23:59">
 											<input type="hidden" id="inputHiddenScheduledDateTimeUnix" name="scheduledDateTimeUnix" value="0" />
 										</p>
 									</div>
@@ -1556,7 +1556,7 @@
 									</div>
 									<div class="ls-field">
 										<label for="inputCountdownDateTime" class="ls-microlabel">Countdown end date</label>
-										<input type="date" id="inputCountdownDateTime" name="countdownDateTime">
+										<input type="date" id="inputCountdownDateTime" name="countdownDateTime" max="2037-12-31">
 										<input type="hidden" id="inputHiddenCountdownDateTimeUnix" name="countdownDateTimeUnix" value="0" />
 									</div>
 									<div class="ls-field">
@@ -3261,6 +3261,9 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 		//--- Rotation mode: an ordered list of Text/Uhrzeit/Datum/Countdown/Countup steps, each with its
 		//own display duration - the server cycles through them and loops back to the start.
 		var rotationItemsData = [];
+		//The device stores timestamps as 32-bit seconds (up to 2038-01-19) - same bound as the
+		//schedule/countdown fields' max attribute.
+		var ROTATION_MAX_DATE_TIME = "2037-12-31T23:59";
 
 		function addRotationItem() {
 			var newItem = { type: "text", value: "", format: "", targetDateTimeUnix: 0, prefix: "", suffix: "", durationSeconds: 5, alignment: "", animationMode: "", animationStaggerMs: -1 };
@@ -3412,6 +3415,7 @@ curl -X POST http://192.168.1.50/api/firmware-finish -H "X-OTA-Password: splitfl
 
 					var dateTimeInput = document.createElement("input");
 					dateTimeInput.type = "datetime-local";
+					dateTimeInput.max = ROTATION_MAX_DATE_TIME;
 					if (item.targetDateTimeUnix > 0) {
 						//In the DEVICE's timezone, not the browser's (see formatUnixSecondsForDeviceTimezone()).
 						dateTimeInput.value = formatUnixSecondsForDeviceTimezone(item.targetDateTimeUnix, false);

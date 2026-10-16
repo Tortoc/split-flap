@@ -468,11 +468,16 @@ void updateDisplayJob() {
 
     case DISPLAY_JOB_WRITE_LINE: {
       //A single line shows originalMessage verbatim - leading/repeated spaces are a deliberate way to
-      //position text; only wrapped multi-line text gets its whitespace normalized.
+      //position text - but only if it fits and has no line break. Otherwise the line sentenceLine()
+      //counted (trimmed, spaces collapsed): verbatim, "HALLO\n" showed "HALLO?N" and a text that
+      //only fits once its double space is collapsed lost its last character.
+      const String &message = displayJob.originalMessage;
+      bool showVerbatim = !displayJob.isMultiLine && message.indexOf('\n') == -1 &&
+        message.indexOf("\\n") == -1 && (int)message.length() <= displayJob.lineWidth;
       int ignoredLineCount;
-      String line = displayJob.isMultiLine
-        ? sentenceLine(displayJob.originalMessage, displayJob.lineWidth, displayJob.currentLineIndex, ignoredLineCount)
-        : displayJob.originalMessage;
+      String line = showVerbatim
+        ? message
+        : sentenceLine(message, displayJob.lineWidth, displayJob.currentLineIndex, ignoredLineCount);
       if (displayJob.isMultiLine) {
         SerialPrint(F("-- Message Line: "));
         SerialPrintln(line);

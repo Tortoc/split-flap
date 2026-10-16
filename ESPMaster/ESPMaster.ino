@@ -1001,7 +1001,6 @@ void setup() {
       // If debug mode is enabled and we're still in debug mode, show debug page
       if (showDebugPage) {
         // Generate debug HTML page with live log
-        IPAddress ip = WiFi.localIP();
         String html = "<!DOCTYPE html><html><head>";
         html += F("<title>Split Flap - Debug Mode</title>");
         html += F("<meta name='viewport' content='width=device-width, initial-scale=1'>");
@@ -1668,9 +1667,9 @@ void setup() {
           : "the text needs more lines than fit to display and was NOT applied - the previous mode/text is unchanged.";
 
         if (rotationItemsUpdateRejected && anyTextRejected) {
-          request->send(400, "text/plain", String(F("OK, but the submitted rotation items were rejected (invalid JSON, a text item needs more lines than fit, all texts together over ")) + String(STORED_TEXT_BUDGET) + F(" characters, or not enough memory to save them) AND ") + textRejectionReason);
+          request->send(400, "text/plain", String(F("OK, but the submitted rotation items were rejected (invalid JSON or field, a text item needs more lines than fit, all texts together over ")) + String(STORED_TEXT_BUDGET) + F(" characters, or not enough memory to save them) AND ") + textRejectionReason);
         } else if (rotationItemsUpdateRejected) {
-          request->send(400, "text/plain", String(F("OK, but the submitted rotation items were rejected (invalid JSON, a text item needs more lines than fit to ever display, all texts together over ")) + String(STORED_TEXT_BUDGET) + F(" characters, or not enough memory to save them) and were NOT applied - the existing rotation list is unchanged."));
+          request->send(400, "text/plain", String(F("OK, but the submitted rotation items were rejected (invalid JSON or field, a text item needs more lines than fit to ever display, all texts together over ")) + String(STORED_TEXT_BUDGET) + F(" characters, or not enough memory to save them) and were NOT applied - the existing rotation list is unchanged."));
         } else if (anyTextRejected) {
           request->send(400, "text/plain", "OK, but " + textRejectionReason);
         } else {
@@ -1709,7 +1708,7 @@ void setup() {
       bool applied = replaceRotationItemsFromJson(rotationBodyBuffer);
       freeRotationBody(true);
       if (!applied) {
-        request->send(400, "text/plain", String(F("Rotation items rejected (invalid JSON, a text item needs more lines than fit, all texts together over ")) +
+        request->send(400, "text/plain", String(F("Rotation items rejected (invalid JSON or field, a text item needs more lines than fit, all texts together over ")) +
           String(STORED_TEXT_BUDGET) + F(" characters, or not enough memory to save them) - the existing list is unchanged."));
         return;
       }
@@ -2491,7 +2490,6 @@ void setup() {
       SerialPrintln(F("Request to Remove Scheduled Message Received"));
       
       if (request->hasParam(PARAM_ID)) {
-        bool removedScheduledMessage = false;
         String idValue = request->getParam(PARAM_ID)->value();
 
         if (isNumber(idValue)) {
@@ -2523,6 +2521,11 @@ void setup() {
     //optional hold time instead of the full /api/settings form.
     webServer.on("/api/text", ASYNC_HTTP_POST, [](AsyncWebServerRequest * request) {
       if (rejectIfPasswordRequired(request, accessControlTextPublic)) return;
+      //An extension's units follow its primary - a text of its own wrote the same units as the pushes.
+      if (deviceRole == DEVICE_ROLE_EXTENSION) {
+        request->send(409, "text/plain", "This device is an extension - send the text to its primary device");
+        return;
+      }
 
       String newText = "";
       bool hasText = false;

@@ -19,6 +19,12 @@ bool isQuietHoursActive() {
     return false; //misconfigured or a zero-length window - fail open rather than park forever
   }
 
+  //No RTC/NTP time yet: the clock reads 1970 (01:00 with a cached Berlin rule, inside 22:00-07:00) -
+  //the display went blank at boot and stayed dark without internet. Set by NTP and the RTC alike.
+  if (timeStatus() == timeNotSet) {
+    return false;
+  }
+
   int nowMinutes = timezone.hour() * 60 + timezone.minute();
 
   if (quietHoursStartMinutes < quietHoursEndMinutes) {

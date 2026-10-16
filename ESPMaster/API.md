@@ -278,6 +278,9 @@ missing/wrong.
 | `clockFormat`, `dateFormat` | up to 40 chars each | Display format with the tokens `HH`/`H` (hour), `hh`/`h` (12h), `mm`, `ss`, `dd`/`d`, `MM`/`M`, `MMM`/`MMMM` (month name), `EEE`/`EEEE` (weekday), `yyyy`/`yy`. Text in single quotes is literal (`HH:mm 'UHR'`, `''` = a quote); every other character is shown as is (before 5.0.8 most other letters were read as format codes). Defaults `HH:mm` and `dd.MM.yyyy` |
 | `rotationItems` | JSON array (string) | Replaces the whole Rotation item list - see [`GET /api/rotation-items`](#get-apirotation-items) for the item schema. Only applied together with `deviceMode=rotation` in the same request; otherwise use [`POST /api/rotation-items`](#post-apirotation-items). |
 
+All numbers must fit a 32-bit signed integer - timestamps up to 2147483647 (2038-01-19); larger
+values are rejected with `400`.
+
 **Stored text budget** (since ESPMaster 4.10.5): all scheduled message texts together, and
 separately all rotation item texts (`value`/`format`/`prefix`/`suffix`), may hold at most 4000
 characters - every stored text stays in RAM. A submission that would exceed it is rejected with
@@ -335,6 +338,8 @@ missing/wrong.
   never actually show, checked up front - see `MAX_DISPLAY_LINES` in `ServiceDisplayJobFunctions.ino`).
 - `503 text/plain` (temporary/`duration>0` only) if the display is busy right now - the message is
   genuinely lost, not queued; try again.
+- `409 text/plain` on a device in the extension role - its units follow the primary, send the text
+  there.
 
 ```bash
 # Permanent - switches into Text mode and stays
@@ -539,7 +544,8 @@ full rotation to re-home) immediately.
 seconds."`. `400 text/plain` if `id`/`offset` are missing, non-numeric, or out of range.
 
 **`action=reset`** - triggers a full recalibration of every known unit (picked up on the next
-`loop()` iteration).
+`loop()` iteration). On an extension, pushes from the primary wait meanwhile and the last one is
+written again afterwards.
 **Response** `200 text/plain`: `"Units are resetting/recalibrating now."`
 
 `400 text/plain` if `action` is missing or not one of the three values above.
@@ -820,11 +826,12 @@ All current Rotation items, in display order.
   { "type": "text", "value": "HELLO", "format": "", "targetDateTimeUnix": 0, "prefix": "", "suffix": "", "durationSeconds": 5, "alignment": "", "animationMode": "", "animationStaggerMs": -1 }
 ]
 ```
-- `type`: `text` \| `clock` \| `date` \| `countdown` \| `countup`.
+- `type`: `text` \| `clock` \| `date` \| `countdown` \| `countup` - any other value is rejected.
 - `value`: the literal text, only meaningful for `type=text`.
 - `format`: `clock`/`date` display format (same tokens as `POST /api/settings`'s
   `clockFormat`/`dateFormat`) - unused for other types.
-- `targetDateTimeUnix`: `countdown`/`countup` target date - unused for other types.
+- `targetDateTimeUnix`: `countdown`/`countup` target date (Unix seconds, at most 2147483647 =
+  2038-01-19) - unused for other types.
 - `prefix`/`suffix`: per-item text wrapped around the day count, `countdown`/`countup` only -
   independent of the standalone Countdown/Countup modes' own prefix/suffix settings.
 - `durationSeconds`: how long this item stays on screen before advancing to the next one.

@@ -127,7 +127,7 @@ void checkScheduledMessages() {
     }
   }
 
-  unsigned long currentTimeUnix = getRealUtcNow();
+  long currentTimeUnix = getRealUtcNow();
   for(int scheduledMessageIndex = 0; scheduledMessageIndex < scheduledMessages.size(); scheduledMessageIndex++) {
     ScheduledMessage scheduledMessage = scheduledMessages.get(scheduledMessageIndex);
 

@@ -318,6 +318,26 @@ bool writeAndVerifyPage(int bootAddress, uint16_t flashAddress, uint8_t* writeBu
   return false;
 }
 
+//Whether the image starts like an AVR application: a reset vector (jmp or rjmp) into the image
+//itself. A wrong small .bin (twiboot.bin, a web UI .gz) fits the size check, verifies fine and then
+//leaves the unit without a working app.
+bool isPlausibleUnitImage(const uint8_t head[4], size_t imageSize) {
+  uint16_t firstWord = head[0] | (head[1] << 8);
+  uint32_t targetByteAddress;
+  if (firstWord == 0x940C) { //jmp k (k < 64K words, the whole ATmega328P)
+    targetByteAddress = (uint32_t)(head[2] | (head[3] << 8)) * 2;
+  } else if ((firstWord & 0xF000) == 0xC000) { //rjmp k, forward from address 0
+    int16_t offset = (int16_t)((firstWord & 0x0FFF) << 4) >> 4; //sign-extend 12 bits
+    if (offset < 0) {
+      return false;
+    }
+    targetByteAddress = 2 + (uint32_t)offset * 2;
+  } else {
+    return false;
+  }
+  return targetByteAddress > 0 && targetByteAddress < imageSize;
+}
+
 bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
   JsonDocument result;
   result["unitIndex"] = unitIndex;
@@ -335,6 +355,17 @@ bool pushFirmwareToUnit(int unitIndex, String &resultJsonOut) {
     firmwareFile.close();
     result["success"] = false;
     result["error"] = F("Stored firmware file is empty.");
+    serializeJson(result, resultJsonOut);
+    return false;
+  }
+
+  //Checked before the unit is touched at all.
+  uint8_t imageHead[4];
+  if (firmwareFile.read(imageHead, sizeof(imageHead)) != sizeof(imageHead) || !isPlausibleUnitImage(imageHead, firmwareSize)) {
+    firmwareFile.close();
+    result["success"] = false;
+    result["error"] = F("The stored file isn't a unit application (Unit.bin) - it doesn't start with a reset vector into "
+      "the image. Upload Unit.bin, not twiboot.bin or another file. Nothing was written.");
     serializeJson(result, resultJsonOut);
     return false;
   }
