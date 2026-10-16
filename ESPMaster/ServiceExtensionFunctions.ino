@@ -22,6 +22,19 @@ int combinedUnitsAmount() {
   return total;
 }
 
+//Like combinedUnitsAmount(), but an extension that is unreachable right now still counts with its
+//last known unit count - the widest the display gets once it is back.
+int widestKnownUnitsAmount() {
+  int total = unitsAmount;
+  if (deviceRole != DEVICE_ROLE_PRIMARY || extensionLinkMode == EXTENSION_LINK_MODE_MIRROR) {
+    return total;
+  }
+  for (int i = 0; i < extensionDeviceCount; i++) {
+    total += extensionDevices[i].UnitsAmount;
+  }
+  return total;
+}
+
 //Polls each extension's GET /api/units every EXTENSION_HEALTH_CHECK_INTERVAL_MS (from loop()).
 void checkExtensionHealth() {
   if (deviceRole != DEVICE_ROLE_PRIMARY || extensionDeviceCount == 0) {

@@ -115,6 +115,11 @@ void checkScheduledMessages() {
     return;
   }
 
+  //No units detected: nothing can be shown - and the line count below would use width 0.
+  if (unitsAmount <= 0) {
+    return;
+  }
+
   //Never fire (and save) from a partially loaded list; retry the load at most every 10s.
   if (!scheduledMessagesComplete) {
     static unsigned long lastReloadAttemptAt = 0;
@@ -137,7 +142,9 @@ void checkScheduledMessages() {
       SerialPrintln(scheduledMessage.ShowIndefinitely ? F("Yes") : F("No"));
 
       //Too many lines can never be shown; keeping it would block every other due message forever.
-      if (isMessageTooLongToRender(scheduledMessage.Message)) {
+      //Judged at the widest known width: with an extension briefly unreachable it only has to wait
+      //(showText() refuses it until then), it isn't lost.
+      if (countSentenceLines(normalizeUmlautsForDisplay(scheduledMessage.Message), widestKnownUnitsAmount()) > DisplayJob::MAX_DISPLAY_LINES) {
         SerialPrintln(F("Scheduled Message needs more lines than fit and can never be shown - dropping it instead of blocking later messages"));
         scheduledMessages.remove(scheduledMessageIndex);
         scheduledMessagesGeneration++;

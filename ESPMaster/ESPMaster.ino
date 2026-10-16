@@ -2907,8 +2907,9 @@ void setup() {
 
       if (action == "connect") {
         //Connects without rebooting - the current connection drops at once;
-        //checkWifiConnectAttempt() reverts on failure.
-        if (wifiConnectPhase != WIFI_CONNECT_NONE) {
+        //checkWifiConnectAttempt() reverts on failure. Only a running attempt blocks: an unread result
+        //(the browser lost the device after it switched networks) blocked every later one until reboot.
+        if (wifiConnectPhase == WIFI_CONNECT_PENDING || wifiConnectPhase == WIFI_CONNECT_TESTING) {
           request->send(409, "text/plain", "A connection attempt is already in progress");
           return;
         }
